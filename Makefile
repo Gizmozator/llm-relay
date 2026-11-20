@@ -4,13 +4,17 @@
 IMAGE    ?= llm-relay:latest
 NAME     ?= llm-relay
 PORT     ?= 8080
+ADMIN_PORT ?= 8081
 BIN      ?= llm-relay
+REGISTRY ?= gitea.rantaeskola.fi/gizmoz/llm-relay
+VERSION  ?= latest
 
 # Export so child processes see these. Make variables are NOT exported by
 # default, and `docker compose` is a child process rather than a sub-make:
 # without this, `make docker-up PORT=9100` is silently ignored and the compose
 # default is used instead.
 export PORT
+export ADMIN_PORT
 export IMAGE
 
 .DEFAULT_GOAL := help
@@ -22,6 +26,9 @@ help: ## list all targets
 
 build: ## build the static binary -> $(BIN)
 	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BIN) ./cmd/$(BIN)
+
+web: ## build the web dashboard -> web/dist (Docker build does this automatically)
+	cd web && npm ci && npm run build
 
 test: ## run unit tests
 	go test ./...
@@ -37,8 +44,8 @@ fmt-check: ## fail if anything is unformatted
 
 lint: vet fmt-check ## static checks (vet + format)
 
-run: build ## run locally on http://127.0.0.1:$(PORT)
-	PORT=$(PORT) ./$(BIN)
+run: build ## run locally: relay on :$(PORT), dashboard on :$(ADMIN_PORT)
+	PORT=$(PORT) ADMIN_PORT=$(ADMIN_PORT) ./$(BIN)
 
 watch: build ## rebuild+restart on change (needs air: go install github.com/air-verse/air@latest)
 	air
@@ -53,6 +60,10 @@ clean: ## remove build artifacts
 
 docker-build: ## build the container image ($(IMAGE))
 	docker build -t $(IMAGE) .
+
+docker-release: docker-build ## build + push image to the Gitea registry (VERSION=x.y.z)
+	docker tag $(IMAGE) $(REGISTRY):$(VERSION)
+	docker push $(REGISTRY):$(VERSION)
 
 docker-up: ## start the stack detached
 	docker compose up -d --build

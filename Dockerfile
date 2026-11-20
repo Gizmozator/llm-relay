@@ -2,6 +2,15 @@
 # No `# syntax=` directive on purpose: it forces a network fetch of the BuildKit
 # frontend image and breaks offline builds. The built-in frontend is enough.
 
+# ---------- web dashboard ----------
+FROM node:24-alpine AS web
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY web/ ./
+RUN npm run build
+
+# ---------- go binary ----------
 FROM golang:1.26 AS build
 WORKDIR /src
 
@@ -13,6 +22,9 @@ COPY go.mod go.sum* ./
 RUN go mod download
 
 COPY . .
+
+# Fresh SPA build from the web stage wins over whatever dist was committed.
+COPY --from=web /web/dist ./web/dist
 
 # CGO off => fully static binary => tiny final image.
 ENV CGO_ENABLED=0 GOOS=linux
@@ -34,6 +46,7 @@ COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=build /usr/share/zoneinfo /usr/share/zoneinfo
 
 EXPOSE 8080
+EXPOSE 8081
 
 # NOTE: `scratch` has no /bin/sh and no /bin/bash, so `make docker-shell` cannot
 # work against this image. If you need an exec shell or a container HEALTHCHECK,

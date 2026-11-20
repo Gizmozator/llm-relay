@@ -1,65 +1,106 @@
 # llm-relay
 
-OpenAI-compatible relay for local LLMs: per-key token metering, pricing and a cost dashboard (Go + SQLite, Docker)
+OpenAI-compatible relay for local LLMs: per-key token metering, pricing and a cost dashboard (Go + SQLite, Docker).
 
-- **Stack:** Go
-- **Web service:** yes
-- **App URL:** http://localhost:8080 — default host port, override with `PORT=<n>`
+Front a local LLM (any OpenAI-compatible server — llama.cpp, halogen, Ollama, …) and share it
+with friends: each user logs into the dashboard, creates one API key per app, and every request
+is metered (input / output / cache-read / cache-write tokens, per session, per client IP) and
+priced. Admins manage backends, the model catalog and prices; users see their own usage and cost.
+
+- **Relay API:** `:8080` (`/v1/*`, `sk-` keys) — what friends' apps point at
+- **Dashboard + admin API:** `:8081` (JWT, embedded SPA) — the port to front with a reverse proxy
 - **Repo (SSH):** `ssh://git@gitea-host:8022/gizmoz/llm-relay.git`
 - **Repo (web):** http://gitea-host:3000/gizmoz/llm-relay
+- **Image registry:** `gitea.rantaeskola.fi/gizmoz/llm-relay`
+
+## Supported upstream dialects
+
+| Route | Dialect | Metered |
+|---|---|---|
+| `POST /v1/chat/completions` | OpenAI chat (streaming + tools) | yes |
+| `POST /v1/completions` | OpenAI text | yes |
+| `POST /v1/responses` | OpenAI Responses (Codex CLI) | yes |
+| `POST /v1/messages` | Anthropic Messages (Claude Code) | yes |
+| `POST /v1/messages/count_tokens` | Anthropic | pass-through |
+| `POST /v1/embeddings` | OpenAI embeddings | yes |
+| `GET /v1/models` | catalog listing | — |
+
+Usage is taken from upstream `usage` reports (streaming included); a chars/4 heuristic is the
+fallback and such rows are flagged `usage_estimated`. Sessions come from the `X-Session-Id`
+header or a derived conversation hash.
 
 ## Quickstart
 
 ```bash
-make build      # -> ./llm-relay
-make run        # local run
-make ci       # fmt + vet + tests
+cp .env.example .env      # set JWT_SECRET (+ optional bootstrap admin)
+make docker-up            # build image + start: relay :8080, dashboard :8081
 ```
+
+Open `http://localhost:8081`, log in, then: **Backends → add** the LLM server base URL
+(e.g. `http://engine-host:8731`) → **Sync** → pick discovered models → set prices →
+**My keys → create key** → point any OpenAI-compatible client at `http://localhost:8080/v1`
+with the key as bearer token.
+
+For local dev without Docker: `make web && make run`.
 
 ## Common tasks
 
 | task | command |
 |---|---|
 | list all targets | `make` |
-| build | `make build` |
-| test + vet | `make test` |
+| build binary / web dashboard | `make build` / `make web` |
 | full check (fmt + vet + tests) | `make ci` |
-| run locally | `make run` |
+| run locally | `make run` (relay `:PORT`, dashboard `:ADMIN_PORT`) |
 | build container | `make docker-build` |
-| start stack | `make docker-up` |
-| tail logs | `make docker-logs` |
-Run `make` with no arguments for the annotated target list.
+| start / stop local stack | `make docker-up` / `make docker-down` |
+| publish image to Gitea registry | `make docker-release VERSION=0.1.1` |
 
 ## Configuration
 
-All overridable via environment or a local `.env` file (see `.env.example`):
+Environment (or `.env`, see `.env.example`):
 
 | var | default | meaning |
 |---|---|---|
-| `PORT` | `8080` | **host** port you browse to. The container-internal port stays `8080` (own netns, cannot collide). |
-| `IMAGE` | `llm-relay:latest` | Container image tag. |
-| `TZ` | `Europe/Helsinki` | Timezone (tz database is copied into the runtime image). |
+| `PORT` / `LISTEN_ADDR` | `8080` | relay API port (host mapping) |
+| `ADMIN_PORT` / `ADMIN_ADDR` | `8081` | dashboard + `/api/*` port |
+| `DB_PATH` | `/data/llm-relay.db` | SQLite file (parent dir auto-created) |
+| `JWT_SECRET` | — **required** | dashboard JWT signing key |
+| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | — | bootstrap admin, first run on empty DB only |
+| `TRUST_PROXY_HEADERS` | `false` | trust `X-Forwarded-For` (set behind a reverse proxy) |
+| `PUBLIC_RELAY_URL` / `PUBLIC_DASHBOARD_URL` | — | public URLs shown in the dashboard for copying |
+| `TZ` | `Europe/Helsinki` | timezone |
 
-```bash
-make run PORT=9100
-make docker-up PORT=9100
-```
+## Deployment (prod-host via Dockge)
+
+`deploy/dockge-compose.yml` is the stack file for Dockge on prod-host: pulls
+`gitea.rantaeskola.fi/gizmoz/llm-relay:latest`, persists `/docker/llm-relay/data`,
+expects `JWT_SECRET` (+ admin bootstrap creds) in the stack `.env`. Publish a new
+version with `make docker-release VERSION=x.y.z` (needs `docker login gitea.rantaeskola.fi`).
 
 ## Layout
 
 ```
 llm-relay
-├── AGENTS.md            agent rules for this repo (keep it lean)
-├── Makefile             every build/run/test entry point
-├── Dockerfile           multi-stage build
-├── docker-compose.yml   local stack
+├── cmd/llm-relay/         main: config, wiring, dual-port servers, embedded SPA
+├── internal/config        env parsing
+├── internal/db            SQLite open + embedded migrations
+├── internal/auth          bcrypt, JWT, API key generation/hashing
+├── internal/store         all SQL: CRUD + usage aggregation
+├── internal/pricing       cost snapshots (integer micro-units)
+├── internal/usage         buffered usage recorder
+├── internal/proxy         dialect forwarder, SSE scanning, backend discovery
+├── internal/api           dashboard JSON API (user + admin)
+├── web/                   Vite + React + Chart.js dashboard (embedded via go:embed)
+├── deploy/                dockge-compose.yml (prod-host production stack)
 ├── docs/
-│   ├── workflows/       how we work: review, bug loop, feature loop, conventions
-│   └── plans/           implementation plans (current + archived)
-└── cmd/  internal/  (Go layout)
+│   ├── api-contract.md    authoritative HTTP API contract
+│   ├── workflows/         how we work: review, bug loop, feature loop, conventions
+│   └── plans/             implementation plans (current + archived)
+├── Dockerfile             node → go → scratch multi-stage
+└── docker-compose.yml     local stack
 ```
 
 ## Documentation
 
-Start at `AGENTS.md` for working rules, then `docs/workflows/README.md` for the
-runbooks, and `docs/plans/` for what is being built right now.
+Start at `AGENTS.md` for working rules, `docs/api-contract.md` for the HTTP surface,
+`docs/workflows/README.md` for the runbooks, and `docs/plans/` for what is being built now.

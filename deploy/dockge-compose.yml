@@ -1,0 +1,33 @@
+# llm-relay — Dockge stack for prod-host (prod-host).
+# Paste into Dockge as a new stack; create the .env next to it with the values
+# below before the first start. Data persists in /docker/llm-proxy/data.
+#
+# Required .env keys:
+#   JWT_SECRET        openssl rand -hex 32
+#   ADMIN_USERNAME    first-run bootstrap admin
+#   ADMIN_PASSWORD    first-run bootstrap admin password
+# Optional: RELAY_PORT / DASHBOARD_PORT overrides if 8080/8081 are taken on prod-host.
+
+services:
+  llm-relay:
+    image: gitea.rantaeskola.fi/gizmoz/llm-relay:latest
+    container_name: llm-relay
+    restart: unless-stopped
+    ports:
+      - "${RELAY_PORT:-8080}:8080"      # relay API (/v1/*) — friends' apps point here
+      - "${DASHBOARD_PORT:-8081}:8081"  # dashboard + admin API
+    environment:
+      TZ: Europe/Helsinki
+      JWT_SECRET: ${JWT_SECRET}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      # Keep false: the relay port is published directly to users, so
+      # X-Forwarded-For there is client-controlled and spoofable. Only enable
+      # if BOTH ports are reachable exclusively through your trusted proxy.
+      TRUST_PROXY_HEADERS: "false"
+      # Public URLs shown in the dashboard copy buttons (set to your real
+      # hostnames once the reverse proxy routes exist).
+      PUBLIC_RELAY_URL: ${PUBLIC_RELAY_URL:-}
+      PUBLIC_DASHBOARD_URL: ${PUBLIC_DASHBOARD_URL:-}
+    volumes:
+      - /docker/llm-proxy/data:/data

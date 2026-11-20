@@ -18,6 +18,12 @@ credentials*
 
 # --- runtime data / caches ---
 /data/
+
+# --- web dashboard build output ---
+# web/dist is committed (go:embed needs it on a fresh clone); rebuild via
+# `make web` refreshes it. The negation must come after the generic `dist/`
+# rule above to take effect.
+!web/dist/
 /cache/
 /tmp/
 *.log

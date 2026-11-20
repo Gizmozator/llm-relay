@@ -1,0 +1,4 @@
+node_modules/
+# NOTE: dist/ is deliberately NOT ignored — the built SPA is committed so a
+# fresh clone can `go build` (go:embed all:web/dist) without a node toolchain.
+# Rebuild + commit it together with frontend changes via `make web`.
