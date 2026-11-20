@@ -213,6 +213,10 @@ export function EditableText({
     <input
       className={`input input-inline${mono ? ' mono' : ''}`}
       value={v}
+      // Intrinsic width follows the value (tables size columns to max-content,
+      // where a bare input would fall back to its ~20-char default and clip
+      // long names). Grows live while editing.
+      size={Math.max(v.length, 10)}
       placeholder={placeholder}
       aria-label={ariaLabel}
       onFocus={() => {
