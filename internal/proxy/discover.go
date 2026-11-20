@@ -23,29 +23,35 @@ type ProbeResult struct {
 // Probe checks reachability via /health (open even when a key is required)
 // and lists model ids via /v1/models.
 func Probe(ctx context.Context, baseURL, apiKey string) ProbeResult {
-	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
-	defer cancel()
 	client := &http.Client{Timeout: 8 * time.Second}
 	res := ProbeResult{Models: []string{}}
 
 	base := strings.TrimRight(baseURL, "/")
 
-	// 1. /health — any HTTP answer counts as reachable; halogen reports a
-	// version here and keeps the route open even with auth enabled.
+	// 1. /health — informational (version only), so it gets its own short
+	// deadline and must never delay or fail the model list probe.
 	if req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/health", nil); err == nil {
-		if resp, err := client.Do(req); err == nil {
+		hctx, hcancel := context.WithTimeout(req.Context(), 3*time.Second)
+		defer hcancel()
+		if resp, err := client.Do(req.Clone(hctx)); err == nil {
 			defer resp.Body.Close()
-			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-			var v struct {
-				Version string `json:"version"`
-			}
-			if json.Unmarshal(body, &v) == nil && v.Version != "" {
-				res.Version = v.Version
+			// Only a successful answer is trusted: error pages can carry
+			// arbitrary JSON bodies.
+			if resp.StatusCode == http.StatusOK {
+				body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+				var v struct {
+					Version string `json:"version"`
+				}
+				if json.Unmarshal(body, &v) == nil && v.Version != "" {
+					res.Version = v.Version
+				}
 			}
 		}
 	}
 
-	// 2. /v1/models — the actual model list.
+	// 2. /v1/models — the actual model list, with its own full deadline.
+	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/v1/models", nil)
 	if err != nil {
 		res.Error = err.Error()

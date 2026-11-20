@@ -5,6 +5,7 @@ package proxy
 import (
 	"encoding/json"
 	"strings"
+	"unicode/utf8"
 
 	"llm-relay/internal/pricing"
 )
@@ -15,9 +16,10 @@ type sseAccum struct {
 	oai  pricing.Tokens // chat / completions / responses: last usage seen
 	oaiF bool
 
-	anthIn  pricing.Tokens // messages: from message_start
-	anthOut int64          // messages: from message_delta
-	anthF   bool
+	anthIn   pricing.Tokens // messages: from message_start
+	anthInF  bool
+	anthOut  int64 // messages: from message_delta
+	anthOutF bool
 
 	textChars int64
 	textWords int64
@@ -36,7 +38,8 @@ func (a *sseAccum) feed(payload []byte) {
 			Usage   *json.RawMessage `json:"usage"`
 			Choices []struct {
 				Delta struct {
-					Content string `json:"content"`
+					Content   string `json:"content"`
+					Reasoning string `json:"reasoning_content"`
 				} `json:"delta"`
 			} `json:"choices"`
 		}
@@ -50,6 +53,9 @@ func (a *sseAccum) feed(payload []byte) {
 		}
 		for _, c := range v.Choices {
 			a.addText(c.Delta.Content)
+			// reasoning models stream thinking here; the non-streaming
+			// equivalent counts it too (completionTextStats).
+			a.addText(c.Delta.Reasoning)
 		}
 
 	case EpCompletions:
@@ -85,8 +91,9 @@ func (a *sseAccum) feed(payload []byte) {
 		switch v.Type {
 		case "response.output_text.delta":
 			a.addText(v.Delta)
-		case "response.completed":
-			if v.Response != nil {
+		case "response.completed", "response.incomplete":
+			// incomplete (e.g. max_tokens hit) still carries real usage.
+			if v.Response != nil && len(v.Response.Usage) > 0 {
 				wrapped := []byte(`{"usage":` + string(v.Response.Usage) + `}`)
 				if tok, ok := ExtractUsage(EpResponses, wrapped); ok {
 					a.oai, a.oaiF = tok, true
@@ -113,7 +120,7 @@ func (a *sseAccum) feed(payload []byte) {
 			if v.Message != nil && len(v.Message.Usage) > 0 {
 				wrapped := []byte(`{"usage":` + string(v.Message.Usage) + `}`)
 				if tok, ok := ExtractUsage(EpMessages, wrapped); ok {
-					a.anthIn, a.anthF = tok, true
+					a.anthIn, a.anthInF = tok, true
 				}
 			}
 		case "message_delta":
@@ -126,7 +133,7 @@ func (a *sseAccum) feed(payload []byte) {
 				}
 				if json.Unmarshal(wrapped, &probe) == nil && probe.Usage != nil {
 					a.anthOut = probe.Usage.Output
-					a.anthF = true
+					a.anthOutF = true
 				}
 			}
 		case "content_block_delta":
@@ -141,7 +148,10 @@ func (a *sseAccum) addText(s string) {
 	if s == "" {
 		return
 	}
-	a.textChars += int64(len(s))
+	// rune count, not bytes: the estimator's divisor is chars-per-token and
+	// multi-byte output must not inflate it. (Words split across chunk
+	// boundaries count twice — a small upward bias on the word floor.)
+	a.textChars += int64(utf8.RuneCountInString(s))
 	a.textWords += int64(len(strings.Fields(s)))
 }
 
@@ -149,7 +159,10 @@ func (a *sseAccum) addText(s string) {
 func (a *sseAccum) result() (pricing.Tokens, bool) {
 	switch a.endpoint {
 	case EpMessages:
-		if !a.anthF {
+		// A half-captured usage (message_start without message_delta, or
+		// the reverse) is not definitive: claiming it would bill 0 on the
+		// missing side instead of letting the caller estimate.
+		if !a.anthInF || !a.anthOutF {
 			return pricing.Tokens{}, false
 		}
 		tok := a.anthIn

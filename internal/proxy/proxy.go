@@ -42,8 +42,16 @@ func New(db *sql.DB, rec *usage.Recorder, trustProxyHeaders bool) *Handler {
 		DB:                db,
 		Rec:               rec,
 		TrustProxyHeaders: trustProxyHeaders,
-		// No client timeout: streams may run for many minutes.
-		Client: &http.Client{},
+		// No overall client timeout: generations may run for many minutes
+		// (OCR sends 10+ min non-streaming requests). Bounded at the
+		// transport level instead: dial and TLS handshake only.
+		Client: &http.Client{
+			Transport: &http.Transport{
+				DialContext:         (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+				TLSHandshakeTimeout: 10 * time.Second,
+				MaxIdleConnsPerHost: 8,
+			},
+		},
 	}
 }
 
@@ -112,9 +120,13 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request, endpoint string
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxBody))
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "could not read request body")
+		return
+	}
+	if int64(len(body)) > maxBody {
+		writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
 		return
 	}
 
@@ -166,10 +178,7 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request, endpoint string
 	defer resp.Body.Close()
 
 	stream := strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream")
-	if ct := resp.Header.Get("Content-Type"); ct != "" {
-		w.Header().Set("Content-Type", ct)
-	}
-	w.WriteHeader(resp.StatusCode)
+	ct := resp.Header.Get("Content-Type")
 
 	var (
 		tok       pricing.Tokens
@@ -181,6 +190,11 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request, endpoint string
 
 	if resp.StatusCode == http.StatusOK {
 		if stream {
+			// Headers must go out before the first chunk.
+			if ct != "" {
+				w.Header().Set("Content-Type", ct)
+			}
+			w.WriteHeader(status)
 			acc := newSSEAccum(endpoint)
 			status = h.copyStream(w, resp.Body, acc, r)
 			switch status {
@@ -197,22 +211,38 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request, endpoint string
 				estimated = true
 			}
 		} else {
-			respBody, rerr := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+			// Buffer the whole body before committing the status line: a
+			// mid-body failure then surfaces as an error instead of a silent
+			// 200 with a truncated JSON body.
+			respBody, rerr := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 			switch {
 			case rerr != nil:
 				status = http.StatusInternalServerError
 				errMsg = "reading upstream response: " + rerr.Error()
+				writeError(w, status, "upstream response failed")
+			case int64(len(respBody)) > maxBody:
+				status = http.StatusBadGateway
+				errMsg = "upstream response too large"
+				writeError(w, status, "upstream response too large")
 			default:
+				if ct != "" {
+					w.Header().Set("Content-Type", ct)
+				}
+				w.WriteHeader(status)
+				_, _ = w.Write(respBody)
 				if tok, found = ExtractUsage(endpoint, respBody); !found {
 					chars, words := completionTextStats(endpoint, respBody)
 					tok = EstimateTokens(int64(len(body)), chars, words)
 					estimated = true
 				}
 			}
-			_, _ = w.Write(respBody)
 		}
 	} else {
 		// Pass the upstream error body through untouched; zero tokens billed.
+		if ct != "" {
+			w.Header().Set("Content-Type", ct)
+		}
+		w.WriteHeader(status)
 		_, _ = io.Copy(w, io.LimitReader(resp.Body, maxBody))
 		errMsg = fmt.Sprintf("upstream status %d", resp.StatusCode)
 	}
@@ -225,36 +255,35 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request, endpoint string
 		tok, costs, stream, estimated, status, errMsg)
 }
 
-// copyStream relays SSE bytes verbatim, flushing every chunk, while the
-// accumulator scans data payloads. Returns 499 on client hang-up, 500 if the
-// upstream stream broke, 200 on clean EOF.
+// copyStream relays SSE bytes line-by-line, flushing every chunk, while the
+// accumulator scans data payloads. Lines are capped at 16 MiB (a longer
+// "line" is a broken or hostile upstream). Returns 499 on client hang-up,
+// 500 if the upstream stream broke, 200 on clean EOF.
 func (h *Handler) copyStream(w http.ResponseWriter, body io.Reader, acc *sseAccum, r *http.Request) int {
 	fl, _ := w.(http.Flusher)
-	br := bufio.NewReader(body)
-	for {
-		line, err := br.ReadBytes('\n')
-		if len(line) > 0 {
-			if _, werr := w.Write(line); werr != nil {
-				return statusClientClosed
-			}
-			if fl != nil {
-				fl.Flush()
-			}
-			if trimmed := bytes.TrimSpace(line); bytes.HasPrefix(trimmed, []byte("data:")) {
-				acc.feed(bytes.TrimSpace(trimmed[5:]))
-			}
+	sc := bufio.NewScanner(body)
+	sc.Buffer(make([]byte, 0, 64<<10), 16<<20)
+	for sc.Scan() {
+		line := append(sc.Bytes(), '\n')
+		if _, werr := w.Write(line); werr != nil {
+			return statusClientClosed
 		}
-		if err != nil {
-			switch {
-			case errors.Is(err, io.EOF):
-				return http.StatusOK
-			case errors.Is(err, context.Canceled) || errors.Is(r.Context().Err(), context.Canceled):
-				return statusClientClosed
-			default:
-				return http.StatusInternalServerError
-			}
+		if fl != nil {
+			fl.Flush()
+		}
+		if trimmed := bytes.TrimSpace(line); bytes.HasPrefix(trimmed, []byte("data:")) {
+			acc.feed(bytes.TrimSpace(trimmed[5:]))
 		}
 	}
+	if err := sc.Err(); err != nil {
+		switch {
+		case errors.Is(err, context.Canceled) || errors.Is(r.Context().Err(), context.Canceled):
+			return statusClientClosed
+		default:
+			return http.StatusInternalServerError
+		}
+	}
+	return http.StatusOK
 }
 
 func (h *Handler) record(record bool, start time.Time, u *store.User, k *store.APIKey, r *http.Request,
@@ -308,7 +337,11 @@ func (h *Handler) authKey(r *http.Request) (*store.APIKey, *store.User, error) {
 func (h *Handler) clientIP(r *http.Request) string {
 	if h.TrustProxyHeaders {
 		if xf := r.Header.Get("X-Forwarded-For"); xf != "" {
-			return strings.TrimSpace(strings.Split(xf, ",")[0])
+			// Rightmost entry: everything to its left was appended by
+			// clients or earlier hops and is spoofable; the rightmost one
+			// was appended by our own reverse proxy.
+			parts := strings.Split(xf, ",")
+			return strings.TrimSpace(parts[len(parts)-1])
 		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -322,7 +355,8 @@ func (h *Handler) clientIP(r *http.Request) string {
 // chat requests, asks the upstream to include usage in the final chunk.
 func rewriteBody(body []byte, upstreamModel, endpoint string, stream bool) []byte {
 	var m map[string]json.RawMessage
-	if json.Unmarshal(body, &m) != nil {
+	if json.Unmarshal(body, &m) != nil || m == nil {
+		// non-JSON or JSON null body: nothing to rewrite
 		return body
 	}
 	mu, err := json.Marshal(upstreamModel)
@@ -345,7 +379,10 @@ func rewriteBody(body []byte, upstreamModel, endpoint string, stream bool) []byt
 func forceIncludeUsage(raw json.RawMessage) json.RawMessage {
 	opts := map[string]json.RawMessage{}
 	if len(raw) > 0 {
-		_ = json.Unmarshal(raw, &opts)
+		// "null" unmarshals to a nil map — reset it before writing.
+		if err := json.Unmarshal(raw, &opts); err != nil || opts == nil {
+			opts = map[string]json.RawMessage{}
+		}
 	}
 	opts["include_usage"] = json.RawMessage("true")
 	if out, err := json.Marshal(opts); err == nil {
@@ -361,7 +398,22 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {
+	// OpenAI-style error type, chosen by status so clients can branch on it.
+	typ := "invalid_request_error"
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		typ = "authentication_error"
+	case http.StatusNotFound:
+		typ = "not_found_error"
+	case http.StatusRequestEntityTooLarge:
+		typ = "request_too_large"
+	case http.StatusTooManyRequests:
+		typ = "rate_limit_error"
+	case http.StatusInternalServerError, http.StatusBadGateway,
+		http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		typ = "api_error"
+	}
 	writeJSON(w, status, map[string]any{
-		"error": map[string]string{"message": msg, "type": "invalid_request_error"},
+		"error": map[string]string{"message": msg, "type": typ},
 	})
 }

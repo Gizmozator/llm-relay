@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"llm-relay/internal/pricing"
 )
@@ -198,7 +199,7 @@ func firstUserInResponsesInput(raw json.RawMessage) string {
 // non-streaming response body, for the estimation fallback.
 func completionTextStats(endpoint string, body []byte) (chars, words int64) {
 	add := func(s string) {
-		chars += int64(len(s))
+		chars += int64(utf8.RuneCountInString(s))
 		words += int64(len(strings.Fields(s)))
 	}
 	switch endpoint {
