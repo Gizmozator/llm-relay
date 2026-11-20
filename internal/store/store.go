@@ -533,7 +533,7 @@ func ListPublicModels(db *sql.DB) ([]Model, error) {
 	return out, rows.Err()
 }
 
-// UpdateModelMeta sets the admin-managed capacity fields (nil = leave).
+// UpdateModelMeta sets the admin-managed model meta fields (nil = leave).
 // A manually set bench_tok_per_s clears bench_at: the stored value is then a
 // configured speed, not a measured benchmark result.
 func UpdateModelMeta(db *sql.DB, id int64, contextLength, concurrencyLimit *int64, benchTokPerS *float64) error {

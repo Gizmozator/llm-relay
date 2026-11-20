@@ -374,6 +374,7 @@ export const api = {
       price_cache_write: number;
       context_length: number;
       concurrency_limit: number;
+      bench_tok_per_s: number;
     }>,
   ) => request<CatalogModel>('PATCH', `/api/admin/models/${id}`, { body: patch }),
   deleteModel: (id: number) => request<void>('DELETE', `/api/admin/models/${id}`),

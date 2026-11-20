@@ -47,7 +47,7 @@ Proxy requests may carry `X-Session-Id: <string>`; without it the relay derives 
 ### Admin — models (public catalog)
 - `GET /api/admin/models` → `{"models":[{"id":1,"name":"halogen","backend_id":1,"backend_name":"halogen","upstream_model":"halogen-qwen3.8-flash-next","enabled":true,"price_in":100,"price_out":200,"price_cache_read":10,"price_cache_write":0,"context_length":262144,"concurrency_limit":4,"bench_tok_per_s":41.2,"bench_at":"...|"}]}`
 - `PATCH /api/admin/models/{id}` — any of `{"name","enabled","price_in","price_out","price_cache_read","price_cache_write","context_length","concurrency_limit","bench_tok_per_s"}` → model object. `bench_tok_per_s` (float ≥0) sets the speed manually and clears `bench_at` (configured value, not a measured benchmark).
-- `POST /api/admin/models/{id}/benchmark` — runs one timed fixed-prompt generation against the upstream and stores the speed; may take minutes; `409` while another benchmark runs. → `{"bench_tok_per_s":41.2,"completion_tokens":700,"seconds":17.0,"bench_at":"..."}`
+- `POST /api/admin/models/{id}/benchmark` — runs one timed **streaming** generation (natural-prose prompt; speed = completion tokens over first→last token, so speculative/MTP decoding is measured at realistic acceptance rates) against the upstream and stores the speed; may take minutes; `409` while another benchmark runs. → `{"bench_tok_per_s":41.2,"completion_tokens":700,"seconds":17.0,"bench_at":"..."}`
 - `DELETE /api/admin/models/{id}` → `204`
 
 ### Admin — settings

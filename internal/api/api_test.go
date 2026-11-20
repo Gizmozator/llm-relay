@@ -568,9 +568,22 @@ func TestUserMultiplierAndModelMeta(t *testing.T) {
 	}
 
 	// Model meta: context length + concurrency on a real backend/model.
+	// Fake upstream: streams SSE deltas + a final usage chunk (the
+	// benchmark requests stream=true with include_usage).
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"choices":[{"message":{"content":"1 2 3"}}],"usage":{"prompt_tokens":10,"completion_tokens":100}}`))
+		w.Header().Set("Content-Type", "text/event-stream")
+		f, _ := w.(http.Flusher)
+		for i := 0; i < 10; i++ {
+			fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":\"word%d \",\"role\":\"assistant\"}}]}\n\n", i)
+			if f != nil {
+				f.Flush()
+			}
+		}
+		fmt.Fprint(w, "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":100}}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		if f != nil {
+			f.Flush()
+		}
 	}))
 	t.Cleanup(up.Close)
 	if _, err := store.CreateBackend(e.db, "bench", up.URL, ""); err != nil {

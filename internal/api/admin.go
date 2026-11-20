@@ -2,6 +2,7 @@
 package api
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -430,9 +431,11 @@ func (s *Server) AdminUpdateModel(w http.ResponseWriter, r *http.Request, c *aut
 	}
 }
 
-// AdminBenchmarkModel runs a fixed generation against the model's upstream
-// and stores the measured completion speed. Deliberately serialized: parallel
-// benchmarks would skew each other's tokens/s numbers.
+// AdminBenchmarkModel runs one timed streaming generation against the model's
+// upstream and stores the measured decode speed (first→last token, natural
+// prose prompt) so speculative/MTP decoding is measured at realistic
+// acceptance rates. Deliberately serialized: parallel benchmarks would skew
+// each other's tokens/s numbers.
 var benchMu sync.Mutex
 
 func (s *Server) AdminBenchmarkModel(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
@@ -463,13 +466,20 @@ func (s *Server) AdminBenchmarkModel(w http.ResponseWriter, r *http.Request, c *
 
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 	defer cancel()
+	// Natural-prose prompt on purpose: trivially predictable text (counting,
+	// repetition) lets speculative/MTP decoding accept nearly every draft
+	// token, inflating the measurement well past real-traffic speed. The
+	// request streams so the timer covers only first-token → last-token
+	// (decode time), not prefill.
 	buf, _ := json.Marshal(map[string]any{
 		"model": m.UpstreamModel,
 		"messages": []map[string]string{
-			{"role": "user", "content": "Count from 1 to 400, one number per line. No commentary."},
+			{"role": "user", "content": "Write a detailed, original essay about how harbor cities changed when steam shipping replaced sailing ships. Discuss trade, migration, shipyard work and daily life, with concrete examples. Write in flowing prose without lists."},
 		},
-		"max_tokens":  700,
-		"temperature": 0,
+		"max_tokens":     700,
+		"temperature":    0,
+		"stream":         true,
+		"stream_options": map[string]any{"include_usage": true},
 	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		strings.TrimRight(b.BaseURL, "/")+"/v1/chat/completions", bytes.NewReader(buf))
@@ -481,29 +491,72 @@ func (s *Server) AdminBenchmarkModel(w http.ResponseWriter, r *http.Request, c *
 	if b.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+b.APIKey)
 	}
-	start := time.Now()
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "upstream request failed")
 		return
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 		writeErr(w, http.StatusBadGateway, fmt.Sprintf("upstream returned HTTP %d", resp.StatusCode))
 		return
 	}
-	var parsed struct {
-		Usage struct {
-			CompletionTokens int64 `json:"completion_tokens"`
-		} `json:"usage"`
+	var (
+		completion int64
+		firstTok   time.Time
+		lastTok    time.Time
+		sc         = bufio.NewScanner(resp.Body)
+	)
+	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
+	for sc.Scan() {
+		line := sc.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		payload := strings.TrimPrefix(line, "data: ")
+		if payload == "[DONE]" {
+			break
+		}
+		var chunk struct {
+			Usage *struct {
+				CompletionTokens int64 `json:"completion_tokens"`
+			} `json:"usage"`
+			Choices []struct {
+				Delta struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if json.Unmarshal([]byte(payload), &chunk) != nil {
+			continue
+		}
+		if chunk.Usage != nil && chunk.Usage.CompletionTokens > 0 {
+			completion = chunk.Usage.CompletionTokens
+		}
+		if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
+			now := time.Now()
+			if firstTok.IsZero() {
+				firstTok = now
+			}
+			lastTok = now
+		}
 	}
-	if json.Unmarshal(body, &parsed) != nil || parsed.Usage.CompletionTokens <= 0 {
-		writeErr(w, http.StatusBadGateway, "upstream returned no usage; cannot benchmark")
+	if sc.Err() != nil {
+		writeErr(w, http.StatusBadGateway, "upstream stream failed")
 		return
 	}
-	secs := time.Since(start).Seconds()
-	tokPerS := float64(parsed.Usage.CompletionTokens) / secs
+	if completion <= 0 || firstTok.IsZero() || !lastTok.After(firstTok) {
+		writeErr(w, http.StatusBadGateway, "upstream returned no usage or too few streamed tokens; cannot benchmark")
+		return
+	}
+	// first→last spans completion-1 token intervals.
+	n := completion - 1
+	if n < 1 {
+		n = 1
+	}
+	secs := lastTok.Sub(firstTok).Seconds()
+	tokPerS := float64(n) / secs
 	at := time.Now().UTC().Format(time.RFC3339)
 	if err := store.UpdateModelBench(s.DB, id, tokPerS, at); err != nil {
 		writeErr(w, http.StatusInternalServerError, "benchmark save failed")
@@ -511,7 +564,7 @@ func (s *Server) AdminBenchmarkModel(w http.ResponseWriter, r *http.Request, c *
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"bench_tok_per_s":   tokPerS,
-		"completion_tokens": parsed.Usage.CompletionTokens,
+		"completion_tokens": completion,
 		"seconds":           secs,
 		"bench_at":          at,
 	})
