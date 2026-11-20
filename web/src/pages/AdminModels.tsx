@@ -23,6 +23,7 @@ type ModelPatch = {
   price_cache_write?: number;
   context_length?: number;
   concurrency_limit?: number;
+  bench_tok_per_s?: number;
 };
 
 const PRICE_FIELDS = [
@@ -167,8 +168,15 @@ export default function AdminModelsPage() {
                         onCommit={(n) => patch(m.id, { concurrency_limit: Math.round(n) })}
                       />
                     </td>
-                    <td className="num" title={m.bench_at ? fmtDateTime(m.bench_at) : undefined}>
-                      {m.bench_tok_per_s ? m.bench_tok_per_s.toFixed(1) : '—'}
+                    <td
+                      className="num"
+                      title={m.bench_at ? `Benchmarked ${fmtDateTime(m.bench_at)}` : 'Manual value'}
+                    >
+                      <EditableNumber
+                        display={m.bench_tok_per_s ? m.bench_tok_per_s.toFixed(1) : '0'}
+                        ariaLabel={`Speed (tok/s) of ${m.name}`}
+                        onCommit={(n) => patch(m.id, { bench_tok_per_s: n })}
+                      />
                     </td>
                     <td className="actions">
                       <button

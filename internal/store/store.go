@@ -534,7 +534,9 @@ func ListPublicModels(db *sql.DB) ([]Model, error) {
 }
 
 // UpdateModelMeta sets the admin-managed capacity fields (nil = leave).
-func UpdateModelMeta(db *sql.DB, id int64, contextLength, concurrencyLimit *int64) error {
+// A manually set bench_tok_per_s clears bench_at: the stored value is then a
+// configured speed, not a measured benchmark result.
+func UpdateModelMeta(db *sql.DB, id int64, contextLength, concurrencyLimit *int64, benchTokPerS *float64) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -547,6 +549,11 @@ func UpdateModelMeta(db *sql.DB, id int64, contextLength, concurrencyLimit *int6
 	}
 	if concurrencyLimit != nil {
 		if _, err := tx.Exec(`UPDATE models SET concurrency_limit=? WHERE id=?`, *concurrencyLimit, id); err != nil {
+			return err
+		}
+	}
+	if benchTokPerS != nil {
+		if _, err := tx.Exec(`UPDATE models SET bench_tok_per_s=?, bench_at=NULL WHERE id=?`, *benchTokPerS, id); err != nil {
 			return err
 		}
 	}

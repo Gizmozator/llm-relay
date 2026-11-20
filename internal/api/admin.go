@@ -373,14 +373,15 @@ func (s *Server) AdminUpdateModel(w http.ResponseWriter, r *http.Request, c *aut
 		return
 	}
 	var in struct {
-		Name             *string `json:"name"`
-		Enabled          *bool   `json:"enabled"`
-		PriceIn          *int64  `json:"price_in"`
-		PriceOut         *int64  `json:"price_out"`
-		PriceCacheRead   *int64  `json:"price_cache_read"`
-		PriceCacheWrite  *int64  `json:"price_cache_write"`
-		ContextLength    *int64  `json:"context_length"`
-		ConcurrencyLimit *int64  `json:"concurrency_limit"`
+		Name             *string  `json:"name"`
+		Enabled          *bool    `json:"enabled"`
+		PriceIn          *int64   `json:"price_in"`
+		PriceOut         *int64   `json:"price_out"`
+		PriceCacheRead   *int64   `json:"price_cache_read"`
+		PriceCacheWrite  *int64   `json:"price_cache_write"`
+		ContextLength    *int64   `json:"context_length"`
+		ConcurrencyLimit *int64   `json:"concurrency_limit"`
+		BenchTokPerS     *float64 `json:"bench_tok_per_s"`
 	}
 	if err := decode(r, &in); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON")
@@ -406,10 +407,14 @@ func (s *Server) AdminUpdateModel(w http.ResponseWriter, r *http.Request, c *aut
 			return
 		}
 	}
+	if in.BenchTokPerS != nil && *in.BenchTokPerS < 0 {
+		writeErr(w, http.StatusBadRequest, "bench_tok_per_s cannot be negative")
+		return
+	}
 	m, err := store.UpdateModel(s.DB, id, in.Name, in.Enabled,
 		[4]*int64{in.PriceIn, in.PriceOut, in.PriceCacheRead, in.PriceCacheWrite})
-	if err == nil && (in.ContextLength != nil || in.ConcurrencyLimit != nil) {
-		if err = store.UpdateModelMeta(s.DB, id, in.ContextLength, in.ConcurrencyLimit); err == nil {
+	if err == nil && (in.ContextLength != nil || in.ConcurrencyLimit != nil || in.BenchTokPerS != nil) {
+		if err = store.UpdateModelMeta(s.DB, id, in.ContextLength, in.ConcurrencyLimit, in.BenchTokPerS); err == nil {
 			m, err = store.ModelByID(s.DB, id)
 		}
 	}

@@ -17,7 +17,7 @@ All `/api/*` except login require `Authorization: Bearer <jwt>`. The embedded SP
 - `GET /api/info` → `{"relay_url":"https://relay.example.fi/v1","dashboard_url":"https://llm-relay.example.fi","currency":"EUR"}` (`currency` defaults to `EUR` when unset; empty `relay_url`/`dashboard_url` = not configured; `relay_url` is what users put in their apps)
 
 ### Model catalog (all users)
-- `GET /api/models` → `{"models":[{"name":"Qwen3.8-flash-next","price_in":100,"price_out":200,"price_cache_read":10,"price_cache_write":40,"context_length":262144,"concurrency_limit":4,"bench_tok_per_s":41.2,"bench_at":"2026-11-20T12:00:00Z"}]}` — models usable right now (enabled model on an enabled backend); prices are micro-units per 1M tokens; `context_length`/`concurrency_limit` are admin-set (0 = unset); `bench_tok_per_s`/`bench_at` are the last admin benchmark (0/"" = never). Internal wiring (backend, upstream id) is not exposed.
+- `GET /api/models` → `{"models":[{"name":"Qwen3.8-flash-next","price_in":100,"price_out":200,"price_cache_read":10,"price_cache_write":40,"context_length":262144,"concurrency_limit":4,"bench_tok_per_s":41.2,"bench_at":"2026-11-20T12:00:00Z"}]}` — models usable right now (enabled model on an enabled backend); prices are micro-units per 1M tokens; `context_length`/`concurrency_limit` are admin-set (0 = unset); `bench_tok_per_s`/`bench_at` are the last admin benchmark (0/"" = never); `bench_tok_per_s` may also be set manually by an admin, which leaves `bench_at` empty. Internal wiring (backend, upstream id) is not exposed.
 
 ### API keys (own)
 - `GET /api/keys` → `{"keys":[{"id":1,"name":"laptop","prefix":"sk-abcd1234","created_at":"...","last_used_at":"...|null","revoked_at":"...|null"}]}`
@@ -46,7 +46,7 @@ Proxy requests may carry `X-Session-Id: <string>`; without it the relay derives 
 
 ### Admin — models (public catalog)
 - `GET /api/admin/models` → `{"models":[{"id":1,"name":"halogen","backend_id":1,"backend_name":"halogen","upstream_model":"halogen-qwen3.8-flash-next","enabled":true,"price_in":100,"price_out":200,"price_cache_read":10,"price_cache_write":0,"context_length":262144,"concurrency_limit":4,"bench_tok_per_s":41.2,"bench_at":"...|"}]}`
-- `PATCH /api/admin/models/{id}` — any of `{"name","enabled","price_in","price_out","price_cache_read","price_cache_write","context_length","concurrency_limit"}` → model object
+- `PATCH /api/admin/models/{id}` — any of `{"name","enabled","price_in","price_out","price_cache_read","price_cache_write","context_length","concurrency_limit","bench_tok_per_s"}` → model object. `bench_tok_per_s` (float ≥0) sets the speed manually and clears `bench_at` (configured value, not a measured benchmark).
 - `POST /api/admin/models/{id}/benchmark` — runs one timed fixed-prompt generation against the upstream and stores the speed; may take minutes; `409` while another benchmark runs. → `{"bench_tok_per_s":41.2,"completion_tokens":700,"seconds":17.0,"bench_at":"..."}`
 - `DELETE /api/admin/models/{id}` → `204`
 

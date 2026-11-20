@@ -606,6 +606,20 @@ func TestUserMultiplierAndModelMeta(t *testing.T) {
 		t.Errorf("benchmark result: %+v", br)
 	}
 
+	// Manual speed override: negative → 400; a set value is stored and
+	// bench_at is cleared (configured speed, not a measured result).
+	if resp := e.do(t, "PATCH", "/api/admin/models/1", `{"bench_tok_per_s":-1}`, admin); resp.StatusCode != 400 {
+		resp.Body.Close()
+		t.Errorf("negative speed PATCH = %d, want 400", resp.StatusCode)
+	}
+	resp = e.do(t, "PATCH", "/api/admin/models/1", `{"bench_tok_per_s":70}`, admin)
+	var sm store.Model
+	json.NewDecoder(resp.Body).Decode(&sm)
+	resp.Body.Close()
+	if sm.BenchTokPerS != 70 || sm.BenchAt != "" {
+		t.Errorf("manual speed = %v/%q, want 70 and cleared bench_at", sm.BenchTokPerS, sm.BenchAt)
+	}
+
 	// Public catalog carries meta + benchmark for users.
 	resp = e.do(t, "GET", "/api/models", "", bob)
 	var cat struct {
