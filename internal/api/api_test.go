@@ -730,3 +730,39 @@ func TestLastAdminGuard(t *testing.T) {
 	}
 	resp.Body.Close()
 }
+
+func TestUsageInputValidation(t *testing.T) {
+	e := newTestEnv(t, http.NotFoundHandler())
+	admin := login(t, e)
+
+	for _, q := range []string{
+		"from=2026-13-45",               // impossible date
+		"from=2026-2-3",                 // unpadded
+		"from=2026-05-01&to=2026-04-01", // inverted range
+		"group_by=bogus",
+	} {
+		resp := e.do(t, "GET", "/api/usage/summary?"+q, "", admin)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("summary ?%s: %d, want 400", q, resp.StatusCode)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if bytes.Contains(body, []byte("sql")) || bytes.Contains(body, []byte("SELECT")) {
+			t.Errorf("summary ?%s leaked internals: %s", q, body)
+		}
+	}
+	// Detail route shares the filter + adds pagination.
+	for _, q := range []string{"page=abc", "page=99999999999999", "page_size=xyz", "from=not-a-date"} {
+		if resp := e.do(t, "GET", "/api/usage/detail?"+q, "", admin); resp.StatusCode != 400 {
+			t.Errorf("detail ?%s: %d, want 400", q, resp.StatusCode)
+		} else {
+			resp.Body.Close()
+		}
+	}
+	// Valid inputs still work.
+	if resp := e.do(t, "GET", "/api/usage/summary?from=2026-01-01&to=2026-12-31&group_by=session", "", admin); resp.StatusCode != 200 {
+		t.Errorf("valid summary: %d, want 200", resp.StatusCode)
+	} else {
+		resp.Body.Close()
+	}
+}

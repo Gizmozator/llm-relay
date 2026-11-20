@@ -125,6 +125,13 @@ var groupExprs = map[string]string{
 	"session":  `COALESCE(substr(u.session_id, 1, 12), '(none)')`,
 }
 
+// ValidGroupBy reports whether groupBy is a supported bucket dimension.
+// Handlers validate with it so a bad value is a 400, not a store error.
+func ValidGroupBy(groupBy string) bool {
+	_, ok := groupExprs[groupBy]
+	return ok
+}
+
 // SummarizeUsage returns totals plus one bucket per group_by dimension.
 func SummarizeUsage(db *sql.DB, f *UsageFilter, groupBy string) (UsageGroup, []UsageGroup, error) {
 	expr, ok := groupExprs[groupBy]

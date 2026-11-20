@@ -7,7 +7,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -334,13 +333,15 @@ func (s *Server) RevokeKey(w http.ResponseWriter, r *http.Request, c *auth.Claim
 
 // ---------------------------------------------------------------- usage
 
-var dateRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+// maxPage bounds the page parameter so (page-1)*page_size cannot overflow
+// the int64 OFFSET (page_size is clamped to 500 in the store).
+const maxPage = 10_000_000
 
 func usageFilter(r *http.Request, scopeUserID int64) (*store.UsageFilter, error) {
 	f := &store.UsageFilter{UserID: scopeUserID}
 	// Contract default: last 30 days when a bound is omitted.
 	if v := r.URL.Query().Get("from"); v != "" {
-		if !dateRe.MatchString(v) {
+		if _, err := time.Parse("2006-01-02", v); err != nil {
 			return nil, errors.New("from must be YYYY-MM-DD")
 		}
 		f.From = v
@@ -348,12 +349,15 @@ func usageFilter(r *http.Request, scopeUserID int64) (*store.UsageFilter, error)
 		f.From = time.Now().UTC().AddDate(0, 0, -29).Format("2006-01-02")
 	}
 	if v := r.URL.Query().Get("to"); v != "" {
-		if !dateRe.MatchString(v) {
+		if _, err := time.Parse("2006-01-02", v); err != nil {
 			return nil, errors.New("to must be YYYY-MM-DD")
 		}
 		f.To = v
 	} else {
 		f.To = time.Now().UTC().Format("2006-01-02")
+	}
+	if f.From > f.To {
+		return nil, errors.New("from must not be after to")
 	}
 	if v := r.URL.Query().Get("key_id"); v != "" {
 		id, err := strconv.ParseInt(v, 10, 64)
@@ -392,9 +396,13 @@ func (s *Server) UsageSummary(w http.ResponseWriter, r *http.Request, c *auth.Cl
 	if groupBy == "" {
 		groupBy = "day"
 	}
+	if !store.ValidGroupBy(groupBy) {
+		writeErr(w, http.StatusBadRequest, "bad group_by")
+		return
+	}
 	totals, groups, err := store.SummarizeUsage(s.DB, f, groupBy)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	currency, _ := store.GetSetting(s.DB, "currency")
@@ -423,8 +431,20 @@ func (s *Server) UsageDetail(w http.ResponseWriter, r *http.Request, c *auth.Cla
 			f.UserID = id
 		}
 	}
-	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
-	size, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
+	page, err := strconv.Atoi(r.URL.Query().Get("page"))
+	if err != nil && r.URL.Query().Get("page") != "" {
+		writeErr(w, http.StatusBadRequest, "bad page")
+		return
+	}
+	if page > maxPage {
+		writeErr(w, http.StatusBadRequest, "page out of range")
+		return
+	}
+	size, err := strconv.Atoi(r.URL.Query().Get("page_size"))
+	if err != nil && r.URL.Query().Get("page_size") != "" {
+		writeErr(w, http.StatusBadRequest, "bad page_size")
+		return
+	}
 	total, rows, err := store.UsageDetail(s.DB, f, page, size)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal error")

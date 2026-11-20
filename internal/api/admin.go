@@ -260,8 +260,12 @@ func (s *Server) AdminProbeBackend(w http.ResponseWriter, r *http.Request, c *au
 		return
 	}
 	b, err := store.BackendByID(s.DB, id)
-	if err != nil {
+	if errors.Is(err, store.ErrNotFound) {
 		writeErr(w, http.StatusNotFound, "backend not found")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	res := proxy.Probe(r.Context(), b.BaseURL, b.APIKey)
@@ -288,7 +292,11 @@ func (s *Server) AdminProbeBackend(w http.ResponseWriter, r *http.Request, c *au
 	}{OK: res.OK, Version: res.Version, Error: res.Error}
 
 	if res.OK {
-		inCatalog, _ := store.ModelIDsForBackend(s.DB, id)
+		inCatalog, err := store.ModelIDsForBackend(s.DB, id)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "internal error")
+			return
+		}
 		for _, mid := range res.Models {
 			d := disc{ID: mid}
 			if id, ok := inCatalog[mid]; ok {
@@ -509,8 +517,11 @@ var currencyRe = regexp.MustCompile(`^[A-Za-z]{2,5}$`)
 
 func (s *Server) AdminGetSettings(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
 	cur, err := store.GetSetting(s.DB, "currency")
-	if err != nil {
-		cur = "EUR"
+	if errors.Is(err, store.ErrNotFound) {
+		cur = "EUR" // unset: the documented default
+	} else if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"currency": cur})
 }
