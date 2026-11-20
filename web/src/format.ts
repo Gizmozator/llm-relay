@@ -4,6 +4,20 @@ export function fmtInt(n: number): string {
   return n.toLocaleString('en-US');
 }
 
+/**
+ * "New" input tokens: the full-price input, i.e. total prompt minus the
+ * cached and cache-write buckets. In + cached + cache-write = total input,
+ * so the columns are disjoint and additive. Clamped at 0 for rows where an
+ * upstream reported inconsistent counts.
+ */
+export function inNewTokens(t: {
+  prompt_tokens: number;
+  cached_tokens: number;
+  cache_write_tokens: number;
+}): number {
+  return Math.max(0, t.prompt_tokens - t.cached_tokens - t.cache_write_tokens);
+}
+
 /** Money from micro-units: 2 decimals at >=1, 4 below. */
 export function fmtMoney(micro: number, currency: string): string {
   const v = micro / 1e6;

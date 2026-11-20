@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
 import type { AdminUser, GroupBy, UsageSummary } from '../api';
-import { daysAgoISO, fmtDateTime, fmtInt, fmtMoney } from '../format';
+import { daysAgoISO, fmtDateTime, fmtInt, fmtMoney, inNewTokens } from '../format';
 import { useLoad } from '../useLoad';
 import { useToast } from '../components/Toast';
 import { Banner, Empty, Loading } from '../components/ui';
@@ -192,10 +192,10 @@ export default function UsagePage({ admin }: { admin: boolean }) {
         <>
           <div className="cards">
             <Card label="Requests" value={fmtInt(totals?.requests ?? 0)} />
-            <Card label="Prompt tokens" value={fmtInt(totals?.prompt_tokens ?? 0)} />
-            <Card label="Completion tokens" value={fmtInt(totals?.completion_tokens ?? 0)} />
+            <Card label="In new tokens" value={fmtInt(totals ? inNewTokens(totals) : 0)} />
             <Card label="Cached tokens" value={fmtInt(totals?.cached_tokens ?? 0)} />
             <Card label="Cache-write tokens" value={fmtInt(totals?.cache_write_tokens ?? 0)} />
+            <Card label="Out tokens" value={fmtInt(totals?.completion_tokens ?? 0)} />
             <Card label={`Cost${currency ? ` (${currency})` : ''}`} value={money(totals?.cost_micro ?? 0)} accent />
           </div>
 
@@ -223,10 +223,10 @@ export default function UsagePage({ admin }: { admin: boolean }) {
                     <tr>
                       <th>{groupByLabel(groupBy)}</th>
                       <th className="num">Requests</th>
-                      <th className="num">Prompt</th>
-                      <th className="num">Completion</th>
+                      <th className="num">In new</th>
                       <th className="num">Cached</th>
                       <th className="num">Cache write</th>
+                      <th className="num">Out</th>
                       <th className="num">Cost</th>
                     </tr>
                   </thead>
@@ -235,10 +235,10 @@ export default function UsagePage({ admin }: { admin: boolean }) {
                       <tr key={g.key || '(none)'}>
                         <td>{g.label || g.key || '(none)'}</td>
                         <td className="num">{fmtInt(g.requests)}</td>
-                        <td className="num">{fmtInt(g.prompt_tokens)}</td>
-                        <td className="num">{fmtInt(g.completion_tokens)}</td>
+                        <td className="num">{fmtInt(inNewTokens(g))}</td>
                         <td className="num">{fmtInt(g.cached_tokens)}</td>
                         <td className="num">{fmtInt(g.cache_write_tokens)}</td>
+                        <td className="num">{fmtInt(g.completion_tokens)}</td>
                         <td className="num money">{money(g.cost_micro)}</td>
                       </tr>
                     ))}
@@ -293,9 +293,10 @@ export default function UsagePage({ admin }: { admin: boolean }) {
                   <th>Endpoint</th>
                   <th>IP</th>
                   <th>Session</th>
-                  <th className="num">In</th>
-                  <th className="num">Out</th>
+                  <th className="num">In new</th>
                   <th className="num">Cached</th>
+                  <th className="num">Cache write</th>
+                  <th className="num">Out</th>
                   <th className="num">Cost</th>
                   <th className="num">Status</th>
                   <th className="num">Latency</th>
@@ -314,9 +315,10 @@ export default function UsagePage({ admin }: { admin: boolean }) {
                     <td className="mono dim" title={r.session_id ?? undefined}>
                       {r.session_id ? r.session_id.slice(0, 8) : '—'}
                     </td>
-                    <td className="num">{fmtInt(r.prompt_tokens)}</td>
-                    <td className="num">{fmtInt(r.completion_tokens)}</td>
+                    <td className="num">{fmtInt(inNewTokens(r))}</td>
                     <td className="num">{fmtInt(r.cached_tokens)}</td>
+                    <td className="num">{fmtInt(r.cache_write_tokens)}</td>
+                    <td className="num">{fmtInt(r.completion_tokens)}</td>
                     <td className="num money">{money(r.cost_micro)}</td>
                     <td className={`num ${r.status_code >= 400 ? 'text-red' : ''}`}>{r.status_code}</td>
                     <td className="num">{fmtInt(r.latency_ms)} ms</td>
