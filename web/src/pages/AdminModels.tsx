@@ -1,6 +1,7 @@
+import { useState } from 'react';
 import { api, errMsg } from '../api';
 import type { CatalogModel } from '../api';
-import { microToPerM } from '../format';
+import { fmtDateTime, microToPerM } from '../format';
 import { useLoad } from '../useLoad';
 import { useToast } from '../components/Toast';
 import {
@@ -20,6 +21,8 @@ type ModelPatch = {
   price_out?: number;
   price_cache_read?: number;
   price_cache_write?: number;
+  context_length?: number;
+  concurrency_limit?: number;
 };
 
 const PRICE_FIELDS = [
@@ -34,6 +37,9 @@ export default function AdminModelsPage() {
   const models = useLoad(() => api.models().then((r) => r.models), []);
   const settings = useLoad(() => api.settings(), []);
   const currency = settings.data?.currency ?? '';
+  // Id of the model whose benchmark is in flight; the server serializes
+  // benchmarks, so while one runs the others would only get a 409.
+  const [benching, setBenching] = useState<number | null>(null);
 
   const patch = async (id: number, p: ModelPatch) => {
     try {
@@ -42,6 +48,20 @@ export default function AdminModelsPage() {
     } catch (e: unknown) {
       toast.push('error', errMsg(e));
       models.reload();
+    }
+  };
+
+  // Timed generation upstream; the request can take minutes.
+  const benchmark = async (m: CatalogModel) => {
+    setBenching(m.id);
+    try {
+      const r = await api.benchmarkModel(m.id);
+      toast.push('success', `Benchmark: ${r.bench_tok_per_s.toFixed(1)} tok/s`);
+      models.reload();
+    } catch (e: unknown) {
+      toast.push('error', errMsg(e));
+    } finally {
+      setBenching(null);
     }
   };
 
@@ -85,6 +105,18 @@ export default function AdminModelsPage() {
                       <div className="th-sub">{currency ? `${currency}/1M` : 'per 1M'}</div>
                     </th>
                   ))}
+                  <th className="num">
+                    Context length
+                    <div className="th-sub">tokens</div>
+                  </th>
+                  <th className="num">
+                    Concurrency
+                    <div className="th-sub">parallel</div>
+                  </th>
+                  <th className="num">
+                    Speed
+                    <div className="th-sub">tok/s</div>
+                  </th>
                   <th></th>
                 </tr>
               </thead>
@@ -112,7 +144,31 @@ export default function AdminModelsPage() {
                         />
                       </td>
                     ))}
+                    <td className="num">
+                      <EditableNumber
+                        display={String(m.context_length)}
+                        ariaLabel={`Context length of ${m.name}`}
+                        onCommit={(n) => patch(m.id, { context_length: Math.round(n) })}
+                      />
+                    </td>
+                    <td className="num">
+                      <EditableNumber
+                        display={String(m.concurrency_limit)}
+                        ariaLabel={`Concurrency limit of ${m.name}`}
+                        onCommit={(n) => patch(m.id, { concurrency_limit: Math.round(n) })}
+                      />
+                    </td>
+                    <td className="num" title={m.bench_at ? fmtDateTime(m.bench_at) : undefined}>
+                      {m.bench_tok_per_s ? m.bench_tok_per_s.toFixed(1) : '—'}
+                    </td>
                     <td className="actions">
+                      <button
+                        className="btn small"
+                        disabled={benching !== null}
+                        onClick={() => benchmark(m)}
+                      >
+                        {benching === m.id ? 'Benching…' : 'Benchmark'}
+                      </button>
                       <ConfirmButton label="Delete" onConfirm={() => remove(m)} />
                     </td>
                   </tr>

@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -55,6 +56,9 @@ func newTestEnv(t *testing.T, upstream http.Handler) *testEnv {
 	mux.Handle("GET /api/usage/summary", s.Auth(s.UsageSummary))
 	mux.Handle("GET /api/usage/detail", s.Auth(s.UsageDetail))
 	mux.Handle("GET /api/admin/users", s.Admin(s.AdminListUsers))
+	mux.Handle("PATCH /api/admin/users/{id}", s.Admin(s.AdminUpdateUser))
+	mux.Handle("PATCH /api/admin/models/{id}", s.Admin(s.AdminUpdateModel))
+	mux.Handle("POST /api/admin/models/{id}/benchmark", s.Admin(s.AdminBenchmarkModel))
 	mux.Handle("POST /api/admin/users", s.Admin(s.AdminCreateUser))
 	mux.Handle("GET /api/admin/usage/detail", s.Admin(s.UsageDetail))
 	mux.Handle("POST /api/admin/backends", s.Admin(s.AdminCreateBackend))
@@ -269,7 +273,7 @@ func TestDisabledUserJWTRejected(t *testing.T) {
 		t.Fatal("bob not found")
 	}
 	// PATCH route is not on the test mux; disable directly in the DB.
-	if _, err := store.UpdateUser(e.db, bobID, nil, ptrTrue(), nil, nil); err != nil {
+	if _, err := store.UpdateUser(e.db, bobID, nil, ptrTrue(), nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -468,5 +472,128 @@ func TestUsageScopingPerUser(t *testing.T) {
 	resp.Body.Close()
 	if detail.Total != 2 {
 		t.Errorf("admin detail total = %d, want 2", detail.Total)
+	}
+}
+
+func TestUserMultiplierAndModelMeta(t *testing.T) {
+	e := newTestEnv(t, http.NotFoundHandler())
+	admin := login(t, e)
+
+	// bob: normal user, multiplier 2.5.
+	resp := e.do(t, "POST", "/api/admin/users", `{"username":"bob","password":"bobpass123","role":"user"}`, admin)
+	resp.Body.Close()
+	bob := loginAs(t, e, "bob", "bobpass123")
+	var bobID int64
+	{
+		resp := e.do(t, "GET", "/api/admin/users", "", admin)
+		var out struct {
+			Users []store.User `json:"users"`
+		}
+		json.NewDecoder(resp.Body).Decode(&out)
+		resp.Body.Close()
+		for _, u := range out.Users {
+			if u.Username == "bob" {
+				bobID = u.ID
+				if u.PriceMultiplier != 1 {
+					t.Errorf("default multiplier = %v, want 1", u.PriceMultiplier)
+				}
+			}
+		}
+	}
+	if bobID == 0 {
+		t.Fatal("bob not found")
+	}
+	resp = e.do(t, "PATCH", fmt.Sprintf("/api/admin/users/%d", bobID), `{"price_multiplier":2.5}`, admin)
+	if resp.StatusCode != 200 {
+		t.Fatalf("set multiplier: %d", resp.StatusCode)
+	}
+	var upd store.User
+	json.NewDecoder(resp.Body).Decode(&upd)
+	resp.Body.Close()
+	if upd.PriceMultiplier != 2.5 {
+		t.Errorf("multiplier = %v, want 2.5", upd.PriceMultiplier)
+	}
+	// Invalid values rejected.
+	if resp := e.do(t, "PATCH", fmt.Sprintf("/api/admin/users/%d", bobID), `{"price_multiplier":0}`, admin); resp.StatusCode != 400 {
+		t.Errorf("multiplier 0 = %d, want 400", resp.StatusCode)
+	}
+	resp.Body.Close()
+	// The user's own /api/me must not reveal the multiplier.
+	resp = e.do(t, "GET", "/api/me", "", bob)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if bytes.Contains(body, []byte("price_multiplier")) {
+		t.Errorf("/api/me leaks price_multiplier: %s", body)
+	}
+	// ...and neither may PATCH /api/me (same user object on the write path).
+	resp = e.do(t, "PATCH", "/api/me", `{"display_name":"Bobby"}`, bob)
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if bytes.Contains(body, []byte("price_multiplier")) {
+		t.Errorf("PATCH /api/me leaks price_multiplier: %s", body)
+	}
+	// Login response must not carry it either.
+	resp = e.do(t, "POST", "/api/auth/login", `{"username":"bob","password":"bobpass123"}`, "")
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if bytes.Contains(body, []byte("price_multiplier")) {
+		t.Errorf("login leaks price_multiplier: %s", body)
+	}
+
+	// Model meta: context length + concurrency on a real backend/model.
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"choices":[{"message":{"content":"1 2 3"}}],"usage":{"prompt_tokens":10,"completion_tokens":100}}`))
+	}))
+	t.Cleanup(up.Close)
+	if _, err := store.CreateBackend(e.db, "bench", up.URL, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateModel(e.db, 1, "up-m", "Bench Model"); err != nil {
+		t.Fatal(err)
+	}
+	resp = e.do(t, "PATCH", "/api/admin/models/1", `{"context_length":262144,"concurrency_limit":4}`, admin)
+	if resp.StatusCode != 200 {
+		t.Fatalf("model meta patch: %d", resp.StatusCode)
+	}
+	var mm store.Model
+	json.NewDecoder(resp.Body).Decode(&mm)
+	resp.Body.Close()
+	if mm.ContextLength != 262144 || mm.ConcurrencyLimit != 4 {
+		t.Errorf("meta = %d/%d, want 262144/4", mm.ContextLength, mm.ConcurrencyLimit)
+	}
+
+	// Benchmark: fake upstream reports 100 completion tokens.
+	resp = e.do(t, "POST", "/api/admin/models/1/benchmark", "", admin)
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("benchmark: %d %s", resp.StatusCode, body)
+	}
+	var br struct {
+		BenchTokPerS float64 `json:"bench_tok_per_s"`
+		Completion   int64   `json:"completion_tokens"`
+	}
+	json.NewDecoder(resp.Body).Decode(&br)
+	resp.Body.Close()
+	if br.Completion != 100 || br.BenchTokPerS <= 0 {
+		t.Errorf("benchmark result: %+v", br)
+	}
+
+	// Public catalog carries meta + benchmark for users.
+	resp = e.do(t, "GET", "/api/models", "", bob)
+	var cat struct {
+		Models []map[string]any `json:"models"`
+	}
+	json.NewDecoder(resp.Body).Decode(&cat)
+	resp.Body.Close()
+	if len(cat.Models) != 1 {
+		t.Fatalf("catalog = %d models", len(cat.Models))
+	}
+	m := cat.Models[0]
+	if m["context_length"] != float64(262144) || m["concurrency_limit"] != float64(4) {
+		t.Errorf("catalog meta: %v", m)
+	}
+	if tp, _ := m["bench_tok_per_s"].(float64); tp <= 0 {
+		t.Errorf("catalog bench_tok_per_s: %v", m["bench_tok_per_s"])
 	}
 }

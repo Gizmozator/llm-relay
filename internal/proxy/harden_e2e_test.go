@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"llm-relay/internal/store"
 )
 
 // A non-stream upstream that sends 200 + Content-Length then dies mid-body
@@ -52,5 +54,38 @@ func TestProxyNonStreamMidBodyFailure(t *testing.T) {
 	row := h.usageRow(t)
 	if row.Status != 500 {
 		t.Errorf("usage row status = %d, want 500", row.Status)
+	}
+}
+
+// The user's price multiplier must be applied to the recorded cost snapshot.
+func TestProxyUserMultiplierApplied(t *testing.T) {
+	up := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"choices":[{"message":{"content":"x"}}],
+			"usage":{"prompt_tokens":1000000,"completion_tokens":1000000}}`))
+	})
+	h := newHarness(t, up)
+
+	// Harness prices: in 100/M, out 200/M → base cost 100+200 = 300 µ€;
+	// multiplier 2.5 → 750.
+	mult := 2.5
+	users, err := store.ListUsers(h.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, u := range users {
+		if u.Username == "bob" {
+			if _, err := store.UpdateUser(h.db, u.ID, nil, nil, nil, nil, &mult); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	resp := h.post(t, "/v1/chat/completions",
+		`{"model":"pub-model","messages":[{"role":"user","content":"hi"}]}`, nil)
+	resp.Body.Close()
+	row := h.usageRow(t)
+	if row.CostMicro != 750 {
+		t.Errorf("cost = %d µ, want 750 (300 × 2.5)", row.CostMicro)
 	}
 }

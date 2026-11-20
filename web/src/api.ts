@@ -88,6 +88,8 @@ export interface AdminUser {
   role: Role;
   disabled: boolean;
   created_at: string;
+  /** Admin-only: never exposed on /api/me. */
+  price_multiplier: number;
 }
 
 export interface Backend {
@@ -127,6 +129,18 @@ export interface CatalogModel {
   price_out: number;
   price_cache_read: number;
   price_cache_write: number;
+  context_length: number;
+  concurrency_limit: number;
+  bench_tok_per_s: number;
+  bench_at: string;
+}
+
+/** Result of POST /api/admin/models/{id}/benchmark. */
+export interface BenchmarkResult {
+  bench_tok_per_s: number;
+  completion_tokens: number;
+  seconds: number;
+  bench_at: string;
 }
 
 /** Model as exposed to all users on GET /api/models (no internal wiring). */
@@ -136,6 +150,10 @@ export interface PublicModel {
   price_out: number;
   price_cache_read: number;
   price_cache_write: number;
+  context_length: number;
+  concurrency_limit: number;
+  bench_tok_per_s: number;
+  bench_at: string;
 }
 
 export interface Settings {
@@ -305,7 +323,13 @@ export const api = {
     }),
   patchUser: (
     id: number,
-    patch: { password?: string; disabled?: boolean; role?: Role; display_name?: string },
+    patch: {
+      password?: string;
+      disabled?: boolean;
+      role?: Role;
+      display_name?: string;
+      price_multiplier?: number;
+    },
   ) => request<AdminUser>('PATCH', `/api/admin/users/${id}`, { body: patch }),
 
   // admin — backends
@@ -338,9 +362,14 @@ export const api = {
       price_out: number;
       price_cache_read: number;
       price_cache_write: number;
+      context_length: number;
+      concurrency_limit: number;
     }>,
   ) => request<CatalogModel>('PATCH', `/api/admin/models/${id}`, { body: patch }),
   deleteModel: (id: number) => request<void>('DELETE', `/api/admin/models/${id}`),
+  /** Runs a timed generation upstream; can take minutes (409 if one is running). */
+  benchmarkModel: (id: number) =>
+    request<BenchmarkResult>('POST', `/api/admin/models/${id}/benchmark`),
 
   // admin — settings
   settings: () => request<Settings>('GET', '/api/admin/settings'),

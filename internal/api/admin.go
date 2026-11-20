@@ -2,10 +2,17 @@
 package api
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
+	"time"
 
 	"llm-relay/internal/auth"
 	"llm-relay/internal/proxy"
@@ -56,6 +63,12 @@ func (s *Server) AdminCreateUser(w http.ResponseWriter, r *http.Request, c *auth
 		writeErr(w, http.StatusInternalServerError, "user create failed")
 		return
 	}
+	// Re-read so the response carries the DB defaults (price_multiplier=1).
+	user, err = store.UserByID(s.DB, user.ID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "user create failed")
+		return
+	}
 	writeJSON(w, http.StatusCreated, user)
 }
 
@@ -66,13 +79,18 @@ func (s *Server) AdminUpdateUser(w http.ResponseWriter, r *http.Request, c *auth
 		return
 	}
 	var in struct {
-		Password    *string `json:"password"`
-		Disabled    *bool   `json:"disabled"`
-		Role        *string `json:"role"`
-		DisplayName *string `json:"display_name"`
+		Password        *string  `json:"password"`
+		Disabled        *bool    `json:"disabled"`
+		Role            *string  `json:"role"`
+		DisplayName     *string  `json:"display_name"`
+		PriceMultiplier *float64 `json:"price_multiplier"`
 	}
 	if err := decode(r, &in); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if in.PriceMultiplier != nil && (*in.PriceMultiplier <= 0 || *in.PriceMultiplier > 1000) {
+		writeErr(w, http.StatusBadRequest, "price_multiplier must be greater than 0 and at most 1000")
 		return
 	}
 	// An admin must not lock themselves out.
@@ -97,7 +115,7 @@ func (s *Server) AdminUpdateUser(w http.ResponseWriter, r *http.Request, c *auth
 		writeErr(w, http.StatusBadRequest, "role must be admin or user")
 		return
 	}
-	user, err := store.UpdateUser(s.DB, id, hash, in.Disabled, in.Role, in.DisplayName)
+	user, err := store.UpdateUser(s.DB, id, hash, in.Disabled, in.Role, in.DisplayName, in.PriceMultiplier)
 	if err == store.ErrNotFound {
 		writeErr(w, http.StatusNotFound, "user not found")
 		return
@@ -302,12 +320,14 @@ func (s *Server) AdminUpdateModel(w http.ResponseWriter, r *http.Request, c *aut
 		return
 	}
 	var in struct {
-		Name            *string `json:"name"`
-		Enabled         *bool   `json:"enabled"`
-		PriceIn         *int64  `json:"price_in"`
-		PriceOut        *int64  `json:"price_out"`
-		PriceCacheRead  *int64  `json:"price_cache_read"`
-		PriceCacheWrite *int64  `json:"price_cache_write"`
+		Name             *string `json:"name"`
+		Enabled          *bool   `json:"enabled"`
+		PriceIn          *int64  `json:"price_in"`
+		PriceOut         *int64  `json:"price_out"`
+		PriceCacheRead   *int64  `json:"price_cache_read"`
+		PriceCacheWrite  *int64  `json:"price_cache_write"`
+		ContextLength    *int64  `json:"context_length"`
+		ConcurrencyLimit *int64  `json:"concurrency_limit"`
 	}
 	if err := decode(r, &in); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON")
@@ -323,8 +343,19 @@ func (s *Server) AdminUpdateModel(w http.ResponseWriter, r *http.Request, c *aut
 			return
 		}
 	}
+	for _, v := range []*int64{in.ContextLength, in.ConcurrencyLimit} {
+		if v != nil && *v < 0 {
+			writeErr(w, http.StatusBadRequest, "values cannot be negative")
+			return
+		}
+	}
 	m, err := store.UpdateModel(s.DB, id, in.Name, in.Enabled,
 		[4]*int64{in.PriceIn, in.PriceOut, in.PriceCacheRead, in.PriceCacheWrite})
+	if err == nil && (in.ContextLength != nil || in.ConcurrencyLimit != nil) {
+		if err = store.UpdateModelMeta(s.DB, id, in.ContextLength, in.ConcurrencyLimit); err == nil {
+			m, err = store.ModelByID(s.DB, id)
+		}
+	}
 	switch {
 	case err == store.ErrNotFound:
 		writeErr(w, http.StatusNotFound, "model not found")
@@ -335,6 +366,93 @@ func (s *Server) AdminUpdateModel(w http.ResponseWriter, r *http.Request, c *aut
 	default:
 		writeJSON(w, http.StatusOK, m)
 	}
+}
+
+// AdminBenchmarkModel runs a fixed generation against the model's upstream
+// and stores the measured completion speed. Deliberately serialized: parallel
+// benchmarks would skew each other's tokens/s numbers.
+var benchMu sync.Mutex
+
+func (s *Server) AdminBenchmarkModel(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	m, err := store.ModelByID(s.DB, id)
+	if err == store.ErrNotFound {
+		writeErr(w, http.StatusNotFound, "model not found")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	b, err := store.BackendByID(s.DB, m.BackendID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if !benchMu.TryLock() {
+		writeErr(w, http.StatusConflict, "a benchmark is already running")
+		return
+	}
+	defer benchMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
+	defer cancel()
+	buf, _ := json.Marshal(map[string]any{
+		"model": m.UpstreamModel,
+		"messages": []map[string]string{
+			{"role": "user", "content": "Count from 1 to 400, one number per line. No commentary."},
+		},
+		"max_tokens":  700,
+		"temperature": 0,
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		strings.TrimRight(b.BaseURL, "/")+"/v1/chat/completions", bytes.NewReader(buf))
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if b.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+b.APIKey)
+	}
+	start := time.Now()
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "upstream request failed")
+		return
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if resp.StatusCode != http.StatusOK {
+		writeErr(w, http.StatusBadGateway, fmt.Sprintf("upstream returned HTTP %d", resp.StatusCode))
+		return
+	}
+	var parsed struct {
+		Usage struct {
+			CompletionTokens int64 `json:"completion_tokens"`
+		} `json:"usage"`
+	}
+	if json.Unmarshal(body, &parsed) != nil || parsed.Usage.CompletionTokens <= 0 {
+		writeErr(w, http.StatusBadGateway, "upstream returned no usage; cannot benchmark")
+		return
+	}
+	secs := time.Since(start).Seconds()
+	tokPerS := float64(parsed.Usage.CompletionTokens) / secs
+	at := time.Now().UTC().Format(time.RFC3339)
+	if err := store.UpdateModelBench(s.DB, id, tokPerS, at); err != nil {
+		writeErr(w, http.StatusInternalServerError, "benchmark save failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"bench_tok_per_s":   tokPerS,
+		"completion_tokens": parsed.Usage.CompletionTokens,
+		"seconds":           secs,
+		"bench_at":          at,
+	})
 }
 
 func (s *Server) AdminDeleteModel(w http.ResponseWriter, r *http.Request, c *auth.Claims) {

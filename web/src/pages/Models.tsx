@@ -1,5 +1,5 @@
 import { api } from '../api';
-import { fmtMoney } from '../format';
+import { fmtDateTime, fmtInt, fmtMoney } from '../format';
 import { useLoad } from '../useLoad';
 import { Banner, Empty, Loading } from '../components/ui';
 
@@ -40,6 +40,9 @@ export default function ModelsPage() {
                       <div className="th-sub">per 1M tokens</div>
                     </th>
                   ))}
+                  <th className="num">Context</th>
+                  <th className="num">Speed</th>
+                  <th className="num">Parallel</th>
                 </tr>
               </thead>
               <tbody>
@@ -51,6 +54,11 @@ export default function ModelsPage() {
                         {fmtMoney(m[p.key], currency)}
                       </td>
                     ))}
+                    <td className="num">{m.context_length ? `${fmtInt(m.context_length)} tokens` : '—'}</td>
+                    <td className="num" title={m.bench_at ? fmtDateTime(m.bench_at) : undefined}>
+                      {m.bench_tok_per_s ? `${m.bench_tok_per_s.toFixed(1)} tok/s` : '—'}
+                    </td>
+                    <td className="num">{m.concurrency_limit ? fmtInt(m.concurrency_limit) : '—'}</td>
                   </tr>
                 ))}
               </tbody>

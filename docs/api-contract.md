@@ -17,7 +17,7 @@ All `/api/*` except login require `Authorization: Bearer <jwt>`. The embedded SP
 - `GET /api/info` → `{"relay_url":"https://relay.example.fi/v1","dashboard_url":"https://llm-relay.example.fi","currency":"EUR"}` (empty string = not configured; `relay_url` is what users put in their apps)
 
 ### Model catalog (all users)
-- `GET /api/models` → `{"models":[{"name":"Qwen3.8-flash-next","price_in":100,"price_out":200,"price_cache_read":10,"price_cache_write":40}]}` — models usable right now (enabled model on an enabled backend); prices are micro-units per 1M tokens; internal wiring (backend, upstream id) is not exposed.
+- `GET /api/models` → `{"models":[{"name":"Qwen3.8-flash-next","price_in":100,"price_out":200,"price_cache_read":10,"price_cache_write":40,"context_length":262144,"concurrency_limit":4,"bench_tok_per_s":41.2,"bench_at":"2026-11-20T12:00:00Z"}]}` — models usable right now (enabled model on an enabled backend); prices are micro-units per 1M tokens; `context_length`/`concurrency_limit` are admin-set (0 = unset); `bench_tok_per_s`/`bench_at` are the last admin benchmark (0/"" = never). Internal wiring (backend, upstream id) is not exposed.
 
 ### API keys (own)
 - `GET /api/keys` → `{"keys":[{"id":1,"name":"laptop","prefix":"sk-abcd1234","created_at":"...","last_used_at":"...|null","revoked_at":"...|null"}]}`
@@ -32,9 +32,9 @@ Proxy requests may carry `X-Session-Id: <string>`; without it the relay derives 
 - `GET /api/usage/detail?from&to&model=&page=1&page_size=50` (`model` = exact `model_requested` match) → `{"total":123,"rows":[{"id":1,"ts":"...","username":"bob","key_name":"laptop","client_ip":"1.2.3.4","session_id":"a1b2c3d4e5f6","endpoint":"chat","model_requested":"halogen","prompt_tokens":10,"completion_tokens":20,"cached_tokens":0,"cache_write_tokens":0,"cost_micro":300,"streamed":true,"usage_estimated":false,"status_code":200,"latency_ms":1200,"error":null}]}` (newest first)
 
 ### Admin — users
-- `GET /api/admin/users` → `{"users":[{"id":1,"username":"a","display_name":"Ada","role":"admin","disabled":false,"created_at":"..."}]}`
+- `GET /api/admin/users` → `{"users":[{"id":1,"username":"a","display_name":"Ada","role":"admin","disabled":false,"created_at":"...","price_multiplier":1}]}`
 - `POST /api/admin/users` — `{"username","display_name"?,"password","role":"admin"|"user"}` → `201` user object
-- `PATCH /api/admin/users/{id}` — any of `{"password","disabled","role","display_name"}` → user object
+- `PATCH /api/admin/users/{id}` — any of `{"password","disabled","role","display_name","price_multiplier"}` → user object. `price_multiplier` (float >0, default 1) scales every cost recorded for that user at request time (snapshot semantics: changing it never rewrites existing rows). Admin-only: `GET /api/me` deliberately omits it.
 
 ### Admin — backends
 - `GET /api/admin/backends` → `{"backends":[{"id":1,"name":"halogen","base_url":"http://engine-host:8731","has_key":false,"enabled":true,"last_probe_at":"...|null","last_probe_error":"...|null","server_version":"...|null","created_at":"...","model_count":2}]}`
@@ -45,8 +45,9 @@ Proxy requests may carry `X-Session-Id: <string>`; without it the relay derives 
 - `POST /api/admin/backends/{id}/models` — `{"model_ids":["halogen-qwen3.8-flash-next"]}` → `201 {"created":[{"id":3,"name":"halogen-qwen3.8-flash-next","upstream_model":"halogen-qwen3.8-flash-next"}]}` (skips already-present ids)
 
 ### Admin — models (public catalog)
-- `GET /api/admin/models` → `{"models":[{"id":1,"name":"halogen","backend_id":1,"backend_name":"halogen","upstream_model":"halogen-qwen3.8-flash-next","enabled":true,"price_in":100,"price_out":200,"price_cache_read":10,"price_cache_write":0}]}`
-- `PATCH /api/admin/models/{id}` — any of `{"name","enabled","price_in","price_out","price_cache_read","price_cache_write"}` → model object
+- `GET /api/admin/models` → `{"models":[{"id":1,"name":"halogen","backend_id":1,"backend_name":"halogen","upstream_model":"halogen-qwen3.8-flash-next","enabled":true,"price_in":100,"price_out":200,"price_cache_read":10,"price_cache_write":0,"context_length":262144,"concurrency_limit":4,"bench_tok_per_s":41.2,"bench_at":"...|"}]}`
+- `PATCH /api/admin/models/{id}` — any of `{"name","enabled","price_in","price_out","price_cache_read","price_cache_write","context_length","concurrency_limit"}` → model object
+- `POST /api/admin/models/{id}/benchmark` — runs one timed fixed-prompt generation against the upstream and stores the speed; may take minutes; `409` while another benchmark runs. → `{"bench_tok_per_s":41.2,"completion_tokens":700,"seconds":17.0,"bench_at":"..."}`
 - `DELETE /api/admin/models/{id}` → `204`
 
 ### Admin — settings

@@ -91,6 +91,7 @@ func main() {
 	adminMux.Handle("POST /api/admin/backends/{id}/models", apiSrv.Admin(apiSrv.AdminAddBackendModels))
 	adminMux.Handle("GET /api/admin/models", apiSrv.Admin(apiSrv.AdminListModels))
 	adminMux.Handle("PATCH /api/admin/models/{id}", apiSrv.Admin(apiSrv.AdminUpdateModel))
+	adminMux.Handle("POST /api/admin/models/{id}/benchmark", apiSrv.Admin(apiSrv.AdminBenchmarkModel))
 	adminMux.Handle("DELETE /api/admin/models/{id}", apiSrv.Admin(apiSrv.AdminDeleteModel))
 	adminMux.Handle("GET /api/admin/settings", apiSrv.Admin(apiSrv.AdminGetSettings))
 	adminMux.Handle("PUT /api/admin/settings", apiSrv.Admin(apiSrv.AdminPutSettings))

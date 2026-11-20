@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
 import { api, errMsg } from '../api';
 import type { Role } from '../api';
@@ -39,7 +39,10 @@ export default function UsersPage() {
     }
   };
 
-  const patch = async (id: number, p: { disabled?: boolean; role?: Role; display_name?: string }) => {
+  const patch = async (
+    id: number,
+    p: { disabled?: boolean; role?: Role; display_name?: string; price_multiplier?: number },
+  ) => {
     try {
       await api.patchUser(id, p);
       users.reload();
@@ -108,6 +111,10 @@ export default function UsersPage() {
                   <th>Username</th>
                   <th>Name</th>
                   <th>Role</th>
+                  <th className="num">
+                    Multiplier
+                    <div className="th-sub">price ×</div>
+                  </th>
                   <th>Status</th>
                   <th>Created</th>
                   <th></th>
@@ -143,6 +150,13 @@ export default function UsersPage() {
                           <option value="user">user</option>
                           <option value="admin">admin</option>
                         </select>
+                      </td>
+                      <td className="num">
+                        <MultiplierInput
+                          value={u.price_multiplier ?? 1}
+                          username={u.username}
+                          onCommit={(n) => patch(u.id, { price_multiplier: n })}
+                        />
                       </td>
                       <td>
                         {u.disabled ? (
@@ -182,6 +196,48 @@ export default function UsersPage() {
         />
       )}
     </div>
+  );
+}
+
+/** Inline price-multiplier input; commits on blur or Enter, reverts on invalid. */
+function MultiplierInput({
+  value,
+  username,
+  onCommit,
+}: {
+  value: number;
+  username: string;
+  onCommit: (n: number) => void;
+}) {
+  const display = String(value);
+  const [v, setV] = useState(display);
+  useEffect(() => setV(display), [display]);
+
+  const commit = () => {
+    const n = Number.parseFloat(v.replace(',', '.'));
+    if (!isFinite(n) || n < 0.01) {
+      setV(display);
+      return;
+    }
+    if (n !== value) onCommit(n);
+    else setV(display);
+  };
+
+  return (
+    <input
+      className="input input-inline input-num"
+      type="number"
+      step={0.1}
+      min={0.01}
+      value={v}
+      aria-label={`Price multiplier of ${username}`}
+      onChange={(e) => setV(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+        if (e.key === 'Escape') setV(display);
+      }}
+    />
   );
 }
 

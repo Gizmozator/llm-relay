@@ -125,7 +125,16 @@ func (s *Server) Login(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "token signing failed")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"token": tok, "user": user})
+	writeJSON(w, http.StatusOK, map[string]any{"token": tok, "user": userView(user)})
+}
+
+// userView is the user-facing shape of a user: price_multiplier is admin-only
+// and must never reach the user's own client (login, /api/me, PATCH /api/me).
+func userView(u *store.User) map[string]any {
+	return map[string]any{
+		"id": u.ID, "username": u.Username, "display_name": u.DisplayName,
+		"role": u.Role, "disabled": u.Disabled, "created_at": u.CreatedAt,
+	}
 }
 
 func (s *Server) Me(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
@@ -134,7 +143,7 @@ func (s *Server) Me(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	writeJSON(w, http.StatusOK, user)
+	writeJSON(w, http.StatusOK, userView(user))
 }
 
 // Info exposes the public endpoint URLs (for copy buttons in the UI) and the
@@ -158,17 +167,23 @@ func (s *Server) PublicModels(w http.ResponseWriter, r *http.Request, c *auth.Cl
 		return
 	}
 	type pubModel struct {
-		Name            string `json:"name"`
-		PriceIn         int64  `json:"price_in"`
-		PriceOut        int64  `json:"price_out"`
-		PriceCacheRead  int64  `json:"price_cache_read"`
-		PriceCacheWrite int64  `json:"price_cache_write"`
+		Name             string  `json:"name"`
+		PriceIn          int64   `json:"price_in"`
+		PriceOut         int64   `json:"price_out"`
+		PriceCacheRead   int64   `json:"price_cache_read"`
+		PriceCacheWrite  int64   `json:"price_cache_write"`
+		ContextLength    int64   `json:"context_length"`
+		ConcurrencyLimit int64   `json:"concurrency_limit"`
+		BenchTokPerS     float64 `json:"bench_tok_per_s"`
+		BenchAt          string  `json:"bench_at"`
 	}
 	out := make([]pubModel, 0, len(models))
 	for _, m := range models {
 		out = append(out, pubModel{
 			Name: m.Name, PriceIn: m.PriceIn, PriceOut: m.PriceOut,
 			PriceCacheRead: m.PriceCacheRead, PriceCacheWrite: m.PriceCacheWrite,
+			ContextLength: m.ContextLength, ConcurrencyLimit: m.ConcurrencyLimit,
+			BenchTokPerS: m.BenchTokPerS, BenchAt: m.BenchAt,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"models": out})
@@ -192,12 +207,12 @@ func (s *Server) UpdateMe(w http.ResponseWriter, r *http.Request, c *auth.Claims
 		writeErr(w, http.StatusBadRequest, "display name too long (max 64)")
 		return
 	}
-	user, err := store.UpdateUser(s.DB, c.UserID, nil, nil, nil, &name)
+	user, err := store.UpdateUser(s.DB, c.UserID, nil, nil, nil, &name, nil)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "update failed")
 		return
 	}
-	writeJSON(w, http.StatusOK, user)
+	writeJSON(w, http.StatusOK, userView(user))
 }
 
 // ChangePassword verifies the current password before setting a new one.
@@ -228,7 +243,7 @@ func (s *Server) ChangePassword(w http.ResponseWriter, r *http.Request, c *auth.
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	if _, err := store.UpdateUser(s.DB, c.UserID, &newHash, nil, nil, nil); err != nil {
+	if _, err := store.UpdateUser(s.DB, c.UserID, &newHash, nil, nil, nil, nil); err != nil {
 		writeErr(w, http.StatusInternalServerError, "password change failed")
 		return
 	}

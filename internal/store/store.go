@@ -23,20 +23,21 @@ func now() string { return time.Now().UTC().Format(time.RFC3339) }
 // ---------------------------------------------------------------- users
 
 type User struct {
-	ID          int64  `json:"id"`
-	Username    string `json:"username"`
-	DisplayName string `json:"display_name"`
-	Role        string `json:"role"`
-	Disabled    bool   `json:"disabled"`
-	CreatedAt   string `json:"created_at"`
+	ID              int64   `json:"id"`
+	Username        string  `json:"username"`
+	DisplayName     string  `json:"display_name"`
+	Role            string  `json:"role"`
+	Disabled        bool    `json:"disabled"`
+	CreatedAt       string  `json:"created_at"`
+	PriceMultiplier float64 `json:"price_multiplier"`
 }
 
-const userCols = `id, username, display_name, role, disabled, created_at`
+const userCols = `id, username, display_name, role, disabled, created_at, price_multiplier`
 
 func scanUser(row interface{ Scan(...any) error }) (*User, error) {
 	u := &User{}
 	var dis int
-	if err := row.Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &dis, &u.CreatedAt); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &dis, &u.CreatedAt, &u.PriceMultiplier); err != nil {
 		return nil, err
 	}
 	u.Disabled = dis != 0
@@ -107,7 +108,12 @@ func ListUsers(db *sql.DB) ([]User, error) {
 	return out, rows.Err()
 }
 
-func UpdateUser(db *sql.DB, id int64, passwordHash *string, disabled *bool, role *string, displayName *string) (*User, error) {
+func UpdateUser(db *sql.DB, id int64, passwordHash *string, disabled *bool, role *string, displayName *string, priceMultiplier *float64) (*User, error) {
+	if priceMultiplier != nil {
+		if _, err := db.Exec(`UPDATE users SET price_multiplier=? WHERE id=?`, *priceMultiplier, id); err != nil {
+			return nil, err
+		}
+	}
 	if displayName != nil {
 		if _, err := db.Exec(`UPDATE users SET display_name=? WHERE id=?`, *displayName, id); err != nil {
 			return nil, err
@@ -169,11 +175,11 @@ func KeyByHash(db *sql.DB, hash string) (*APIKey, *User, error) {
 	u := &User{}
 	var dis int
 	err := db.QueryRow(`SELECT k.id, k.user_id, k.name, k.key_prefix, k.created_at, k.last_used_at, k.revoked_at,
-	                       u.id, u.username, u.role, u.disabled
+	                       u.id, u.username, u.role, u.disabled, u.price_multiplier
 	                    FROM api_keys k JOIN users u ON u.id = k.user_id
 	                    WHERE k.key_hash = ?`, hash).
 		Scan(&k.ID, &k.UserID, &k.Name, &k.Prefix, &k.CreatedAt, &k.LastUsedAt, &k.RevokedAt,
-			&u.ID, &u.Username, &u.Role, &dis)
+			&u.ID, &u.Username, &u.Role, &dis, &u.PriceMultiplier)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil, ErrNotFound
 	}
@@ -359,26 +365,33 @@ func RecordProbe(db *sql.DB, id int64, probeErr, version *string) error {
 // ---------------------------------------------------------------- models
 
 type Model struct {
-	ID              int64  `json:"id"`
-	BackendID       int64  `json:"backend_id"`
-	BackendName     string `json:"backend_name"`
-	Name            string `json:"name"`
-	UpstreamModel   string `json:"upstream_model"`
-	Enabled         bool   `json:"enabled"`
-	PriceIn         int64  `json:"price_in"`
-	PriceOut        int64  `json:"price_out"`
-	PriceCacheRead  int64  `json:"price_cache_read"`
-	PriceCacheWrite int64  `json:"price_cache_write"`
+	ID               int64   `json:"id"`
+	BackendID        int64   `json:"backend_id"`
+	BackendName      string  `json:"backend_name"`
+	Name             string  `json:"name"`
+	UpstreamModel    string  `json:"upstream_model"`
+	Enabled          bool    `json:"enabled"`
+	PriceIn          int64   `json:"price_in"`
+	PriceOut         int64   `json:"price_out"`
+	PriceCacheRead   int64   `json:"price_cache_read"`
+	PriceCacheWrite  int64   `json:"price_cache_write"`
+	ContextLength    int64   `json:"context_length"`
+	ConcurrencyLimit int64   `json:"concurrency_limit"`
+	BenchTokPerS     float64 `json:"bench_tok_per_s"`
+	BenchAt          string  `json:"bench_at"`
 }
 
 const modelCols = `m.id, m.backend_id, b.name, m.name, m.upstream_model, m.enabled,
-	m.price_in, m.price_out, m.price_cache_read, m.price_cache_write`
+	m.price_in, m.price_out, m.price_cache_read, m.price_cache_write,
+	m.context_length, m.concurrency_limit, m.bench_tok_per_s,
+	COALESCE(m.bench_at,'')`
 
 func scanModel(row interface{ Scan(...any) error }) (*Model, error) {
 	m := &Model{}
 	var en int
 	if err := row.Scan(&m.ID, &m.BackendID, &m.BackendName, &m.Name, &m.UpstreamModel, &en,
-		&m.PriceIn, &m.PriceOut, &m.PriceCacheRead, &m.PriceCacheWrite); err != nil {
+		&m.PriceIn, &m.PriceOut, &m.PriceCacheRead, &m.PriceCacheWrite,
+		&m.ContextLength, &m.ConcurrencyLimit, &m.BenchTokPerS, &m.BenchAt); err != nil {
 		return nil, err
 	}
 	m.Enabled = en != 0
@@ -464,6 +477,27 @@ func ListPublicModels(db *sql.DB) ([]Model, error) {
 		out = append(out, *m)
 	}
 	return out, rows.Err()
+}
+
+// UpdateModelMeta sets the admin-managed capacity fields (nil = leave).
+func UpdateModelMeta(db *sql.DB, id int64, contextLength, concurrencyLimit *int64) error {
+	if contextLength != nil {
+		if _, err := db.Exec(`UPDATE models SET context_length=? WHERE id=?`, *contextLength, id); err != nil {
+			return err
+		}
+	}
+	if concurrencyLimit != nil {
+		if _, err := db.Exec(`UPDATE models SET concurrency_limit=? WHERE id=?`, *concurrencyLimit, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// UpdateModelBench stores the latest benchmark result for a model.
+func UpdateModelBench(db *sql.DB, id int64, tokPerS float64, at string) error {
+	_, err := db.Exec(`UPDATE models SET bench_tok_per_s=?, bench_at=? WHERE id=?`, tokPerS, at, id)
+	return err
 }
 
 func ModelIDsForBackend(db *sql.DB, backendID int64) (map[string]int64, error) {

@@ -250,6 +250,7 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request, endpoint string
 	var costs pricing.Costs
 	if status == http.StatusOK {
 		costs = pricing.Compute(model, tok)
+		pricing.ApplyMultiplier(&costs, user.PriceMultiplier)
 	}
 	h.record(record, start, user, key, r, endpoint, session, model, peek.Model,
 		tok, costs, stream, estimated, status, errMsg)

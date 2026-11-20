@@ -48,3 +48,17 @@ func Compute(m *store.Model, tok Tokens) Costs {
 	c.Total = c.In + c.Out + c.Cache + c.Write
 	return c
 }
+
+// ApplyMultiplier scales a cost snapshot by a user's price multiplier
+// (round-half-up per component). Multiplier 1 — the default — changes nothing.
+func ApplyMultiplier(c *Costs, mult float64) {
+	if mult <= 0 || mult == 1 {
+		return // 0 = unset (partial user rows); never zero out a cost
+	}
+	scale := func(v *int64) { *v = int64(float64(*v)*mult + 0.5) }
+	scale(&c.In)
+	scale(&c.Out)
+	scale(&c.Cache)
+	scale(&c.Write)
+	c.Total = c.In + c.Out + c.Cache + c.Write
+}
