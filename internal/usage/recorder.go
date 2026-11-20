@@ -13,10 +13,11 @@ import (
 )
 
 type Recorder struct {
-	db        *sql.DB
-	events    chan *store.UsageEvent
-	done      chan struct{}
-	closeOnce sync.Once
+	db     *sql.DB
+	events chan *store.UsageEvent
+	done   chan struct{}
+	mu     sync.Mutex
+	closed bool
 }
 
 func NewRecorder(db *sql.DB) *Recorder {
@@ -33,8 +34,16 @@ func (r *Recorder) Start() {
 }
 
 // Submit queues an event. It never blocks: if the buffer is full the event is
-// dropped with a log line rather than stalling a live request.
+// dropped with a log line rather than stalling a live request. After Close it
+// drops instead of panicking — a stream finishing past the shutdown deadline
+// may still call it.
 func (r *Recorder) Submit(e *store.UsageEvent) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		log.Printf("usage recorder closed, dropping event (user=%d key=%d)", e.UserID, e.KeyID)
+		return
+	}
 	select {
 	case r.events <- e:
 	default:
@@ -42,10 +51,16 @@ func (r *Recorder) Submit(e *store.UsageEvent) {
 	}
 }
 
-// Close drains the queue, waiting up to timeout for pending writes. Submit
-// must not be called after Close (main shuts the HTTP servers first).
+// Close drains the queue, waiting up to timeout for pending writes.
 func (r *Recorder) Close(timeout time.Duration) {
-	r.closeOnce.Do(func() { close(r.events) })
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return
+	}
+	r.closed = true
+	close(r.events)
+	r.mu.Unlock()
 	select {
 	case <-r.done:
 	case <-time.After(timeout):

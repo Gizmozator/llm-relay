@@ -6,9 +6,11 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
+	"os"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -105,33 +107,58 @@ func main() {
 	}
 	adminMux.Handle("/", spaHandler(spa))
 
-	relaySrv := &http.Server{Addr: cfg.ListenAddr, Handler: relayMux}
-	adminSrv := &http.Server{Addr: cfg.AdminListenAddr, Handler: adminMux}
+	relaySrv := &http.Server{
+		Addr:              cfg.ListenAddr,
+		Handler:           relayMux,
+		ReadHeaderTimeout: 30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+	adminSrv := &http.Server{
+		Addr:              cfg.AdminListenAddr,
+		Handler:           adminMux,
+		ReadHeaderTimeout: 30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 	servers := []*http.Server{relaySrv, adminSrv}
+	// Bind failures go to main (log.Fatalf here would skip the deferred
+	// recorder/DB cleanup and leave the other port half-alive).
+	srvErr := make(chan error, 2)
 	go func() {
 		log.Printf("relay API listening on %s", cfg.ListenAddr)
 		if err := relaySrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("listen: %v", err)
+			srvErr <- fmt.Errorf("relay listen: %w", err)
 		}
 	}()
 	go func() {
 		log.Printf("dashboard + admin API listening on %s", cfg.AdminListenAddr)
 		if err := adminSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("listen: %v", err)
+			srvErr <- fmt.Errorf("admin listen: %w", err)
 		}
 	}()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	<-ctx.Done()
-	log.Println("shutting down…")
+	var fatal error
+	select {
+	case <-ctx.Done():
+		log.Println("shutting down…")
+	case fatal = <-srvErr:
+		log.Printf("server failed: %v — shutting down", fatal)
+	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	for _, s := range servers {
-		_ = s.Shutdown(shutdownCtx)
+		// DeadlineExceeded is normal when long LLM streams outlive the
+		// grace period; the recorder tolerates their late submits.
+		if err := s.Shutdown(shutdownCtx); err != nil {
+			log.Printf("shutdown: %v", err)
+		}
 	}
 	rec.Close(5 * time.Second)
 	log.Println("bye")
+	if fatal != nil {
+		os.Exit(1)
+	}
 }
 
 // spaHandler serves static files and falls back to index.html for any path

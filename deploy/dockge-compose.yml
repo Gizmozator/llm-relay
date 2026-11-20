@@ -18,7 +18,7 @@ services:
       - "${DASHBOARD_PORT:-8081}:8081"  # dashboard + admin API
     environment:
       TZ: Europe/Helsinki
-      JWT_SECRET: ${JWT_SECRET}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required — openssl rand -hex 32}
       ADMIN_USERNAME: ${ADMIN_USERNAME:-}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       # Keep false: the relay port is published directly to users, so

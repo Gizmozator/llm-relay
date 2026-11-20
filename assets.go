@@ -8,5 +8,5 @@ import "embed"
 // is committed (see the `!web/dist/` exception in .gitignore) so a fresh
 // clone can `go build` without a node toolchain.
 //
-//go:embed all:web/dist
+//go:embed web/dist
 var Web embed.FS
