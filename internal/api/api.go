@@ -172,10 +172,27 @@ func (s *Server) Me(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
 	writeJSON(w, http.StatusOK, userView(user))
 }
 
+// currencySetting returns the configured currency, or the documented EUR
+// default when unset. ok=false means the store failed (caller: 500).
+func (s *Server) currencySetting() (string, bool) {
+	cur, err := store.GetSetting(s.DB, "currency")
+	switch {
+	case errors.Is(err, store.ErrNotFound), err == nil && cur == "":
+		return "EUR", true
+	case err != nil:
+		return "", false
+	}
+	return cur, true
+}
+
 // Info exposes the public endpoint URLs (for copy buttons in the UI) and the
 // install currency.
 func (s *Server) Info(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
-	currency, _ := store.GetSetting(s.DB, "currency")
+	currency, ok := s.currencySetting()
+	if !ok {
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{
 		"relay_url":     s.RelayURL,
 		"dashboard_url": s.DashboardURL,
@@ -405,7 +422,11 @@ func (s *Server) UsageSummary(w http.ResponseWriter, r *http.Request, c *auth.Cl
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	currency, _ := store.GetSetting(s.DB, "currency")
+	currency, ok := s.currencySetting()
+	if !ok {
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"currency": currency, "totals": totals, "groups": groups,
 	})

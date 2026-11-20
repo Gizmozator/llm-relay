@@ -14,7 +14,7 @@ All `/api/*` except login require `Authorization: Bearer <jwt>`. The embedded SP
 - `GET /api/me` → `{"id":1,"username":"a","display_name":"Ada","role":"admin"|"user","disabled":false,"created_at":"..."}`
 - `PATCH /api/me` — `{"display_name":"..."}` (≤64 chars) → updated user object
 - `POST /api/auth/change_password` — `{"old_password","new_password"}` (new ≥8, ≤72 bytes) → `204`; `401` when the old password is wrong, `400` on validation. Changing a password revokes every JWT issued earlier for that user (they must sign in again).
-- `GET /api/info` → `{"relay_url":"https://relay.example.fi/v1","dashboard_url":"https://llm-relay.example.fi","currency":"EUR"}` (empty string = not configured; `relay_url` is what users put in their apps)
+- `GET /api/info` → `{"relay_url":"https://relay.example.fi/v1","dashboard_url":"https://llm-relay.example.fi","currency":"EUR"}` (`currency` defaults to `EUR` when unset; empty `relay_url`/`dashboard_url` = not configured; `relay_url` is what users put in their apps)
 
 ### Model catalog (all users)
 - `GET /api/models` → `{"models":[{"name":"Qwen3.8-flash-next","price_in":100,"price_out":200,"price_cache_read":10,"price_cache_write":40,"context_length":262144,"concurrency_limit":4,"bench_tok_per_s":41.2,"bench_at":"2026-11-20T12:00:00Z"}]}` — models usable right now (enabled model on an enabled backend); prices are micro-units per 1M tokens; `context_length`/`concurrency_limit` are admin-set (0 = unset); `bench_tok_per_s`/`bench_at` are the last admin benchmark (0/"" = never). Internal wiring (backend, upstream id) is not exposed.

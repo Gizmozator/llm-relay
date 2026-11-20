@@ -220,12 +220,23 @@ func (s *Server) AdminUpdateBackend(w http.ResponseWriter, r *http.Request, c *a
 		writeErr(w, http.StatusBadRequest, "base_url must start with http:// or https://")
 		return
 	}
+	if in.Name != nil {
+		trimmed := strings.TrimSpace(*in.Name)
+		if trimmed == "" {
+			writeErr(w, http.StatusBadRequest, "name cannot be empty")
+			return
+		}
+		in.Name = &trimmed
+	}
 	b, err := store.UpdateBackend(s.DB, id, in.Name, in.BaseURL, in.APIKey, in.Enabled)
-	if err == store.ErrNotFound {
+	switch {
+	case errors.Is(err, store.ErrNotFound):
 		writeErr(w, http.StatusNotFound, "backend not found")
 		return
-	}
-	if err != nil {
+	case errors.Is(err, store.ErrConflict):
+		writeErr(w, http.StatusConflict, "backend name taken")
+		return
+	case err != nil:
 		writeErr(w, http.StatusInternalServerError, "backend update failed")
 		return
 	}
@@ -316,8 +327,13 @@ func (s *Server) AdminAddBackendModels(w http.ResponseWriter, r *http.Request, c
 		writeErr(w, http.StatusBadRequest, "bad id")
 		return
 	}
-	if _, err := store.BackendByID(s.DB, id); err != nil {
+	_, err = store.BackendByID(s.DB, id)
+	if errors.Is(err, store.ErrNotFound) {
 		writeErr(w, http.StatusNotFound, "backend not found")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	var in struct {
@@ -327,19 +343,16 @@ func (s *Server) AdminAddBackendModels(w http.ResponseWriter, r *http.Request, c
 		writeErr(w, http.StatusBadRequest, "model_ids required")
 		return
 	}
-	created := []store.Model{}
-	for _, mid := range in.ModelIDs {
-		m, err := store.CreateModel(s.DB, id, mid, "")
-		if err == store.ErrExists {
-			continue
-		}
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "model create failed")
-			return
-		}
-		created = append(created, *m)
+	if len(in.ModelIDs) > 200 {
+		writeErr(w, http.StatusBadRequest, "too many model_ids in one batch (max 200)")
+		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"created": created})
+	created, skipped, err := store.AddModels(s.DB, id, in.ModelIDs)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "model create failed")
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"created": created, "skipped": skipped})
 }
 
 // ---------------------------------------------------------------- models
@@ -373,9 +386,13 @@ func (s *Server) AdminUpdateModel(w http.ResponseWriter, r *http.Request, c *aut
 		writeErr(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
-	if in.Name != nil && strings.TrimSpace(*in.Name) == "" {
-		writeErr(w, http.StatusBadRequest, "name cannot be empty")
-		return
+	if in.Name != nil {
+		trimmed := strings.TrimSpace(*in.Name)
+		if trimmed == "" {
+			writeErr(w, http.StatusBadRequest, "name cannot be empty")
+			return
+		}
+		in.Name = &trimmed
 	}
 	for _, p := range []*int64{in.PriceIn, in.PriceOut, in.PriceCacheRead, in.PriceCacheWrite} {
 		if p != nil && *p < 0 {

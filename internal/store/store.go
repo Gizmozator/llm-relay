@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"modernc.org/sqlite"
 )
 
 var (
@@ -51,7 +53,7 @@ func CreateUser(db *sql.DB, username, displayName, passHash, role string) (*User
 	res, err := db.Exec(`INSERT INTO users(username, display_name, pass_hash, role, created_at) VALUES(?,?,?,?,?)`,
 		username, displayName, passHash, role, now())
 	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE") {
+		if isUniqueErr(err) {
 			return nil, ErrExists
 		}
 		return nil, err
@@ -111,20 +113,40 @@ func ListUsers(db *sql.DB) ([]User, error) {
 	return out, rows.Err()
 }
 
+// isUniqueErr reports whether err is a UNIQUE constraint violation. The
+// typed driver check is primary; the substring match stays as a fallback so
+// wrapped or driver-agnostic errors are still classified.
+func isUniqueErr(err error) bool {
+	var serr *sqlite.Error
+	if errors.As(err, &serr) {
+		switch serr.Code() {
+		case 19, 2067: // SQLITE_CONSTRAINT, SQLITE_CONSTRAINT_UNIQUE
+			return true
+		}
+	}
+	return strings.Contains(err.Error(), "UNIQUE")
+}
+
 func UpdateUser(db *sql.DB, id int64, passwordHash *string, disabled *bool, role *string, displayName *string, priceMultiplier *float64) (*User, error) {
+	// One transaction: a mid-way failure must not leave a half-applied edit.
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
 	if priceMultiplier != nil {
-		if _, err := db.Exec(`UPDATE users SET price_multiplier=? WHERE id=?`, *priceMultiplier, id); err != nil {
+		if _, err := tx.Exec(`UPDATE users SET price_multiplier=? WHERE id=?`, *priceMultiplier, id); err != nil {
 			return nil, err
 		}
 	}
 	if displayName != nil {
-		if _, err := db.Exec(`UPDATE users SET display_name=? WHERE id=?`, *displayName, id); err != nil {
+		if _, err := tx.Exec(`UPDATE users SET display_name=? WHERE id=?`, *displayName, id); err != nil {
 			return nil, err
 		}
 	}
 	if passwordHash != nil {
 		// Stamping pass_changed_at invalidates JWTs issued earlier (see Auth).
-		if _, err := db.Exec(`UPDATE users SET pass_hash=?, pass_changed_at=? WHERE id=?`, *passwordHash, now(), id); err != nil {
+		if _, err := tx.Exec(`UPDATE users SET pass_hash=?, pass_changed_at=? WHERE id=?`, *passwordHash, now(), id); err != nil {
 			return nil, err
 		}
 	}
@@ -133,14 +155,17 @@ func UpdateUser(db *sql.DB, id int64, passwordHash *string, disabled *bool, role
 		if *disabled {
 			v = 1
 		}
-		if _, err := db.Exec(`UPDATE users SET disabled=? WHERE id=?`, v, id); err != nil {
+		if _, err := tx.Exec(`UPDATE users SET disabled=? WHERE id=?`, v, id); err != nil {
 			return nil, err
 		}
 	}
 	if role != nil {
-		if _, err := db.Exec(`UPDATE users SET role=? WHERE id=?`, *role, id); err != nil {
+		if _, err := tx.Exec(`UPDATE users SET role=? WHERE id=?`, *role, id); err != nil {
 			return nil, err
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
 	}
 	return UserByID(db, id)
 }
@@ -274,7 +299,7 @@ func CreateBackend(db *sql.DB, name, baseURL, apiKey string) (*Backend, error) {
 	res, err := db.Exec(`INSERT INTO backends(name, base_url, api_key, created_at) VALUES(?,?,?,?)`,
 		name, strings.TrimRight(baseURL, "/"), nullable(apiKey), now())
 	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE") {
+		if isUniqueErr(err) {
 			return nil, ErrExists
 		}
 		return nil, err
@@ -289,7 +314,7 @@ func BackendByID(db *sql.DB, id int64) (*Backend, error) {
 		return nil, ErrNotFound
 	}
 	if err == nil {
-		b.ModelCount = BackendModelCount(db, id)
+		b.ModelCount, err = BackendModelCount(db, id)
 	}
 	return b, err
 }
@@ -320,18 +345,26 @@ func ListBackends(db *sql.DB) ([]Backend, error) {
 }
 
 func UpdateBackend(db *sql.DB, id int64, name, baseURL *string, apiKey *string, enabled *bool) (*Backend, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
 	if name != nil {
-		if _, err := db.Exec(`UPDATE backends SET name=? WHERE id=?`, *name, id); err != nil {
+		if _, err := tx.Exec(`UPDATE backends SET name=? WHERE id=?`, *name, id); err != nil {
+			if isUniqueErr(err) {
+				return nil, fmt.Errorf("%w: backend name taken", ErrConflict)
+			}
 			return nil, err
 		}
 	}
 	if baseURL != nil {
-		if _, err := db.Exec(`UPDATE backends SET base_url=? WHERE id=?`, strings.TrimRight(*baseURL, "/"), id); err != nil {
+		if _, err := tx.Exec(`UPDATE backends SET base_url=? WHERE id=?`, strings.TrimRight(*baseURL, "/"), id); err != nil {
 			return nil, err
 		}
 	}
 	if apiKey != nil {
-		if _, err := db.Exec(`UPDATE backends SET api_key=? WHERE id=?`, nullable(*apiKey), id); err != nil {
+		if _, err := tx.Exec(`UPDATE backends SET api_key=? WHERE id=?`, nullable(*apiKey), id); err != nil {
 			return nil, err
 		}
 	}
@@ -340,15 +373,22 @@ func UpdateBackend(db *sql.DB, id int64, name, baseURL *string, apiKey *string, 
 		if *enabled {
 			v = 1
 		}
-		if _, err := db.Exec(`UPDATE backends SET enabled=? WHERE id=?`, v, id); err != nil {
+		if _, err := tx.Exec(`UPDATE backends SET enabled=? WHERE id=?`, v, id); err != nil {
 			return nil, err
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
 	}
 	return BackendByID(db, id)
 }
 
 func DeleteBackend(db *sql.DB, id int64) error {
-	if BackendModelCount(db, id) > 0 {
+	n, err := BackendModelCount(db, id)
+	if err != nil {
+		return err
+	}
+	if n > 0 {
 		return fmt.Errorf("%w: backend still has catalog models; remove them first", ErrConflict)
 	}
 	res, err := db.Exec(`DELETE FROM backends WHERE id=?`, id)
@@ -361,10 +401,12 @@ func DeleteBackend(db *sql.DB, id int64) error {
 	return nil
 }
 
-func BackendModelCount(db *sql.DB, id int64) int {
+func BackendModelCount(db *sql.DB, id int64) (int, error) {
 	var n int
-	db.QueryRow(`SELECT COUNT(*) FROM models WHERE backend_id=?`, id).Scan(&n)
-	return n
+	if err := db.QueryRow(`SELECT COUNT(*) FROM models WHERE backend_id=?`, id).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 func RecordProbe(db *sql.DB, id int64, probeErr, version *string) error {
@@ -417,7 +459,7 @@ func CreateModel(db *sql.DB, backendID int64, upstreamModel, name string) (*Mode
 	res, err := db.Exec(`INSERT INTO models(backend_id, upstream_model, name) VALUES(?,?,?)`,
 		backendID, upstreamModel, name)
 	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE") {
+		if isUniqueErr(err) {
 			return nil, ErrExists
 		}
 		return nil, err
@@ -493,23 +535,66 @@ func ListPublicModels(db *sql.DB) ([]Model, error) {
 
 // UpdateModelMeta sets the admin-managed capacity fields (nil = leave).
 func UpdateModelMeta(db *sql.DB, id int64, contextLength, concurrencyLimit *int64) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	if contextLength != nil {
-		if _, err := db.Exec(`UPDATE models SET context_length=? WHERE id=?`, *contextLength, id); err != nil {
+		if _, err := tx.Exec(`UPDATE models SET context_length=? WHERE id=?`, *contextLength, id); err != nil {
 			return err
 		}
 	}
 	if concurrencyLimit != nil {
-		if _, err := db.Exec(`UPDATE models SET concurrency_limit=? WHERE id=?`, *concurrencyLimit, id); err != nil {
+		if _, err := tx.Exec(`UPDATE models SET concurrency_limit=? WHERE id=?`, *concurrencyLimit, id); err != nil {
 			return err
 		}
 	}
-	return nil
+	return tx.Commit()
 }
 
 // UpdateModelBench stores the latest benchmark result for a model.
 func UpdateModelBench(db *sql.DB, id int64, tokPerS float64, at string) error {
 	_, err := db.Exec(`UPDATE models SET bench_tok_per_s=?, bench_at=? WHERE id=?`, tokPerS, at, id)
 	return err
+}
+
+// AddModels bulk-inserts discovered upstream ids for one backend in a single
+// transaction. A name already taken anywhere in the catalog (names are
+// globally unique) is skipped and reported, never silently swallowed.
+func AddModels(db *sql.DB, backendID int64, upstreamIDs []string) ([]Model, []string, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, nil, err
+	}
+	defer tx.Rollback()
+	var ids []int64
+	skipped := []string{}
+	for _, mid := range upstreamIDs {
+		res, err := tx.Exec(`INSERT INTO models(backend_id, upstream_model, name) VALUES(?,?,?)`,
+			backendID, mid, mid)
+		if err != nil {
+			if isUniqueErr(err) {
+				skipped = append(skipped, mid)
+				continue
+			}
+			return nil, nil, err
+		}
+		id, _ := res.LastInsertId()
+		ids = append(ids, id)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, nil, err
+	}
+	created := make([]Model, 0, len(ids))
+	for _, id := range ids {
+		m, err := ModelByID(db, id)
+		if err != nil {
+			return created, skipped, err
+		}
+		created = append(created, *m)
+	}
+	return created, skipped, nil
 }
 
 func ModelIDsForBackend(db *sql.DB, backendID int64) (map[string]int64, error) {
@@ -531,9 +616,14 @@ func ModelIDsForBackend(db *sql.DB, backendID int64) (map[string]int64, error) {
 }
 
 func UpdateModel(db *sql.DB, id int64, name *string, enabled *bool, prices [4]*int64) (*Model, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
 	if name != nil {
-		if _, err := db.Exec(`UPDATE models SET name=? WHERE id=?`, *name, id); err != nil {
-			if strings.Contains(err.Error(), "UNIQUE") {
+		if _, err := tx.Exec(`UPDATE models SET name=? WHERE id=?`, *name, id); err != nil {
+			if isUniqueErr(err) {
 				return nil, fmt.Errorf("%w: model name taken", ErrConflict)
 			}
 			return nil, err
@@ -544,7 +634,7 @@ func UpdateModel(db *sql.DB, id int64, name *string, enabled *bool, prices [4]*i
 		if *enabled {
 			v = 1
 		}
-		if _, err := db.Exec(`UPDATE models SET enabled=? WHERE id=?`, v, id); err != nil {
+		if _, err := tx.Exec(`UPDATE models SET enabled=? WHERE id=?`, v, id); err != nil {
 			return nil, err
 		}
 	}
@@ -552,10 +642,13 @@ func UpdateModel(db *sql.DB, id int64, name *string, enabled *bool, prices [4]*i
 	for i, p := range prices {
 		if p != nil {
 			q := fmt.Sprintf(`UPDATE models SET %s=? WHERE id=?`, cols[i])
-			if _, err := db.Exec(q, *p, id); err != nil {
+			if _, err := tx.Exec(q, *p, id); err != nil {
 				return nil, err
 			}
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
 	}
 	return ModelByID(db, id)
 }

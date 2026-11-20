@@ -150,8 +150,13 @@ export default function BackendsPage() {
           backend={syncTarget}
           catalog={models.data ?? []}
           onClose={() => setSyncTarget(null)}
-          onAdded={(count) => {
-            toast.push('success', `Added ${count} model(s) to the catalog.`);
+          onAdded={(count, skipped) => {
+            toast.push(
+              'success',
+              skipped.length > 0
+                ? `Added ${count} model(s); skipped ${skipped.length} (name already in catalog): ${skipped.join(', ')}.`
+                : `Added ${count} model(s) to the catalog.`,
+            );
             setSyncTarget(null);
             backends.reload();
             models.reload();
@@ -249,7 +254,7 @@ function SyncModal({
   backend: Backend;
   catalog: CatalogModel[];
   onClose: () => void;
-  onAdded: (count: number) => void;
+  onAdded: (count: number, skipped: string[]) => void;
 }) {
   const [probe, setProbe] = useState<ProbeResult | null>(null);
   const [loading, setLoading] = useState(true);
@@ -312,7 +317,7 @@ function SyncModal({
     setAdding(true);
     try {
       const res = await api.addBackendModels(backend.id, ids);
-      onAdded(res.created.length);
+      onAdded(res.created.length, res.skipped ?? []);
     } catch (e: unknown) {
       setError(errMsg(e));
       setAdding(false);

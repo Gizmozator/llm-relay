@@ -356,11 +356,10 @@ export const api = {
   deleteBackend: (id: number) => request<void>('DELETE', `/api/admin/backends/${id}`),
   probeBackend: (id: number) => request<ProbeResult>('POST', `/api/admin/backends/${id}/probe`),
   addBackendModels: (id: number, model_ids: string[]) =>
-    request<{ created: { id: number; name: string; upstream_model: string }[] }>(
-      'POST',
-      `/api/admin/backends/${id}/models`,
-      { body: { model_ids } },
-    ),
+    request<{
+      created: { id: number; name: string; upstream_model: string }[];
+      skipped: string[];
+    }>('POST', `/api/admin/backends/${id}/models`, { body: { model_ids } }),
 
   // admin — models
   models: () => request<{ models: CatalogModel[] }>('GET', '/api/admin/models'),

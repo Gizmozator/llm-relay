@@ -63,6 +63,7 @@ func newTestEnv(t *testing.T, upstream http.Handler) *testEnv {
 	mux.Handle("POST /api/admin/users", s.Admin(s.AdminCreateUser))
 	mux.Handle("GET /api/admin/usage/detail", s.Admin(s.UsageDetail))
 	mux.Handle("POST /api/admin/backends", s.Admin(s.AdminCreateBackend))
+	mux.Handle("PATCH /api/admin/backends/{id}", s.Admin(s.AdminUpdateBackend))
 	mux.Handle("POST /api/admin/backends/{id}/probe", s.Admin(s.AdminProbeBackend))
 	mux.Handle("POST /api/admin/backends/{id}/models", s.Admin(s.AdminAddBackendModels))
 	srv := httptest.NewServer(mux)
@@ -764,5 +765,100 @@ func TestUsageInputValidation(t *testing.T) {
 		t.Errorf("valid summary: %d, want 200", resp.StatusCode)
 	} else {
 		resp.Body.Close()
+	}
+}
+
+func TestBulkAddReportsSkipped(t *testing.T) {
+	e := newTestEnv(t, http.NotFoundHandler())
+	admin := login(t, e)
+	up := "http://up.example:1234"
+	if _, err := store.CreateBackend(e.db, "A", up, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateBackend(e.db, "B", up, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateModel(e.db, 1, "gpt-4o", ""); err != nil {
+		t.Fatal(err)
+	}
+	// gpt-4o is taken globally (backend A); new-m must be created on B.
+	resp := e.do(t, "POST", "/api/admin/backends/2/models", `{"model_ids":["gpt-4o","new-m"]}`, admin)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("bulk add: %d", resp.StatusCode)
+	}
+	var out struct {
+		Created []store.Model `json:"created"`
+		Skipped []string      `json:"skipped"`
+	}
+	json.NewDecoder(resp.Body).Decode(&out)
+	resp.Body.Close()
+	if len(out.Created) != 1 || out.Created[0].Name != "new-m" {
+		t.Errorf("created = %+v, want [new-m]", out.Created)
+	}
+	if len(out.Skipped) != 1 || out.Skipped[0] != "gpt-4o" {
+		t.Errorf("skipped = %v, want [gpt-4o]", out.Skipped)
+	}
+	// Batch cap.
+	big := `{"model_ids":[`
+	for i := 0; i < 201; i++ {
+		if i > 0 {
+			big += ","
+		}
+		big += fmt.Sprintf(`"m%d"`, i)
+	}
+	big += `]}`
+	if resp := e.do(t, "POST", "/api/admin/backends/2/models", big, admin); resp.StatusCode != 400 {
+		t.Errorf("201-id batch: %d, want 400", resp.StatusCode)
+	} else {
+		resp.Body.Close()
+	}
+}
+
+func TestBackendRenameGuards(t *testing.T) {
+	e := newTestEnv(t, http.NotFoundHandler())
+	admin := login(t, e)
+	up := "http://up.example:1234"
+	if _, err := store.CreateBackend(e.db, "A", up, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateBackend(e.db, "B", up, ""); err != nil {
+		t.Fatal(err)
+	}
+	if resp := e.do(t, "PATCH", "/api/admin/backends/2", `{"name":"A"}`, admin); resp.StatusCode != 409 {
+		t.Errorf("rename onto existing: %d, want 409", resp.StatusCode)
+	} else {
+		resp.Body.Close()
+	}
+	if resp := e.do(t, "PATCH", "/api/admin/backends/2", `{"name":"  "}`, admin); resp.StatusCode != 400 {
+		t.Errorf("blank rename: %d, want 400", resp.StatusCode)
+	} else {
+		resp.Body.Close()
+	}
+	// Valid rename still works and is trimmed.
+	resp := e.do(t, "PATCH", "/api/admin/backends/2", `{"name":" B2 "}`, admin)
+	var b store.Backend
+	json.NewDecoder(resp.Body).Decode(&b)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || b.Name != "B2" {
+		t.Errorf("rename = %d %q, want 200 B2", resp.StatusCode, b.Name)
+	}
+}
+
+func TestModelNameTrimmed(t *testing.T) {
+	e := newTestEnv(t, http.NotFoundHandler())
+	admin := login(t, e)
+	up := "http://up.example:1234"
+	if _, err := store.CreateBackend(e.db, "A", up, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateModel(e.db, 1, "up-m", "Plain"); err != nil {
+		t.Fatal(err)
+	}
+	resp := e.do(t, "PATCH", "/api/admin/models/1", `{"name":" Padded "}`, admin)
+	var m store.Model
+	json.NewDecoder(resp.Body).Decode(&m)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || m.Name != "Padded" {
+		t.Errorf("model rename = %d %q, want 200 \"Padded\"", resp.StatusCode, m.Name)
 	}
 }
