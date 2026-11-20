@@ -368,6 +368,15 @@ select.input {
   overflow-x: auto;
 }
 
+/* A table inside a scroll wrapper keeps its natural width instead of being
+   squeezed to the container: long cells (model names, upstream ids) stay on
+   one line and .table-scroll provides the horizontal scrollbar. min-width
+   keeps narrow tables spanning the full width as before. */
+.table-scroll > table {
+  width: max-content;
+  min-width: 100%;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
