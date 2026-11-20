@@ -1,0 +1,23 @@
+# llm-relay — local container stack. `make docker-up` is the entry point.
+services:
+  llm-relay:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${IMAGE:-llm-relay:latest}
+    container_name: llm-relay
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8080}:8080"
+    environment:
+      PORT: "8080"
+      TZ: "${TZ:-Europe/Helsinki}"
+      # Put secrets in a local .env file (gitignored), never here.
+    volumes:
+      - llm-relay-data:/data
+    # No healthcheck: the runtime image is `scratch` (no shell, no curl).
+    # If you need one, switch the runtime stage to a distroless/base image or
+    # add a healthcheck-capable probe endpoint to the binary.
+
+volumes:
+  llm-relay-data:

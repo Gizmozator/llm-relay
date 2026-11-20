@@ -1,0 +1,36 @@
+# .dockerignore — keep the build context small and keep user data OUT of image layers.
+# `#` comments are supported; `!` negates.
+
+.git
+.gitignore
+.cache
+.pi
+.vscode
+.idea
+*.log
+*.md
+!README.md
+docs/
+data/
+cache/
+tmp/
+bin/
+dist/
+out/
+.env
+.env.*
+node_modules/
+__pycache__/
+.venv/
+coverage/
+vendor/
+
+# NOTE: *_test.go is deliberately NOT ignored. Excluding test files makes
+# `go test ./...` (or any in-container test run) find zero tests and PASS
+# VACUOUSLY — a false green that looks like coverage and proves nothing.
+# If you must shrink the context, exclude build artifacts, never tests.
+
+# NOTE: if this project bind-mounts a data/library folder (e.g. ./work, ./storage,
+# ./media) instead of a named volume, ADD IT HERE. Otherwise the entire user data
+# set is uploaded into the build context on every build and baked into image
+# layers — slow builds and a leaky image.

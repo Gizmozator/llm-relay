@@ -1,0 +1,42 @@
+# --- binaries / build output ---
+/bin/
+/build/
+/dist/
+/out/
+*.exe
+*.out
+*.test
+*.prof
+
+# --- local env / secrets ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials*
+
+# --- runtime data / caches ---
+/data/
+/cache/
+/tmp/
+*.log
+*.sqlite
+*.sqlite3
+*.db
+node_modules/
+__pycache__/
+.venv/
+.mypy_cache/
+.pytest_cache/
+
+# --- editor / OS noise ---
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+
+# --- agent scratch (keep the dir, ignore its contents) ---
+.cache/
+.pi/scratch/
