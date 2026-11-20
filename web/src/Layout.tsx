@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { NavLink, Navigate, Outlet } from 'react-router-dom';
 import { useAuth } from './auth';
+import { brandName } from './brand';
 import { Loading } from './components/ui';
 import AccountModal from './components/AccountModal';
 import type { ReactNode } from 'react';
@@ -32,7 +33,8 @@ export default function Layout() {
     <div className="shell">
       <aside className="sidebar">
         <div className="brand">
-          <span className="brand-accent">&lt;&nbsp;</span>llm-relay
+          <span className="brand-accent">&lt;&nbsp;</span>
+          {brandName()}
           <span className="brand-accent">&nbsp;/&gt;</span>
         </div>
         <nav>

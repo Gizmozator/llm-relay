@@ -65,7 +65,9 @@ a {
 }
 
 .sidebar {
-  width: 200px;
+  /* 230px so the widest brand string (a full domain, see brand.ts) fits the
+     '< … />' logo on one line. */
+  width: 230px;
   flex-shrink: 0;
   background: var(--bg-raised);
   border-right: 1px solid var(--border);
@@ -74,7 +76,7 @@ a {
 
 .brand {
   font-family: var(--mono);
-  font-size: 16px;
+  font-size: 12px;
   font-weight: 700;
   color: var(--text);
   padding: 4px 10px 16px;
@@ -745,7 +747,7 @@ td.money {
 
 .login-brand {
   font-family: var(--mono);
-  font-size: 22px;
+  font-size: 18px;
   color: var(--text);
   text-align: center;
   margin: 0 0 6px;

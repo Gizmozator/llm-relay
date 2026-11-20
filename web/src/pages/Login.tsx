@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { FormEvent } from 'react';
 import { Navigate } from 'react-router-dom';
 import { useAuth } from '../auth';
+import { brandName } from '../brand';
 import { errMsg } from '../api';
 import { Banner, Field } from '../components/ui';
 
@@ -33,7 +34,8 @@ export default function LoginPage() {
     <div className="login-wrap">
       <form className="login-card" onSubmit={submit}>
         <h1 className="login-brand">
-          <span className="brand-accent">&lt;&nbsp;</span>llm-relay
+          <span className="brand-accent">&lt;&nbsp;</span>
+          {brandName()}
           <span className="brand-accent">&nbsp;/&gt;</span>
         </h1>
         {error && <Banner>{error}</Banner>}
