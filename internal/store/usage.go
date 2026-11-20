@@ -118,6 +118,7 @@ type UsageGroup struct {
 
 var groupExprs = map[string]string{
 	"day":      `substr(u.ts, 1, 10)`,
+	"user":     `COALESCE(us.username, '(deleted user)')`,
 	"key":      `COALESCE(k.name, '(deleted key)')`,
 	"model":    `COALESCE(u.model_requested, '(unknown)')`,
 	"ip":       `COALESCE(u.client_ip, '(unknown)')`,
@@ -153,7 +154,8 @@ func SummarizeUsage(db *sql.DB, f *UsageFilter, groupBy string) (UsageGroup, []U
 			COALESCE(SUM(completion_tokens),0), COALESCE(SUM(cached_tokens),0),
 			COALESCE(SUM(cache_write_tokens),0), COALESCE(SUM(cost_total),0)
 		FROM usage_log u
-		LEFT JOIN api_keys k ON k.id = u.api_key_id`+where+
+		LEFT JOIN api_keys k ON k.id = u.api_key_id
+		LEFT JOIN users us ON us.id = u.user_id`+where+
 		` GROUP BY gk ORDER BY gk`, args...)
 	if err != nil {
 		return totals, nil, err

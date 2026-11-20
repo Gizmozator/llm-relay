@@ -53,7 +53,7 @@ export interface UsageSummary {
   groups: UsageGroup[];
 }
 
-export type GroupBy = 'day' | 'key' | 'model' | 'ip' | 'endpoint' | 'session';
+export type GroupBy = 'day' | 'user' | 'key' | 'model' | 'ip' | 'endpoint' | 'session';
 
 export interface UsageRow {
   id: number;

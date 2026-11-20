@@ -24,11 +24,11 @@ All `/api/*` except login require `Authorization: Bearer <jwt>`. The embedded SP
 - `POST /api/keys` — body `{"name"}` → `201 {"id":2,"name":"phone","key":"sk-<40hex>","prefix":"sk-abcd1234"}` (full key shown ONLY here)
 - `DELETE /api/keys/{id}` → `204` (revokes; own keys only)
 
-### Usage (own; admin variants accept `user_id` & `key_id` filters)
+### Usage (personal endpoints always scope to the caller — admins included; the `/api/admin/usage/*` variants are unscoped and accept `user_id` & `key_id` filters)
 Proxy requests may carry `X-Session-Id: <string>`; without it the relay derives a stable session id (hash of key+model+first user message) for conversation-shaped endpoints. Session ids appear on usage rows and as a `group_by` value.
-- `GET /api/usage/summary?from&to&model=&group_by=day|key|model|ip|endpoint|session` (default `group_by=day`; `model` = exact `model_requested` match)
+- `GET /api/usage/summary?from&to&model=&group_by=day|user|key|model|ip|endpoint|session` (default `group_by=day`; `model` = exact `model_requested` match)
   → `{"currency":"EUR","totals":{"requests":0,"prompt_tokens":0,"completion_tokens":0,"cached_tokens":0,"cache_write_tokens":0,"cost_micro":0},"groups":[{"key":"2026-11-20","label":"2026-11-20","requests":0,"prompt_tokens":0,"completion_tokens":0,"cached_tokens":0,"cache_write_tokens":0,"cost_micro":0}]}`
-  (`key`/`label`: day → date string; key → key name; model → model name; ip → client IP; endpoint → endpoint id)
+  (`key`/`label`: day → date string; user → username (`(deleted user)` when the account is gone); key → key name; model → model name; ip → client IP; endpoint → endpoint id)
 - `GET /api/usage/detail?from&to&model=&page=1&page_size=50` (`model` = exact `model_requested` match) → `{"total":123,"rows":[{"id":1,"ts":"...","username":"bob","key_name":"laptop","client_ip":"1.2.3.4","session_id":"a1b2c3d4e5f6","endpoint":"chat","model_requested":"halogen","prompt_tokens":10,"completion_tokens":20,"cached_tokens":0,"cache_write_tokens":0,"cost_micro":300,"streamed":true,"usage_estimated":false,"status_code":200,"latency_ms":1200,"error":null}]}` (newest first)
 
 ### Admin — users

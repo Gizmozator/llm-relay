@@ -9,6 +9,7 @@ import LineChart from '../components/LineChart';
 
 const GROUP_OPTIONS: { value: GroupBy; label: string }[] = [
   { value: 'day', label: 'Day' },
+  { value: 'user', label: 'User' },
   { value: 'key', label: 'Key' },
   { value: 'model', label: 'Model' },
   { value: 'ip', label: 'Client IP' },
@@ -22,7 +23,7 @@ export default function UsagePage({ admin }: { admin: boolean }) {
   const toast = useToast();
   const [from, setFrom] = useState(daysAgoISO(29));
   const [to, setTo] = useState(daysAgoISO(0));
-  const [groupBy, setGroupBy] = useState<GroupBy>('day');
+  const [groupBy, setGroupBy] = useState<GroupBy>(admin ? 'user' : 'day');
   const [userId, setUserId] = useState<number | ''>('');
   const [modelFilter, setModelFilter] = useState('');
   const [page, setPage] = useState(1);
@@ -355,6 +356,8 @@ function groupByLabel(g: GroupBy): string {
   switch (g) {
     case 'day':
       return 'Day';
+    case 'user':
+      return 'User';
     case 'key':
       return 'Key';
     case 'model':

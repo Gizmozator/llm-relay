@@ -55,7 +55,7 @@ export default function Layout() {
                 Users
               </NavLink>
               <NavLink to="/admin/usage" className={navClass}>
-                Usage
+                All usage
               </NavLink>
               <NavLink to="/admin/settings" className={navClass}>
                 Settings

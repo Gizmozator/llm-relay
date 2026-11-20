@@ -387,13 +387,22 @@ func usageFilter(r *http.Request, scopeUserID int64) (*store.UsageFilter, error)
 	return f, nil
 }
 
-// UsageSummary serves /api/usage/summary and the admin variant: admins get
-// an optional user_id filter, regular users are always scoped to themselves.
-func (s *Server) UsageSummary(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
-	scope := c.UserID
-	if c.Role == "admin" {
-		scope = 0
+// usageScope returns the user_id scope for a usage query: 0 means all users.
+// The all-users view is a property of the endpoint, not of the role: only the
+// /api/admin/* routes are unscoped for admins; the personal routes always show
+// the caller their own rows, even when the caller is an admin.
+func usageScope(r *http.Request, c *auth.Claims) int64 {
+	if c.Role == "admin" && strings.HasPrefix(r.URL.Path, "/api/admin/") {
+		return 0
 	}
+	return c.UserID
+}
+
+// UsageSummary serves /api/usage/summary and the admin variant: the admin
+// endpoint is unscoped with an optional user_id filter; the personal endpoint
+// always scopes to the caller, admins included.
+func (s *Server) UsageSummary(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
+	scope := usageScope(r, c)
 	f, err := usageFilter(r, scope)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -433,10 +442,7 @@ func (s *Server) UsageSummary(w http.ResponseWriter, r *http.Request, c *auth.Cl
 }
 
 func (s *Server) UsageDetail(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
-	scope := c.UserID
-	if c.Role == "admin" {
-		scope = 0
-	}
+	scope := usageScope(r, c)
 	f, err := usageFilter(r, scope)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())

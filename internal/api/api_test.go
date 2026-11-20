@@ -478,6 +478,28 @@ func TestUsageScopingPerUser(t *testing.T) {
 	if detail.Total != 2 {
 		t.Errorf("admin detail total = %d, want 2", detail.Total)
 	}
+
+	// The personal endpoints scope admins to themselves too (admin has no
+	// usage rows here): the all-users view lives only on /api/admin/*.
+	resp = e.do(t, "GET", "/api/usage/detail", "", admin)
+	detail = struct {
+		Total int              `json:"total"`
+		Rows  []store.UsageRow `json:"rows"`
+	}{}
+	json.NewDecoder(resp.Body).Decode(&detail)
+	resp.Body.Close()
+	if detail.Total != 0 {
+		t.Errorf("admin personal detail total = %d, want 0 (own rows only)", detail.Total)
+	}
+	resp = e.do(t, "GET", "/api/usage/summary?group_by=day", "", admin)
+	var sum struct {
+		Totals store.UsageGroup `json:"totals"`
+	}
+	json.NewDecoder(resp.Body).Decode(&sum)
+	resp.Body.Close()
+	if sum.Totals.Requests != 0 {
+		t.Errorf("admin personal summary requests = %d, want 0", sum.Totals.Requests)
+	}
 }
 
 func TestUserMultiplierAndModelMeta(t *testing.T) {
