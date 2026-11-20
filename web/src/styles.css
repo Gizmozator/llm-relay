@@ -142,7 +142,10 @@ a {
 }
 
 .page {
-  max-width: 1200px;
+  /* Wide enough for the widest tables (admin model catalog) to render at
+     their natural width on large screens; .table-scroll still takes over
+     on smaller windows. */
+  max-width: 1600px;
 }
 
 .page-head {
