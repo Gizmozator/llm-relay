@@ -5,7 +5,7 @@ import type { Role } from '../api';
 import { fmtDateTime } from '../format';
 import { useLoad } from '../useLoad';
 import { useToast } from '../components/Toast';
-import { Banner, EditableText, Empty, Field, Loading, Modal } from '../components/ui';
+import { Banner, EditableText, Empty, Field, Loading, Modal, parseNumInput } from '../components/ui';
 import { useAuth } from '../auth';
 
 export default function UsersPage() {
@@ -214,8 +214,8 @@ function MultiplierInput({
   useEffect(() => setV(display), [display]);
 
   const commit = () => {
-    const n = Number.parseFloat(v.replace(',', '.'));
-    if (!isFinite(n) || n < 0.01) {
+    const n = parseNumInput(v, true);
+    if (n === null || n < 0.01) {
       setV(display);
       return;
     }

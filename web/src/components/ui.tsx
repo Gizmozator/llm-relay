@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { copyToClipboard } from '../format';
 
@@ -164,6 +164,22 @@ export function Field({
   );
 }
 
+/**
+ * Parse free-typed numeric input: strips spaces and thousands separators,
+ * then validates the whole string (no trailing junk). Returns null when the
+ * input is not a finite number. With decimalComma, a comma is read as the
+ * decimal separator ("2,5" → 2.5) — right for fractional fields like the
+ * price multiplier; integer fields keep comma = thousands separator.
+ */
+export function parseNumInput(raw: string, decimalComma = false): number | null {
+  let s = raw.replace(/[\s\u00a0]/g, '');
+  if (decimalComma) s = s.replace(',', '.');
+  s = s.replace(/,/g, '');
+  if (!s) return null;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
+
 /** Inline-editable single-line text; commits on blur or Enter. */
 export function EditableText({
   value,
@@ -181,7 +197,11 @@ export function EditableText({
   ariaLabel?: string;
 }) {
   const [v, setV] = useState(value);
-  useEffect(() => setV(value), [value]);
+  const focused = useRef(false);
+  // Adopt external updates, but never clobber a value mid-edit in this input.
+  useEffect(() => {
+    if (!focused.current) setV(value);
+  }, [value]);
 
   const commit = () => {
     const next = v.trim();
@@ -195,8 +215,14 @@ export function EditableText({
       value={v}
       placeholder={placeholder}
       aria-label={ariaLabel}
+      onFocus={() => {
+        focused.current = true;
+      }}
       onChange={(e) => setV(e.target.value)}
-      onBlur={commit}
+      onBlur={() => {
+        focused.current = false;
+        commit();
+      }}
       onKeyDown={(e) => {
         if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
         if (e.key === 'Escape') setV(value);
@@ -216,11 +242,15 @@ export function EditableNumber({
   ariaLabel?: string;
 }) {
   const [v, setV] = useState(display);
-  useEffect(() => setV(display), [display]);
+  const focused = useRef(false);
+  // Adopt external updates, but never clobber a value mid-edit in this input.
+  useEffect(() => {
+    if (!focused.current) setV(display);
+  }, [display]);
 
   const commit = () => {
-    const n = Number.parseFloat(v.replace(',', '.'));
-    if (!isFinite(n) || n < 0) {
+    const n = parseNumInput(v);
+    if (n === null || n < 0) {
       setV(display);
       return;
     }
@@ -234,8 +264,14 @@ export function EditableNumber({
       value={v}
       aria-label={ariaLabel}
       inputMode="decimal"
+      onFocus={() => {
+        focused.current = true;
+      }}
       onChange={(e) => setV(e.target.value)}
-      onBlur={commit}
+      onBlur={() => {
+        focused.current = false;
+        commit();
+      }}
       onKeyDown={(e) => {
         if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
         if (e.key === 'Escape') setV(display);

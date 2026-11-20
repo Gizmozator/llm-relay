@@ -266,7 +266,7 @@ function SyncModal({
         if (cancelled) return;
         setProbe(p);
         // Pre-check every newly discovered model (not yet in the catalog).
-        setChecked(new Set(p.models.filter((m) => !m.in_catalog).map((m) => m.id)));
+        setChecked(new Set((p.models ?? []).filter((m) => !m.in_catalog).map((m) => m.id)));
       })
       .catch((e: unknown) => {
         if (!cancelled) setError(errMsg(e));
@@ -279,18 +279,22 @@ function SyncModal({
     };
   }, [backend.id]);
 
-  const discoveredIds = useMemo(
-    () => new Set((probe?.models ?? []).map((m) => m.id)),
-    [probe],
-  );
+  // The backend sends null when the probe failed or found nothing.
+  const discovered = useMemo(() => probe?.models ?? [], [probe]);
 
-  // In the catalog for this backend but no longer offered upstream.
+  const discoveredIds = useMemo(() => new Set(discovered.map((m) => m.id)), [discovered]);
+
+  // In the catalog for this backend but no longer offered upstream. Only a
+  // successful probe tells us what upstream actually offers; a failed probe
+  // would make every catalog model look vanished.
   const vanished = useMemo(
     () =>
-      catalog.filter(
-        (m) => m.backend_id === backend.id && !discoveredIds.has(m.upstream_model),
-      ),
-    [catalog, backend.id, discoveredIds],
+      probe?.ok
+        ? catalog.filter(
+            (m) => m.backend_id === backend.id && !discoveredIds.has(m.upstream_model),
+          )
+        : [],
+    [probe, catalog, backend.id, discoveredIds],
   );
 
   const toggle = (id: string) => {
@@ -315,7 +319,7 @@ function SyncModal({
     }
   };
 
-  const newCount = probe?.models.filter((m) => !m.in_catalog).length ?? 0;
+  const newCount = discovered.filter((m) => !m.in_catalog).length;
 
   return (
     <Modal title={`Sync models — ${backend.name}`} onClose={onClose} wide>
@@ -328,13 +332,15 @@ function SyncModal({
           {probe && probe.ok && (
             <Banner kind="info">
               Connected{probe.server_version ? ` — server version ${probe.server_version}` : ''}.{' '}
-              {probe.models.length} model(s) discovered, {newCount} new.
+              {discovered.length} model(s) discovered, {newCount} new.
             </Banner>
           )}
 
-          {probe && probe.models.length === 0 && !error && <Empty label="No models discovered." />}
+          {probe && probe.ok && discovered.length === 0 && !error && (
+            <Empty label="No models discovered." />
+          )}
 
-          {probe && probe.models.length > 0 && (
+          {probe && discovered.length > 0 && (
             <div className="table-scroll sync-list">
               <table>
                 <thead>
@@ -345,7 +351,7 @@ function SyncModal({
                   </tr>
                 </thead>
                 <tbody>
-                  {probe.models.map((m) => (
+                  {discovered.map((m) => (
                     <tr key={m.id} className={m.in_catalog ? 'row-muted' : ''}>
                       <td>
                         <input

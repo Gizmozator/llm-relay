@@ -115,7 +115,8 @@ export interface ProbeResult {
   ok: boolean;
   server_version: string;
   error: string;
-  models: ProbeModel[];
+  /** Null when the probe failed or the upstream list was empty (nil slice → null). */
+  models: ProbeModel[] | null;
 }
 
 export interface CatalogModel {
@@ -224,6 +225,12 @@ type Query = Record<string, string | number | undefined | null>;
 interface RequestOptions {
   body?: unknown;
   query?: Query;
+  /**
+   * For endpoints where 401 is a normal business error (e.g. wrong old
+   * password on change_password): do not clear the session on 401, let the
+   * error surface to the caller instead.
+   */
+  noSessionClear?: boolean;
 }
 
 async function request<T>(method: string, path: string, opts: RequestOptions = {}): Promise<T> {
@@ -253,7 +260,7 @@ async function request<T>(method: string, path: string, opts: RequestOptions = {
     throw new ApiError('Network error — the server is not reachable.', 0);
   }
 
-  if (res.status === 401 && !path.endsWith('/auth/login')) {
+  if (res.status === 401 && !path.endsWith('/auth/login') && !opts.noSessionClear) {
     clearSession();
     onUnauthorized();
     throw new ApiError('Session expired — please log in again.', 401);
@@ -294,7 +301,11 @@ export const api = {
   me: () => request<User>('GET', '/api/me'),
   patchMe: (display_name: string) => request<User>('PATCH', '/api/me', { body: { display_name } }),
   changePassword: (old_password: string, new_password: string) =>
-    request<void>('POST', '/api/auth/change_password', { body: { old_password, new_password } }),
+    request<void>('POST', '/api/auth/change_password', {
+      body: { old_password, new_password },
+      // A 401 here means the old password was wrong, not an expired session.
+      noSessionClear: true,
+    }),
   info: () => request<Info>('GET', '/api/info'),
 
   // api keys (own)

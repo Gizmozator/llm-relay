@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
 import type { AdminUser, GroupBy, UsageSummary } from '../api';
 import { daysAgoISO, fmtDateTime, fmtInt, fmtMoney } from '../format';
@@ -106,12 +106,21 @@ export default function UsagePage({ admin }: { admin: boolean }) {
   const money = (micro: number) => fmtMoney(micro, currency);
   const fmtAxis = (v: number) => fmtMoney(v * 1e6, currency);
 
-  // Surface a load failure as a toast too (the inline banner already shows it).
+  // Surface a load failure as a toast too (the inline banner already shows it),
+  // once per message while it persists. The set is per-mount and resets when
+  // the error clears, so a later failure toasts again.
   const loadError = daySummary.error || groupSummary.error || detail.error;
   const push = toast.push;
+  const seen = useRef(new Set<string>());
   useEffect(() => {
-    if (loadError && !daySummary.data) toastOnce(push, loadError);
-  }, [loadError, daySummary.data, push]);
+    if (!loadError) {
+      seen.current.clear();
+      return;
+    }
+    if (seen.current.has(loadError)) return;
+    seen.current.add(loadError);
+    push('error', loadError);
+  }, [loadError, push]);
 
   const totalPages = detail.data ? Math.max(1, Math.ceil(detail.data.total / PAGE_SIZE)) : 1;
 
@@ -355,12 +364,4 @@ function groupByLabel(g: GroupBy): string {
     case 'session':
       return 'Session';
   }
-}
-
-// Surface a load failure as a toast too, but only once per message.
-const seen = new Set<string>();
-function toastOnce(push: (kind: 'success' | 'error', text: string) => void, msg: string) {
-  if (seen.has(msg)) return;
-  seen.add(msg);
-  push('error', msg);
 }

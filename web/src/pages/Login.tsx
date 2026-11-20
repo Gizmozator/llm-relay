@@ -6,13 +6,15 @@ import { errMsg } from '../api';
 import { Banner, Field } from '../components/ui';
 
 export default function LoginPage() {
-  const { user, login } = useAuth();
+  const { ready, user, login } = useAuth();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  if (user) return <Navigate to="/" replace />;
+  // Wait until the stored token is revalidated, otherwise a hard load with a
+  // stale token flashes /login → / → /login.
+  if (ready && user) return <Navigate to="/" replace />;
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();

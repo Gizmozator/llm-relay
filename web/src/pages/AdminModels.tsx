@@ -37,14 +37,23 @@ export default function AdminModelsPage() {
   const models = useLoad(() => api.models().then((r) => r.models), []);
   const settings = useLoad(() => api.settings(), []);
   const currency = settings.data?.currency ?? '';
+  // Local copy of the rows: a field commit merges the PATCH response here
+  // instead of a full reload, which would clobber mid-edit values in the
+  // other inputs of the table. Re-synced whenever a fresh list arrives.
+  const [rows, setRows] = useState<CatalogModel[] | null>(null);
+  const [rowsBase, setRowsBase] = useState<CatalogModel[] | null>(null);
+  if (models.data !== rowsBase) {
+    setRowsBase(models.data);
+    setRows(models.data);
+  }
   // Id of the model whose benchmark is in flight; the server serializes
   // benchmarks, so while one runs the others would only get a 409.
   const [benching, setBenching] = useState<number | null>(null);
 
   const patch = async (id: number, p: ModelPatch) => {
     try {
-      await api.patchModel(id, p);
-      models.reload();
+      const updated = await api.patchModel(id, p);
+      setRows((prev) => (prev ?? []).map((m) => (m.id === id ? updated : m)));
     } catch (e: unknown) {
       toast.push('error', errMsg(e));
       models.reload();
@@ -85,7 +94,7 @@ export default function AdminModelsPage() {
         <Loading />
       ) : models.error ? (
         <Banner>{models.error}</Banner>
-      ) : !models.data || models.data.length === 0 ? (
+      ) : !rows || rows.length === 0 ? (
         <section className="panel">
           <Empty label="No models in the catalog. Add a backend and sync its models." />
         </section>
@@ -121,7 +130,7 @@ export default function AdminModelsPage() {
                 </tr>
               </thead>
               <tbody>
-                {models.data.map((m) => (
+                {rows.map((m) => (
                   <tr key={m.id}>
                     <td>
                       <EditableText
