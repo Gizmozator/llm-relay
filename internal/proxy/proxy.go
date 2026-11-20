@@ -284,8 +284,14 @@ func (h *Handler) copyStream(w http.ResponseWriter, body io.Reader, acc *sseAccu
 		sc := bufio.NewScanner(body)
 		sc.Buffer(make([]byte, 0, 64<<10), 16<<20)
 		for sc.Scan() {
+			// Copy out of the scanner buffer: the next Scan() may shift or
+			// refill it while the main loop is still writing this line.
+			b := sc.Bytes()
+			line := make([]byte, len(b)+1)
+			copy(line, b)
+			line[len(b)] = '\n'
 			select {
-			case lines <- streamLine{line: append(sc.Bytes(), '\n')}:
+			case lines <- streamLine{line: line}:
 			case <-done:
 				return
 			}

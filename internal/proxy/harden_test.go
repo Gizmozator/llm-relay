@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -158,6 +159,45 @@ func TestCopyStreamKeepaliveDuringSilence(t *testing.T) {
 	}
 	if tok, ok := acc.result(); !ok || tok.Prompt != 5 || tok.Completion != 2 {
 		t.Errorf("accumulator missed usage after keepalives: %+v ok=%v", tok, ok)
+	}
+}
+
+func TestCopyStreamScannerBufferNotAliased(t *testing.T) {
+	// Many lines arriving in large misaligned chunks: the scanner refills its
+	// internal buffer while the main loop is still consuming an earlier line.
+	// Delivered lines must be private copies — run under -race, which trips on
+	// the aliasing variant (scanner Read vs consumer Write of the same array).
+	const lines = 2000
+	rp, wp := io.Pipe()
+	go func() {
+		var payload []byte
+		for i := 0; i < lines; i++ {
+			pad := strings.Repeat("x", 200)
+			payload = append(payload, []byte(fmt.Sprintf(
+				"data: {\"choices\":[{\"delta\":{\"content\":\"chunk-%04d-%s\"}}]}\n", i, pad))...)
+			if len(payload) >= 40<<10 {
+				if _, err := wp.Write(payload); err != nil {
+					return
+				}
+				payload = payload[:0]
+			}
+		}
+		if len(payload) > 0 {
+			wp.Write(payload)
+		}
+		wp.Close()
+	}()
+	rec := httptest.NewRecorder()
+	acc := newSSEAccum(EpChat)
+	r := httptest.NewRequest(http.MethodPost, "/", nil)
+	if got := (&Handler{}).copyStream(rec, rp, acc, r); got != http.StatusOK {
+		t.Fatalf("status = %d, want 200", got)
+	}
+	out := rec.Body.String()
+	for i := 0; i < lines; i++ {
+		if want := fmt.Sprintf("chunk-%04d", i); !strings.Contains(out, want) {
+			t.Fatalf("forwarded stream lost or corrupted %s", want)
+		}
 	}
 }
 
