@@ -31,7 +31,10 @@ export default function Layout() {
   return (
     <div className="shell">
       <aside className="sidebar">
-        <div className="brand">llm-relay</div>
+        <div className="brand">
+          <span className="brand-accent">&lt;&nbsp;</span>llm-relay
+          <span className="brand-accent">&nbsp;/&gt;</span>
+        </div>
         <nav>
           <NavLink to="/" end className={navClass}>
             Usage

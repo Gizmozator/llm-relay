@@ -32,7 +32,10 @@ export default function LoginPage() {
   return (
     <div className="login-wrap">
       <form className="login-card" onSubmit={submit}>
-        <h1 className="login-brand">llm-relay</h1>
+        <h1 className="login-brand">
+          <span className="brand-accent">&lt;&nbsp;</span>llm-relay
+          <span className="brand-accent">&nbsp;/&gt;</span>
+        </h1>
         {error && <Banner>{error}</Banner>}
         <Field label="Username">
           <input

@@ -27,8 +27,8 @@ export default function LineChart({ labels, values, label, format }: LineChartPr
           {
             label,
             data: [],
-            borderColor: '#58a6ff',
-            backgroundColor: 'rgba(88, 166, 255, 0.12)',
+            borderColor: '#38bdf8',
+            backgroundColor: 'rgba(56, 189, 248, 0.12)',
             fill: true,
             tension: 0.25,
             pointRadius: 2,
@@ -52,16 +52,16 @@ export default function LineChart({ labels, values, label, format }: LineChartPr
         },
         scales: {
           x: {
-            ticks: { color: '#8b949e', maxRotation: 0, autoSkip: true, maxTicksLimit: 15 },
-            grid: { color: 'rgba(139, 148, 158, 0.12)' },
+            ticks: { color: '#94a3b8', maxRotation: 0, autoSkip: true, maxTicksLimit: 15 },
+            grid: { color: 'rgba(148, 163, 184, 0.12)' },
           },
           y: {
             beginAtZero: true,
             ticks: {
-              color: '#8b949e',
+              color: '#94a3b8',
               callback: (v) => formatRef.current(Number(v)),
             },
-            grid: { color: 'rgba(139, 148, 158, 0.12)' },
+            grid: { color: 'rgba(148, 163, 184, 0.12)' },
           },
         },
       },

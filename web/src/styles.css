@@ -1,17 +1,21 @@
 /* llm-relay dashboard — single stylesheet, slightly-dark admin theme. */
 
 :root {
-  --bg: #14171c;
-  --bg-raised: #1a1f26;
-  --panel: #1c2128;
-  --border: #2b333d;
-  --text: #d6dde6;
-  --muted: #8b949e;
-  --accent: #58a6ff;
-  --accent-dim: #1f6feb;
-  --green: #3fb950;
-  --red: #f85149;
-  --amber: #d29922;
+  /* Palette adapted from the rantaeskola.fi homepage design system:
+     deep navy base, cyan primary, indigo secondary. */
+  --bg: #0b0f19;
+  --bg-raised: #10162a;
+  --panel: #121a2e;
+  --border: rgba(255, 255, 255, 0.08);
+  --text: #f8fafc;
+  --muted: #94a3b8;
+  --accent: #38bdf8;
+  --accent-dim: #818cf8;
+  --green: #10b981;
+  --red: #f43f5e;
+  --amber: #f59e0b;
+  --gradient-primary: linear-gradient(135deg, #38bdf8 0%, #818cf8 100%);
+  --glow: 0 0 25px rgba(56, 189, 248, 0.25);
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
 }
 
@@ -72,8 +76,14 @@ a {
   font-family: var(--mono);
   font-size: 16px;
   font-weight: 700;
-  color: var(--accent);
+  color: var(--text);
   padding: 4px 10px 16px;
+  white-space: nowrap;
+}
+
+/* `< llm-relay />` — angle brackets in the cyan accent, homepage-agy style. */
+.brand-accent {
+  color: var(--accent);
 }
 
 .sidebar nav a {
@@ -89,8 +99,8 @@ a {
 }
 
 .sidebar nav a.active {
-  background: var(--accent-dim);
-  color: #fff;
+  background: rgba(56, 189, 248, 0.14);
+  color: var(--accent);
 }
 
 .nav-group {
@@ -193,7 +203,7 @@ a {
 
 .card-accent {
   border-color: var(--accent-dim);
-  background: linear-gradient(160deg, rgba(31, 111, 235, 0.16), var(--panel) 60%);
+  background: linear-gradient(160deg, rgba(129, 140, 248, 0.16), var(--panel) 60%);
 }
 
 .card-label {
@@ -327,23 +337,26 @@ select.input {
 }
 
 .btn.primary {
-  background: var(--accent-dim);
-  border-color: var(--accent-dim);
-  color: #fff;
+  background: var(--gradient-primary);
+  border-color: transparent;
+  /* Dark text on the cyan→indigo gradient (homepage-agy does the same);
+     white would sit at ~2.1:1 on the cyan end. */
+  color: var(--bg);
 }
 
 .btn.primary:hover:not(:disabled) {
-  background: var(--accent);
-  border-color: var(--accent);
+  border-color: transparent;
+  filter: brightness(1.12);
+  box-shadow: var(--glow);
 }
 
 .btn.danger {
   color: var(--red);
-  border-color: rgba(248, 81, 73, 0.4);
+  border-color: rgba(244, 63, 94, 0.4);
 }
 
 .btn.danger:hover:not(:disabled) {
-  background: rgba(248, 81, 73, 0.12);
+  background: rgba(244, 63, 94, 0.12);
 }
 
 .btn.small {
@@ -399,7 +412,7 @@ th {
 
 td {
   padding: 7px 10px;
-  border-bottom: 1px solid rgba(43, 51, 61, 0.6);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
   vertical-align: middle;
 }
 
@@ -470,20 +483,20 @@ td.money {
 
 .badge.ok {
   color: var(--green);
-  border-color: rgba(63, 185, 80, 0.45);
-  background: rgba(63, 185, 80, 0.1);
+  border-color: rgba(16, 185, 129, 0.45);
+  background: rgba(16, 185, 129, 0.1);
 }
 
 .badge.err {
   color: var(--red);
-  border-color: rgba(248, 81, 73, 0.45);
-  background: rgba(248, 81, 73, 0.1);
+  border-color: rgba(244, 63, 94, 0.45);
+  background: rgba(244, 63, 94, 0.1);
 }
 
 .badge.new {
   color: var(--accent);
-  border-color: rgba(88, 166, 255, 0.45);
-  background: rgba(88, 166, 255, 0.1);
+  border-color: rgba(56, 189, 248, 0.45);
+  background: rgba(56, 189, 248, 0.1);
 }
 
 .tag {
@@ -498,12 +511,12 @@ td.money {
 
 .tag.warn {
   color: var(--amber);
-  border-color: rgba(210, 153, 34, 0.5);
+  border-color: rgba(245, 158, 11, 0.5);
 }
 
 .tag.err {
   color: var(--red);
-  border-color: rgba(248, 81, 73, 0.5);
+  border-color: rgba(244, 63, 94, 0.5);
 }
 
 /* ---------- toggle switch ---------- */
@@ -569,15 +582,15 @@ td.money {
 }
 
 .banner-error {
-  background: rgba(248, 81, 73, 0.1);
-  border-color: rgba(248, 81, 73, 0.4);
-  color: #ffb3ae;
+  background: rgba(244, 63, 94, 0.1);
+  border-color: rgba(244, 63, 94, 0.4);
+  color: #fda4af;
 }
 
 .banner-info {
-  background: rgba(88, 166, 255, 0.08);
-  border-color: rgba(88, 166, 255, 0.35);
-  color: #a8c9f0;
+  background: rgba(56, 189, 248, 0.08);
+  border-color: rgba(56, 189, 248, 0.35);
+  color: #7dd3fc;
 }
 
 .loading {
@@ -699,13 +712,13 @@ td.money {
 }
 
 .toast-success {
-  border-color: rgba(63, 185, 80, 0.5);
-  color: #9eefad;
+  border-color: rgba(16, 185, 129, 0.5);
+  color: #6ee7b7;
 }
 
 .toast-error {
-  border-color: rgba(248, 81, 73, 0.55);
-  color: #ffb3ae;
+  border-color: rgba(244, 63, 94, 0.55);
+  color: #fda4af;
 }
 
 /* ---------- login ---------- */
@@ -733,7 +746,7 @@ td.money {
 .login-brand {
   font-family: var(--mono);
   font-size: 22px;
-  color: var(--accent);
+  color: var(--text);
   text-align: center;
   margin: 0 0 6px;
 }
@@ -785,8 +798,8 @@ td.money {
 
 .vanished {
   margin-top: 14px;
-  border: 1px solid rgba(210, 153, 34, 0.4);
-  background: rgba(210, 153, 34, 0.07);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  background: rgba(245, 158, 11, 0.07);
   border-radius: 6px;
   padding: 10px 12px;
 }
