@@ -4,6 +4,7 @@ package db
 import (
 	"database/sql"
 	"embed"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -36,6 +37,12 @@ func Open(path string) (*sql.DB, error) {
 	if err := db.Ping(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("db ping: %w", err)
+	}
+	// The DB holds password hashes, API keys and backend credentials: keep it
+	// owner-only even if the file or an earlier umask left it world-readable.
+	if err := os.Chmod(path, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
+		db.Close()
+		return nil, fmt.Errorf("db chmod %s: %w", path, err)
 	}
 	return db, nil
 }

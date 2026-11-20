@@ -35,15 +35,31 @@ func mulDiv(tokens, price int64) int64 {
 
 // Compute returns the cost of tok under model m's prices.
 func Compute(m *store.Model, tok Tokens) Costs {
-	billableIn := tok.Prompt - tok.Cached - tok.CacheWrite
-	if billableIn < 0 {
-		billableIn = 0
+	// Clamp the cache buckets into [0, Prompt] before billing: a hostile or
+	// buggy upstream must not inflate the cache line items past the total.
+	prompt := tok.Prompt
+	if prompt < 0 {
+		prompt = 0
 	}
+	cached, cacheWrite := tok.Cached, tok.CacheWrite
+	if cached < 0 {
+		cached = 0
+	}
+	if cached > prompt {
+		cached = prompt
+	}
+	if cacheWrite < 0 {
+		cacheWrite = 0
+	}
+	if cacheWrite > prompt-cached {
+		cacheWrite = prompt - cached
+	}
+	billableIn := prompt - cached - cacheWrite
 	c := Costs{
 		In:    mulDiv(billableIn, m.PriceIn),
 		Out:   mulDiv(tok.Completion, m.PriceOut),
-		Cache: mulDiv(tok.Cached, m.PriceCacheRead),
-		Write: mulDiv(tok.CacheWrite, m.PriceCacheWrite),
+		Cache: mulDiv(cached, m.PriceCacheRead),
+		Write: mulDiv(cacheWrite, m.PriceCacheWrite),
 	}
 	c.Total = c.In + c.Out + c.Cache + c.Write
 	return c

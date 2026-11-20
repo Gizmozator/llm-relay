@@ -18,6 +18,7 @@ type Recorder struct {
 	done   chan struct{}
 	mu     sync.Mutex
 	closed bool
+	drops  int64
 }
 
 func NewRecorder(db *sql.DB) *Recorder {
@@ -47,7 +48,12 @@ func (r *Recorder) Submit(e *store.UsageEvent) {
 	select {
 	case r.events <- e:
 	default:
-		log.Printf("usage recorder full, dropping event (user=%d key=%d)", e.UserID, e.KeyID)
+		// A saturated buffer is a sustained condition; logging every drop
+		// would be an unbounded log flood exactly when the box is loaded.
+		r.drops++
+		if r.drops == 1 || r.drops%100 == 0 {
+			log.Printf("usage recorder full, dropped %d events (latest user=%d key=%d)", r.drops, e.UserID, e.KeyID)
+		}
 	}
 }
 

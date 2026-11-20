@@ -83,3 +83,26 @@ func TestDeriveSessionNone(t *testing.T) {
 		t.Errorf("expected empty session, got %q", s)
 	}
 }
+
+func TestDeriveSessionResponsesSkipsEmptyTurn(t *testing.T) {
+	// First user turn is image-only (no text); the session must key off the
+	// first text-bearing turn, not the empty one.
+	withImage := []byte(`{"model":"m","input":[` +
+		`{"role":"user","type":"message","content":[{"type":"input_image","image_url":"http://x/y.png"}]},` +
+		`{"role":"user","type":"message","content":[{"type":"input_text","text":"real question"}]}]}`)
+	textOnly := []byte(`{"model":"m","input":[` +
+		`{"role":"user","type":"message","content":[{"type":"input_text","text":"real question"}]}]}`)
+	s1 := DeriveSession(EpResponses, withImage, 1, "m")
+	s2 := DeriveSession(EpResponses, textOnly, 1, "m")
+	if s1 == "" {
+		t.Fatal("image-only first turn produced no session")
+	}
+	if s1 != s2 {
+		t.Errorf("empty first turn not skipped: %q vs %q", s1, s2)
+	}
+	// All-empty input → no session.
+	allEmpty := []byte(`{"model":"m","input":[{"role":"user","type":"message","content":[]}]}`)
+	if s := DeriveSession(EpResponses, allEmpty, 1, "m"); s != "" {
+		t.Errorf("all-empty input should yield no session, got %q", s)
+	}
+}

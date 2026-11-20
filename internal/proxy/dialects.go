@@ -189,7 +189,11 @@ func firstUserInResponsesInput(raw json.RawMessage) string {
 	}
 	for _, it := range items {
 		if it.Role == "user" && (it.Type == "" || it.Type == "message") {
-			return flattenContent(it.Content)
+			// Skip empty user turns (e.g. image-only) so the session hash
+			// keys off the first turn that actually carries text.
+			if text := flattenContent(it.Content); text != "" {
+				return text
+			}
 		}
 	}
 	return ""

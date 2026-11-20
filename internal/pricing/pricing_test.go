@@ -67,3 +67,24 @@ func TestApplyMultiplier(t *testing.T) {
 		t.Errorf("0.4x of 1 = %d, want 0", e.In)
 	}
 }
+
+func TestComputeClampsCacheBuckets(t *testing.T) {
+	// A hostile upstream reports cached+write (1800) far above the real
+	// prompt (1000). Prices are chosen so the clamp is visible: without it
+	// the cache-write line would bill 900 phantom tokens.
+	m := &store.Model{PriceIn: 100, PriceOut: 0, PriceCacheRead: 1_000_000, PriceCacheWrite: 10_000}
+	c := Compute(m, Tokens{Prompt: 1000, Completion: 0, Cached: 900, CacheWrite: 900})
+	// cached stays 900; write clamps to prompt-cached = 100; billableIn = 0.
+	if c.Cache != 900 {
+		t.Errorf("Cache = %d, want 900", c.Cache)
+	}
+	if c.Write != 1 { // mulDiv(100, 10000) = 1, not mulDiv(900,10000)=9
+		t.Errorf("Write = %d, want 1 (cache-write clamped to 100 tokens)", c.Write)
+	}
+	if c.In != 0 {
+		t.Errorf("In = %d, want 0", c.In)
+	}
+	if c.Total < 0 {
+		t.Errorf("negative total: %+v", c)
+	}
+}
