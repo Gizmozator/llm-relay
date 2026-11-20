@@ -46,6 +46,10 @@ func (s *Server) AdminCreateUser(w http.ResponseWriter, r *http.Request, c *auth
 		writeErr(w, http.StatusBadRequest, "username required; password must be at least 8 characters")
 		return
 	}
+	if len(in.Password) > maxPassBytes {
+		writeErr(w, http.StatusBadRequest, "password must be at most 72 bytes")
+		return
+	}
 	if in.Role != "admin" && in.Role != "user" {
 		in.Role = "user"
 	}
@@ -98,10 +102,38 @@ func (s *Server) AdminUpdateUser(w http.ResponseWriter, r *http.Request, c *auth
 		writeErr(w, http.StatusBadRequest, "you cannot disable or demote your own account")
 		return
 	}
+	// Nor may any edit leave the system with zero enabled admins: that locks
+	// every /api/admin/* route and is unrecoverable without DB surgery.
+	if (in.Disabled != nil && *in.Disabled) || (in.Role != nil && *in.Role != "admin") {
+		target, err := store.UserByID(s.DB, id)
+		if errors.Is(err, store.ErrNotFound) {
+			writeErr(w, http.StatusNotFound, "user not found")
+			return
+		}
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		if target.Role == "admin" && !target.Disabled {
+			others, err := store.CountEnabledAdminsExcept(s.DB, id)
+			if err != nil {
+				writeErr(w, http.StatusInternalServerError, "internal error")
+				return
+			}
+			if others == 0 {
+				writeErr(w, http.StatusBadRequest, "this is the last enabled admin account")
+				return
+			}
+		}
+	}
 	var hash *string
 	if in.Password != nil {
 		if len(*in.Password) < 8 {
 			writeErr(w, http.StatusBadRequest, "password must be at least 8 characters")
+			return
+		}
+		if len(*in.Password) > maxPassBytes {
+			writeErr(w, http.StatusBadRequest, "password must be at most 72 bytes")
 			return
 		}
 		h, err := auth.HashPassword(*in.Password)

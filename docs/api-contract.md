@@ -10,10 +10,10 @@ Dates in query params (`from`, `to`) are `YYYY-MM-DD`, inclusive; default range 
 All `/api/*` except login require `Authorization: Bearer <jwt>`. The embedded SPA is served from the same port; this is the port to front with the reverse proxy.
 
 ### Auth
-- `POST /api/auth/login` — body `{"username","password"}` → `200 {"token":"<jwt>","user":{"id":1,"username":"a","role":"admin"}}` · `401` bad creds
+- `POST /api/auth/login` — body `{"username","password"}` → `200 {"token":"<jwt>","user":{"id":1,"username":"a","role":"admin"}}` · `401` bad creds · `429` (+`Retry-After`) after repeated failures from one client (per-IP token bucket; a successful login resets it)
 - `GET /api/me` → `{"id":1,"username":"a","display_name":"Ada","role":"admin"|"user","disabled":false,"created_at":"..."}`
 - `PATCH /api/me` — `{"display_name":"..."}` (≤64 chars) → updated user object
-- `POST /api/auth/change_password` — `{"old_password","new_password"}` (new ≥8 chars) → `204`; `401` when the old password is wrong, `400` on validation
+- `POST /api/auth/change_password` — `{"old_password","new_password"}` (new ≥8, ≤72 bytes) → `204`; `401` when the old password is wrong, `400` on validation. Changing a password revokes every JWT issued earlier for that user (they must sign in again).
 - `GET /api/info` → `{"relay_url":"https://relay.example.fi/v1","dashboard_url":"https://llm-relay.example.fi","currency":"EUR"}` (empty string = not configured; `relay_url` is what users put in their apps)
 
 ### Model catalog (all users)
@@ -32,9 +32,9 @@ Proxy requests may carry `X-Session-Id: <string>`; without it the relay derives 
 - `GET /api/usage/detail?from&to&model=&page=1&page_size=50` (`model` = exact `model_requested` match) → `{"total":123,"rows":[{"id":1,"ts":"...","username":"bob","key_name":"laptop","client_ip":"1.2.3.4","session_id":"a1b2c3d4e5f6","endpoint":"chat","model_requested":"halogen","prompt_tokens":10,"completion_tokens":20,"cached_tokens":0,"cache_write_tokens":0,"cost_micro":300,"streamed":true,"usage_estimated":false,"status_code":200,"latency_ms":1200,"error":null}]}` (newest first)
 
 ### Admin — users
-- `GET /api/admin/users` → `{"users":[{"id":1,"username":"a","display_name":"Ada","role":"admin","disabled":false,"created_at":"...","price_multiplier":1}]}`
+- `GET /api/admin/users` → `{"users":[{"id":1,"username":"a","display_name":"Ada","role":"admin","disabled":false,"created_at":"...","price_multiplier":1,"pass_changed_at":"...|"}]}` (`pass_changed_at` = last password change; JWTs issued earlier are revoked; `""` = never)
 - `POST /api/admin/users` — `{"username","display_name"?,"password","role":"admin"|"user"}` → `201` user object
-- `PATCH /api/admin/users/{id}` — any of `{"password","disabled","role","display_name","price_multiplier"}` → user object. `price_multiplier` (float >0, default 1) scales every cost recorded for that user at request time (snapshot semantics: changing it never rewrites existing rows). Admin-only: `GET /api/me` deliberately omits it.
+- `PATCH /api/admin/users/{id}` — any of `{"password","disabled","role","display_name","price_multiplier"}` → user object. `price_multiplier` (float >0, default 1) scales every cost recorded for that user at request time (snapshot semantics: changing it never rewrites existing rows). Admin-only: `GET /api/me` deliberately omits it. Guard: an update that would leave zero enabled admins → `400`; setting a password >72 bytes → `400`.
 
 ### Admin — backends
 - `GET /api/admin/backends` → `{"backends":[{"id":1,"name":"halogen","base_url":"http://engine-host:8731","has_key":false,"enabled":true,"last_probe_at":"...|null","last_probe_error":"...|null","server_version":"...|null","created_at":"...","model_count":2}]}`

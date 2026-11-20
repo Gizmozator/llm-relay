@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -45,7 +46,7 @@ func newTestEnv(t *testing.T, upstream http.Handler) *testEnv {
 
 	s := &api.Server{DB: d, JWTSecret: "testsecret", JWTTTL: time.Hour}
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/auth/login", s.Login)
+	mux.Handle("POST /api/auth/login", s.RateLimitLogin(s.Login))
 	mux.Handle("GET /api/me", s.Auth(s.Me))
 	mux.Handle("PATCH /api/me", s.Auth(s.UpdateMe))
 	mux.Handle("POST /api/auth/change_password", s.Auth(s.ChangePassword))
@@ -389,6 +390,9 @@ func TestChangePasswordAndUpdateMe(t *testing.T) {
 	if r := loginAs(t, e, "admin", "newpass123"); r == "" {
 		t.Errorf("new password login failed")
 	}
+	// The password change revoked the pre-change token (see
+	// TestPasswordChangeInvalidatesJWT), so continue with a fresh one.
+	tok = loginAs(t, e, "admin", "newpass123")
 
 	// Display name round-trip via PATCH /api/me.
 	resp = e.do(t, "PATCH", "/api/me", `{"display_name":"Ada Admin"}`, tok)
@@ -596,4 +600,133 @@ func TestUserMultiplierAndModelMeta(t *testing.T) {
 	if tp, _ := m["bench_tok_per_s"].(float64); tp <= 0 {
 		t.Errorf("catalog bench_tok_per_s: %v", m["bench_tok_per_s"])
 	}
+}
+
+func TestLoginRateLimit(t *testing.T) {
+	e := newTestEnv(t, http.NotFoundHandler())
+	// Keep failing until the bucket drains: each bcrypt compare takes real
+	// time under -race, so the exact burst count is timing-dependent; the
+	// invariant is that failures out-pace the refill and throttle kicks in.
+	throttled := false
+	for i := 0; i < 40; i++ {
+		resp := e.do(t, "POST", "/api/auth/login", `{"username":"admin","password":"wrongpass9"}`, "")
+		if resp.StatusCode == http.StatusTooManyRequests {
+			if resp.Header.Get("Retry-After") == "" {
+				t.Error("429 without Retry-After header")
+			}
+			resp.Body.Close()
+			throttled = true
+			break
+		}
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: %d, want 401", i+1, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+	if !throttled {
+		t.Fatal("40 login failures did not trigger the limiter")
+	}
+	// Even the correct password is throttled while the bucket is empty.
+	resp := e.do(t, "POST", "/api/auth/login", `{"username":"admin","password":"adminpass1"}`, "")
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("correct password while throttled: %d, want 429", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestPasswordChangeInvalidatesJWT(t *testing.T) {
+	e := newTestEnv(t, http.NotFoundHandler())
+	admin := login(t, e)
+	resp := e.do(t, "POST", "/api/admin/users", `{"username":"bob","password":"bobpass123","role":"user"}`, admin)
+	resp.Body.Close()
+	bob := loginAs(t, e, "bob", "bobpass123")
+
+	// RFC3339 second granularity: the change must land after the token's iat.
+	time.Sleep(1100 * time.Millisecond)
+	resp = e.do(t, "POST", "/api/auth/change_password",
+		`{"old_password":"bobpass123","new_password":"bobpass456"}`, bob)
+	if resp.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("change password: %d %s", resp.StatusCode, body)
+	}
+	resp.Body.Close()
+
+	// The pre-change token is dead.
+	if resp = e.do(t, "GET", "/api/me", "", bob); resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("old token after password change: %d, want 401", resp.StatusCode)
+	}
+	resp.Body.Close()
+	// A fresh login works.
+	if resp = e.do(t, "POST", "/api/auth/login", `{"username":"bob","password":"bobpass456"}`, ""); resp.StatusCode != 200 {
+		t.Errorf("login with new password: %d, want 200", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestPasswordLengthCap(t *testing.T) {
+	e := newTestEnv(t, http.NotFoundHandler())
+	admin := login(t, e)
+	long := `{"username":"big","password":"` + strings.Repeat("x", 80) + `","role":"user"}`
+	if resp := e.do(t, "POST", "/api/admin/users", long, admin); resp.StatusCode != 400 {
+		t.Errorf("80-byte password on create: %d, want 400", resp.StatusCode)
+	} else {
+		resp.Body.Close()
+	}
+	// The same cap guards admin-set and self-changed passwords.
+	if resp := e.do(t, "PATCH", "/api/admin/users/1", `{"password":"`+strings.Repeat("y", 80)+`"}`, admin); resp.StatusCode != 400 {
+		t.Errorf("80-byte password on admin update: %d, want 400", resp.StatusCode)
+	} else {
+		resp.Body.Close()
+	}
+	if resp := e.do(t, "POST", "/api/auth/change_password",
+		`{"old_password":"adminpass1","new_password":"`+strings.Repeat("z", 80)+`"}`, admin); resp.StatusCode != 400 {
+		t.Errorf("80-byte password on self change: %d, want 400", resp.StatusCode)
+	} else {
+		resp.Body.Close()
+	}
+}
+
+func TestAuthDBErrorIs500(t *testing.T) {
+	e := newTestEnv(t, http.NotFoundHandler())
+	admin := login(t, e)
+	e.db.Close() // any later store read fails
+	resp := e.do(t, "GET", "/api/me", "", admin)
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("DB outage: %d, want 500 (not a fake 401)", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestLastAdminGuard(t *testing.T) {
+	e := newTestEnv(t, http.NotFoundHandler())
+	admin := login(t, e)
+
+	resp := e.do(t, "POST", "/api/admin/users", `{"username":"carol","password":"carolpass1","role":"admin"}`, admin)
+	var carol store.User
+	json.NewDecoder(resp.Body).Decode(&carol)
+	resp.Body.Close()
+
+	// Demoting the second admin is fine while the caller remains.
+	resp = e.do(t, "PATCH", fmt.Sprintf("/api/admin/users/%d", carol.ID), `{"role":"user"}`, admin)
+	if resp.StatusCode != 200 {
+		t.Fatalf("demote second admin: %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// The caller is now the only enabled admin: self-demote is refused.
+	resp = e.do(t, "GET", "/api/me", "", admin)
+	var me map[string]any
+	json.NewDecoder(resp.Body).Decode(&me)
+	resp.Body.Close()
+	self := int64(me["id"].(float64))
+	resp = e.do(t, "PATCH", fmt.Sprintf("/api/admin/users/%d", self), `{"role":"user"}`, admin)
+	if resp.StatusCode != 400 {
+		t.Errorf("demote last admin: %d, want 400", resp.StatusCode)
+	}
+	resp.Body.Close()
+	resp = e.do(t, "PATCH", fmt.Sprintf("/api/admin/users/%d", self), `{"disabled":true}`, admin)
+	if resp.StatusCode != 400 {
+		t.Errorf("disable last admin: %d, want 400", resp.StatusCode)
+	}
+	resp.Body.Close()
 }

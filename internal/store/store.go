@@ -30,14 +30,17 @@ type User struct {
 	Disabled        bool    `json:"disabled"`
 	CreatedAt       string  `json:"created_at"`
 	PriceMultiplier float64 `json:"price_multiplier"`
+	PassChangedAt   string  `json:"pass_changed_at"`
 }
 
-const userCols = `id, username, display_name, role, disabled, created_at, price_multiplier`
+const userCols = `id, username, display_name, role, disabled, created_at, price_multiplier,
+	COALESCE(pass_changed_at,'')`
 
 func scanUser(row interface{ Scan(...any) error }) (*User, error) {
 	u := &User{}
 	var dis int
-	if err := row.Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &dis, &u.CreatedAt, &u.PriceMultiplier); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &dis, &u.CreatedAt,
+		&u.PriceMultiplier, &u.PassChangedAt); err != nil {
 		return nil, err
 	}
 	u.Disabled = dis != 0
@@ -120,7 +123,8 @@ func UpdateUser(db *sql.DB, id int64, passwordHash *string, disabled *bool, role
 		}
 	}
 	if passwordHash != nil {
-		if _, err := db.Exec(`UPDATE users SET pass_hash=? WHERE id=?`, *passwordHash, id); err != nil {
+		// Stamping pass_changed_at invalidates JWTs issued earlier (see Auth).
+		if _, err := db.Exec(`UPDATE users SET pass_hash=?, pass_changed_at=? WHERE id=?`, *passwordHash, now(), id); err != nil {
 			return nil, err
 		}
 	}
@@ -144,6 +148,14 @@ func UpdateUser(db *sql.DB, id int64, passwordHash *string, disabled *bool, role
 func UserCount(db *sql.DB) (int, error) {
 	var n int
 	err := db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&n)
+	return n, err
+}
+
+// CountEnabledAdminsExcept counts enabled admins other than excludeID.
+// AdminUpdateUser uses it to refuse removing the last one.
+func CountEnabledAdminsExcept(db *sql.DB, excludeID int64) (int, error) {
+	var n int
+	err := db.QueryRow(`SELECT COUNT(*) FROM users WHERE role='admin' AND disabled=0 AND id<>?`, excludeID).Scan(&n)
 	return n, err
 }
 

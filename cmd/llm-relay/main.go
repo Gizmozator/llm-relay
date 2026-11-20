@@ -70,7 +70,7 @@ func main() {
 	// behind the reverse proxy.
 	adminMux := http.NewServeMux()
 	adminMux.HandleFunc("GET /healthz", healthz)
-	adminMux.HandleFunc("POST /api/auth/login", apiSrv.Login)
+	adminMux.Handle("POST /api/auth/login", apiSrv.RateLimitLogin(apiSrv.Login))
 	adminMux.Handle("GET /api/me", apiSrv.Auth(apiSrv.Me))
 	adminMux.Handle("PATCH /api/me", apiSrv.Auth(apiSrv.UpdateMe))
 	adminMux.Handle("POST /api/auth/change_password", apiSrv.Auth(apiSrv.ChangePassword))

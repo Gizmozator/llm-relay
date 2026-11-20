@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"llm-relay/internal/auth"
@@ -22,6 +23,16 @@ type Server struct {
 	JWTTTL       time.Duration
 	RelayURL     string
 	DashboardURL string
+
+	loginLimit *loginLimiter
+	limitOnce  sync.Once
+}
+
+// limiter returns the lazily created login limiter (Server is built as a
+// struct literal in main and tests).
+func (s *Server) limiter() *loginLimiter {
+	s.limitOnce.Do(func() { s.loginLimit = newLoginLimiter() })
+	return s.loginLimit
 }
 
 // ---------------------------------------------------------------- plumbing
@@ -41,6 +52,10 @@ func decode(r *http.Request, v any) error {
 	return json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(v)
 }
 
+// maxPassBytes is bcrypt's hard input limit; longer input errors out in the
+// hash function, so reject it as plain input validation instead.
+const maxPassBytes = 72
+
 // Auth wraps a handler requiring a valid dashboard JWT.
 func (s *Server) Auth(next func(w http.ResponseWriter, r *http.Request, c *auth.Claims)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -52,13 +67,25 @@ func (s *Server) Auth(next func(w http.ResponseWriter, r *http.Request, c *auth.
 		// Re-check the live row: disabled accounts lose access immediately and
 		// role changes take effect without waiting for the JWT to expire.
 		user, err := store.UserByID(s.DB, c.UserID)
-		if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
 			writeErr(w, http.StatusUnauthorized, "account unavailable")
+			return
+		}
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "internal error")
 			return
 		}
 		if user.Disabled {
 			writeErr(w, http.StatusForbidden, "account disabled")
 			return
+		}
+		// Tokens issued before the last password change are dead: rotating a
+		// password must revoke sessions a thief may already hold.
+		if user.PassChangedAt != "" && c.IssuedAt != nil {
+			if changed, perr := time.Parse(time.RFC3339, user.PassChangedAt); perr == nil && c.IssuedAt.Before(changed) {
+				writeErr(w, http.StatusUnauthorized, "session expired, sign in again")
+				return
+			}
 		}
 		c.Role = user.Role
 		next(w, r, c)
@@ -227,6 +254,10 @@ func (s *Server) ChangePassword(w http.ResponseWriter, r *http.Request, c *auth.
 	}
 	if len(in.NewPassword) < 8 {
 		writeErr(w, http.StatusBadRequest, "new password must be at least 8 characters")
+		return
+	}
+	if len(in.NewPassword) > maxPassBytes {
+		writeErr(w, http.StatusBadRequest, "new password must be at most 72 bytes")
 		return
 	}
 	hash, err := store.PasswordHashByUserID(s.DB, c.UserID)
