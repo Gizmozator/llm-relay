@@ -1,6 +1,8 @@
+import { useState } from 'react';
 import { NavLink, Navigate, Outlet } from 'react-router-dom';
 import { useAuth } from './auth';
 import { Loading } from './components/ui';
+import AccountModal from './components/AccountModal';
 import type { ReactNode } from 'react';
 
 export function RequireAuth({ children }: { children: ReactNode }) {
@@ -22,6 +24,7 @@ function navClass({ isActive }: { isActive: boolean }): string {
 
 export default function Layout() {
   const { user, logout } = useAuth();
+  const [showAccount, setShowAccount] = useState(false);
   if (!user) return <Navigate to="/login" replace />;
   const isAdmin = user.role === 'admin';
 
@@ -61,8 +64,11 @@ export default function Layout() {
       <div className="main">
         <header className="topbar">
           <div className="topbar-user">
-            <span className="username">{user.username}</span>
+            <span className="username">{user.display_name || user.username}</span>
             <span className="role-badge">{user.role}</span>
+            <button className="btn small" onClick={() => setShowAccount(true)}>
+              Account
+            </button>
             <button className="btn small" onClick={logout}>
               Log out
             </button>
@@ -72,6 +78,7 @@ export default function Layout() {
           <Outlet />
         </div>
       </div>
+      {showAccount && <AccountModal onClose={() => setShowAccount(false)} />}
     </div>
   );
 }

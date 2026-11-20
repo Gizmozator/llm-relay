@@ -23,28 +23,29 @@ func now() string { return time.Now().UTC().Format(time.RFC3339) }
 // ---------------------------------------------------------------- users
 
 type User struct {
-	ID        int64  `json:"id"`
-	Username  string `json:"username"`
-	Role      string `json:"role"`
-	Disabled  bool   `json:"disabled"`
-	CreatedAt string `json:"created_at"`
+	ID          int64  `json:"id"`
+	Username    string `json:"username"`
+	DisplayName string `json:"display_name"`
+	Role        string `json:"role"`
+	Disabled    bool   `json:"disabled"`
+	CreatedAt   string `json:"created_at"`
 }
 
-const userCols = `id, username, role, disabled, created_at`
+const userCols = `id, username, display_name, role, disabled, created_at`
 
 func scanUser(row interface{ Scan(...any) error }) (*User, error) {
 	u := &User{}
 	var dis int
-	if err := row.Scan(&u.ID, &u.Username, &u.Role, &dis, &u.CreatedAt); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &dis, &u.CreatedAt); err != nil {
 		return nil, err
 	}
 	u.Disabled = dis != 0
 	return u, nil
 }
 
-func CreateUser(db *sql.DB, username, passHash, role string) (*User, error) {
-	res, err := db.Exec(`INSERT INTO users(username, pass_hash, role, created_at) VALUES(?,?,?,?)`,
-		username, passHash, role, now())
+func CreateUser(db *sql.DB, username, displayName, passHash, role string) (*User, error) {
+	res, err := db.Exec(`INSERT INTO users(username, display_name, pass_hash, role, created_at) VALUES(?,?,?,?,?)`,
+		username, displayName, passHash, role, now())
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
 			return nil, ErrExists
@@ -52,15 +53,15 @@ func CreateUser(db *sql.DB, username, passHash, role string) (*User, error) {
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
-	return &User{ID: id, Username: username, Role: role, CreatedAt: now()}, nil
+	return &User{ID: id, Username: username, DisplayName: displayName, Role: role, CreatedAt: now()}, nil
 }
 
 func UserByName(db *sql.DB, username string) (*User, string, error) {
 	u := &User{}
 	var hash string
 	var dis int
-	err := db.QueryRow(`SELECT id, username, role, disabled, created_at, pass_hash FROM users WHERE username=?`, username).
-		Scan(&u.ID, &u.Username, &u.Role, &dis, &u.CreatedAt, &hash)
+	err := db.QueryRow(`SELECT id, username, display_name, role, disabled, created_at, pass_hash FROM users WHERE username=?`, username).
+		Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &dis, &u.CreatedAt, &hash)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, "", ErrNotFound
 	}
@@ -77,6 +78,16 @@ func UserByID(db *sql.DB, id int64) (*User, error) {
 		return nil, ErrNotFound
 	}
 	return u, err
+}
+
+// PasswordHashByUserID returns the stored bcrypt hash for password checks.
+func PasswordHashByUserID(db *sql.DB, id int64) (string, error) {
+	var hash string
+	err := db.QueryRow(`SELECT pass_hash FROM users WHERE id=?`, id).Scan(&hash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return hash, err
 }
 
 func ListUsers(db *sql.DB) ([]User, error) {
@@ -96,7 +107,12 @@ func ListUsers(db *sql.DB) ([]User, error) {
 	return out, rows.Err()
 }
 
-func UpdateUser(db *sql.DB, id int64, passwordHash *string, disabled *bool, role *string) (*User, error) {
+func UpdateUser(db *sql.DB, id int64, passwordHash *string, disabled *bool, role *string, displayName *string) (*User, error) {
+	if displayName != nil {
+		if _, err := db.Exec(`UPDATE users SET display_name=? WHERE id=?`, *displayName, id); err != nil {
+			return nil, err
+		}
+	}
 	if passwordHash != nil {
 		if _, err := db.Exec(`UPDATE users SET pass_hash=? WHERE id=?`, *passwordHash, id); err != nil {
 			return nil, err

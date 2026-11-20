@@ -47,7 +47,7 @@ func newHarnessWithURL(t *testing.T, up *httptest.Server) *harness {
 	t.Cleanup(func() { d.Close() })
 
 	hash, _ := auth.HashPassword("x")
-	user, err := store.CreateUser(d, "bob", hash, "user")
+	user, err := store.CreateUser(d, "bob", "", hash, "user")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -316,7 +316,7 @@ func TestProxyStreamingCapturesUsage(t *testing.T) {
 	db.Migrate(d)
 	defer d.Close()
 	hash, _ := auth.HashPassword("x")
-	u, _ := store.CreateUser(d, "b", hash, "user")
+	u, _ := store.CreateUser(d, "b", "", hash, "user")
 	plain, kh, pfx, _ := auth.GenerateAPIKey()
 	store.CreateKey(d, u.ID, "k", kh, pfx)
 	b, _ := store.CreateBackend(d, "f", up.URL, "")

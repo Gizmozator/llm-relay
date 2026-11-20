@@ -70,6 +70,8 @@ func main() {
 	adminMux.HandleFunc("GET /healthz", healthz)
 	adminMux.HandleFunc("POST /api/auth/login", apiSrv.Login)
 	adminMux.Handle("GET /api/me", apiSrv.Auth(apiSrv.Me))
+	adminMux.Handle("PATCH /api/me", apiSrv.Auth(apiSrv.UpdateMe))
+	adminMux.Handle("POST /api/auth/change_password", apiSrv.Auth(apiSrv.ChangePassword))
 	adminMux.Handle("GET /api/info", apiSrv.Auth(apiSrv.Info))
 	adminMux.Handle("GET /api/keys", apiSrv.Auth(apiSrv.ListKeys))
 	adminMux.Handle("POST /api/keys", apiSrv.Auth(apiSrv.CreateKey))
@@ -176,7 +178,7 @@ func bootstrapAdmin(d *sql.DB, cfg *config.Config) {
 	if err != nil {
 		log.Fatalf("startup: admin hash: %v", err)
 	}
-	if _, err := store.CreateUser(d, cfg.AdminUsername, hash, "admin"); err != nil {
+	if _, err := store.CreateUser(d, cfg.AdminUsername, "", hash, "admin"); err != nil {
 		log.Fatalf("startup: admin create: %v", err)
 	}
 	log.Printf("bootstrap admin account created: %s", cfg.AdminUsername)

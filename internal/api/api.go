@@ -148,6 +148,67 @@ func (s *Server) Info(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
 	})
 }
 
+// UpdateMe lets a user edit their own display name.
+func (s *Server) UpdateMe(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
+	var in struct {
+		DisplayName *string `json:"display_name"`
+	}
+	if err := decode(r, &in); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if in.DisplayName == nil {
+		writeErr(w, http.StatusBadRequest, "display_name required")
+		return
+	}
+	name := strings.TrimSpace(*in.DisplayName)
+	if len(name) > 64 {
+		writeErr(w, http.StatusBadRequest, "display name too long (max 64)")
+		return
+	}
+	user, err := store.UpdateUser(s.DB, c.UserID, nil, nil, nil, &name)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "update failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, user)
+}
+
+// ChangePassword verifies the current password before setting a new one.
+func (s *Server) ChangePassword(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
+	var in struct {
+		OldPassword string `json:"old_password"`
+		NewPassword string `json:"new_password"`
+	}
+	if err := decode(r, &in); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if len(in.NewPassword) < 8 {
+		writeErr(w, http.StatusBadRequest, "new password must be at least 8 characters")
+		return
+	}
+	hash, err := store.PasswordHashByUserID(s.DB, c.UserID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if !auth.CheckPassword(hash, in.OldPassword) {
+		writeErr(w, http.StatusUnauthorized, "current password is incorrect")
+		return
+	}
+	newHash, err := auth.HashPassword(in.NewPassword)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if _, err := store.UpdateUser(s.DB, c.UserID, &newHash, nil, nil, nil); err != nil {
+		writeErr(w, http.StatusInternalServerError, "password change failed")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // ---------------------------------------------------------------- keys
 
 func (s *Server) ListKeys(w http.ResponseWriter, r *http.Request, c *auth.Claims) {

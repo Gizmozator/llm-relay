@@ -25,9 +25,10 @@ func (s *Server) AdminListUsers(w http.ResponseWriter, r *http.Request, c *auth.
 
 func (s *Server) AdminCreateUser(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
 	var in struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-		Role     string `json:"role"`
+		Username    string `json:"username"`
+		DisplayName string `json:"display_name"`
+		Password    string `json:"password"`
+		Role        string `json:"role"`
 	}
 	if err := decode(r, &in); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON")
@@ -46,7 +47,7 @@ func (s *Server) AdminCreateUser(w http.ResponseWriter, r *http.Request, c *auth
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	user, err := store.CreateUser(s.DB, in.Username, hash, in.Role)
+	user, err := store.CreateUser(s.DB, in.Username, strings.TrimSpace(in.DisplayName), hash, in.Role)
 	if err == store.ErrExists {
 		writeErr(w, http.StatusConflict, "username taken")
 		return
@@ -65,9 +66,10 @@ func (s *Server) AdminUpdateUser(w http.ResponseWriter, r *http.Request, c *auth
 		return
 	}
 	var in struct {
-		Password *string `json:"password"`
-		Disabled *bool   `json:"disabled"`
-		Role     *string `json:"role"`
+		Password    *string `json:"password"`
+		Disabled    *bool   `json:"disabled"`
+		Role        *string `json:"role"`
+		DisplayName *string `json:"display_name"`
 	}
 	if err := decode(r, &in); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON")
@@ -95,7 +97,7 @@ func (s *Server) AdminUpdateUser(w http.ResponseWriter, r *http.Request, c *auth
 		writeErr(w, http.StatusBadRequest, "role must be admin or user")
 		return
 	}
-	user, err := store.UpdateUser(s.DB, id, hash, in.Disabled, in.Role)
+	user, err := store.UpdateUser(s.DB, id, hash, in.Disabled, in.Role, in.DisplayName)
 	if err == store.ErrNotFound {
 		writeErr(w, http.StatusNotFound, "user not found")
 		return

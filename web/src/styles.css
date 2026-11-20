@@ -649,6 +649,20 @@ td.money {
   margin-top: 14px;
 }
 
+.account-section h4 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin: 0;
+}
+
+.divider {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 16px 0;
+}
+
 /* ---------- toasts ---------- */
 
 .toast-stack {

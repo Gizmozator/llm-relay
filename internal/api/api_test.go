@@ -38,7 +38,7 @@ func newTestEnv(t *testing.T, upstream http.Handler) *testEnv {
 	t.Cleanup(func() { d.Close() })
 
 	hash, _ := auth.HashPassword("adminpass1")
-	if _, err := store.CreateUser(d, "admin", hash, "admin"); err != nil {
+	if _, err := store.CreateUser(d, "admin", "", hash, "admin"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -46,6 +46,8 @@ func newTestEnv(t *testing.T, upstream http.Handler) *testEnv {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/auth/login", s.Login)
 	mux.Handle("GET /api/me", s.Auth(s.Me))
+	mux.Handle("PATCH /api/me", s.Auth(s.UpdateMe))
+	mux.Handle("POST /api/auth/change_password", s.Auth(s.ChangePassword))
 	mux.Handle("GET /api/info", s.Auth(s.Info))
 	mux.Handle("POST /api/keys", s.Auth(s.CreateKey))
 	mux.Handle("GET /api/keys", s.Auth(s.ListKeys))
@@ -266,7 +268,7 @@ func TestDisabledUserJWTRejected(t *testing.T) {
 		t.Fatal("bob not found")
 	}
 	// PATCH route is not on the test mux; disable directly in the DB.
-	if _, err := store.UpdateUser(e.db, bobID, nil, ptrTrue(), nil); err != nil {
+	if _, err := store.UpdateUser(e.db, bobID, nil, ptrTrue(), nil, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -277,6 +279,54 @@ func TestDisabledUserJWTRejected(t *testing.T) {
 }
 
 func ptrTrue() *bool { b := true; return &b }
+
+func TestChangePasswordAndUpdateMe(t *testing.T) {
+	e := newTestEnv(t, http.NotFoundHandler())
+	tok := login(t, e)
+
+	// Wrong old password → 401.
+	resp := e.do(t, "POST", "/api/auth/change_password", `{"old_password":"wrong","new_password":"newpass123"}`, tok)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("wrong old password status %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Too-short new password → 400.
+	resp = e.do(t, "POST", "/api/auth/change_password", `{"old_password":"adminpass1","new_password":"short"}`, tok)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("short password status %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Correct change → 204, old login fails, new login works.
+	resp = e.do(t, "POST", "/api/auth/change_password", `{"old_password":"adminpass1","new_password":"newpass123"}`, tok)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("change status %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	if r := e.do(t, "POST", "/api/auth/login", `{"username":"admin","password":"adminpass1"}`, ""); r.StatusCode != 401 {
+		t.Errorf("old password still works")
+	}
+	if r := loginAs(t, e, "admin", "newpass123"); r == "" {
+		t.Errorf("new password login failed")
+	}
+
+	// Display name round-trip via PATCH /api/me.
+	resp = e.do(t, "PATCH", "/api/me", `{"display_name":"Ada Admin"}`, tok)
+	var u store.User
+	json.NewDecoder(resp.Body).Decode(&u)
+	resp.Body.Close()
+	if u.DisplayName != "Ada Admin" {
+		t.Fatalf("display_name = %q", u.DisplayName)
+	}
+	resp = e.do(t, "GET", "/api/me", "", tok)
+	u = store.User{}
+	json.NewDecoder(resp.Body).Decode(&u)
+	resp.Body.Close()
+	if u.DisplayName != "Ada Admin" {
+		t.Errorf("me display_name = %q", u.DisplayName)
+	}
+}
 
 func TestUsageScopingPerUser(t *testing.T) {
 	e := newTestEnv(t, http.NotFoundHandler())

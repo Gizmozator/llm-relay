@@ -15,6 +15,8 @@ interface AuthContextValue {
   user: User | null;
   login: (username: string, password: string) => Promise<void>;
   logout: () => void;
+  /** Replace the stored user object after a /api/me update (e.g. display name). */
+  refreshUser: (u: User) => void;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -54,8 +56,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null);
   };
 
+  const refreshUser = (u: User) => {
+    const token = getToken();
+    if (token) saveSession({ token, user: u });
+    setUser(u);
+  };
+
   return (
-    <AuthContext.Provider value={{ ready, user, login, logout }}>{children}</AuthContext.Provider>
+    <AuthContext.Provider value={{ ready, user, login, logout, refreshUser }}>
+      {children}
+    </AuthContext.Provider>
   );
 }
 

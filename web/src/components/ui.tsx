@@ -169,11 +169,15 @@ export function EditableText({
   value,
   onCommit,
   mono,
+  allowEmpty,
+  placeholder,
   ariaLabel,
 }: {
   value: string;
   onCommit: (v: string) => void;
   mono?: boolean;
+  allowEmpty?: boolean;
+  placeholder?: string;
   ariaLabel?: string;
 }) {
   const [v, setV] = useState(value);
@@ -181,7 +185,7 @@ export function EditableText({
 
   const commit = () => {
     const next = v.trim();
-    if (next && next !== value) onCommit(next);
+    if (next ? next !== value : allowEmpty && value) onCommit(next);
     else setV(value);
   };
 
@@ -189,6 +193,7 @@ export function EditableText({
     <input
       className={`input input-inline${mono ? ' mono' : ''}`}
       value={v}
+      placeholder={placeholder}
       aria-label={ariaLabel}
       onChange={(e) => setV(e.target.value)}
       onBlur={commit}

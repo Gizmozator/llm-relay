@@ -5,7 +5,7 @@ import type { Role } from '../api';
 import { fmtDateTime } from '../format';
 import { useLoad } from '../useLoad';
 import { useToast } from '../components/Toast';
-import { Banner, Empty, Field, Loading, Modal } from '../components/ui';
+import { Banner, EditableText, Empty, Field, Loading, Modal } from '../components/ui';
 import { useAuth } from '../auth';
 
 export default function UsersPage() {
@@ -14,6 +14,7 @@ export default function UsersPage() {
   const users = useLoad(() => api.users().then((r) => r.users), []);
 
   const [username, setUsername] = useState('');
+  const [displayName, setDisplayName] = useState('');
   const [password, setPassword] = useState('');
   const [role, setRole] = useState<Role>('user');
   const [busy, setBusy] = useState(false);
@@ -24,9 +25,10 @@ export default function UsersPage() {
     if (!username.trim() || !password) return;
     setBusy(true);
     try {
-      await api.createUser(username.trim(), password, role);
+      await api.createUser(username.trim(), password, role, displayName.trim() || undefined);
       toast.push('success', `User “${username.trim()}” created.`);
       setUsername('');
+      setDisplayName('');
       setPassword('');
       setRole('user');
       users.reload();
@@ -37,7 +39,7 @@ export default function UsersPage() {
     }
   };
 
-  const patch = async (id: number, p: { disabled?: boolean; role?: Role }) => {
+  const patch = async (id: number, p: { disabled?: boolean; role?: Role; display_name?: string }) => {
     try {
       await api.patchUser(id, p);
       users.reload();
@@ -60,6 +62,14 @@ export default function UsersPage() {
             value={username}
             autoComplete="off"
             onChange={(e) => setUsername(e.target.value)}
+          />
+        </Field>
+        <Field label="Display name (optional)">
+          <input
+            className="input"
+            value={displayName}
+            maxLength={64}
+            onChange={(e) => setDisplayName(e.target.value)}
           />
         </Field>
         <Field label="Password">
@@ -96,6 +106,7 @@ export default function UsersPage() {
                 <tr>
                   <th>ID</th>
                   <th>Username</th>
+                  <th>Name</th>
                   <th>Role</th>
                   <th>Status</th>
                   <th>Created</th>
@@ -111,6 +122,15 @@ export default function UsersPage() {
                       <td>
                         {u.username}
                         {isSelf && <span className="tag">you</span>}
+                      </td>
+                      <td>
+                        <EditableText
+                          value={u.display_name ?? ''}
+                          allowEmpty
+                          placeholder="—"
+                          ariaLabel={`Display name of ${u.username}`}
+                          onCommit={(v) => patch(u.id, { display_name: v })}
+                        />
                       </td>
                       <td>
                         <select

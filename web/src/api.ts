@@ -6,7 +6,10 @@ export type Role = 'admin' | 'user';
 export interface User {
   id: number;
   username: string;
+  display_name?: string;
   role: Role;
+  disabled?: boolean;
+  created_at?: string;
 }
 
 export interface Session {
@@ -81,6 +84,7 @@ export interface UsageDetail {
 export interface AdminUser {
   id: number;
   username: string;
+  display_name?: string;
   role: Role;
   disabled: boolean;
   created_at: string;
@@ -261,6 +265,9 @@ export const api = {
   login: (username: string, password: string) =>
     request<Session>('POST', '/api/auth/login', { body: { username, password } }),
   me: () => request<User>('GET', '/api/me'),
+  patchMe: (display_name: string) => request<User>('PATCH', '/api/me', { body: { display_name } }),
+  changePassword: (old_password: string, new_password: string) =>
+    request<void>('POST', '/api/auth/change_password', { body: { old_password, new_password } }),
   info: () => request<Info>('GET', '/api/info'),
 
   // api keys (own)
@@ -280,10 +287,14 @@ export const api = {
 
   // admin — users
   users: () => request<{ users: AdminUser[] }>('GET', '/api/admin/users'),
-  createUser: (username: string, password: string, role: Role) =>
-    request<AdminUser>('POST', '/api/admin/users', { body: { username, password, role } }),
-  patchUser: (id: number, patch: { password?: string; disabled?: boolean; role?: Role }) =>
-    request<AdminUser>('PATCH', `/api/admin/users/${id}`, { body: patch }),
+  createUser: (username: string, password: string, role: Role, display_name?: string) =>
+    request<AdminUser>('POST', '/api/admin/users', {
+      body: display_name ? { username, display_name, password, role } : { username, password, role },
+    }),
+  patchUser: (
+    id: number,
+    patch: { password?: string; disabled?: boolean; role?: Role; display_name?: string },
+  ) => request<AdminUser>('PATCH', `/api/admin/users/${id}`, { body: patch }),
 
   // admin — backends
   backends: () => request<{ backends: Backend[] }>('GET', '/api/admin/backends'),
