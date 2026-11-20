@@ -255,35 +255,85 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request, endpoint string
 		tok, costs, stream, estimated, status, errMsg)
 }
 
+// keepaliveInterval is the maximum upstream silence tolerated in a stream
+// before a keepalive comment is injected toward the client. Cloudflare (and
+// other edge proxies) cut connections after ~100 s without packets; long
+// prefills on big prompts easily exceed that before the first token. SSE
+// comment lines are ignored by every compliant parser.
+var keepaliveInterval = 20 * time.Second
+
+var keepaliveLine = []byte(": keepalive\n\n")
+
+type streamLine struct {
+	line []byte
+	err  error
+}
+
 // copyStream relays SSE bytes line-by-line, flushing every chunk, while the
 // accumulator scans data payloads. Lines are capped at 16 MiB (a longer
-// "line" is a broken or hostile upstream). Returns 499 on client hang-up,
-// 500 if the upstream stream broke, 200 on clean EOF.
+// "line" is a broken or hostile upstream). During upstream silence a keepalive
+// comment is written so edge proxies keep the connection. Returns 499 on
+// client hang-up, 500 if the upstream stream broke, 200 on clean EOF.
 func (h *Handler) copyStream(w http.ResponseWriter, body io.Reader, acc *sseAccum, r *http.Request) int {
 	fl, _ := w.(http.Flusher)
-	sc := bufio.NewScanner(body)
-	sc.Buffer(make([]byte, 0, 64<<10), 16<<20)
-	for sc.Scan() {
-		line := append(sc.Bytes(), '\n')
-		if _, werr := w.Write(line); werr != nil {
+	lines := make(chan streamLine, 1)
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		defer close(lines)
+		sc := bufio.NewScanner(body)
+		sc.Buffer(make([]byte, 0, 64<<10), 16<<20)
+		for sc.Scan() {
+			select {
+			case lines <- streamLine{line: append(sc.Bytes(), '\n')}:
+			case <-done:
+				return
+			}
+		}
+		if err := sc.Err(); err != nil {
+			select {
+			case lines <- streamLine{err: err}:
+			case <-done:
+			}
+		}
+	}()
+	tk := time.NewTicker(keepaliveInterval)
+	defer tk.Stop()
+	for {
+		select {
+		case sl, ok := <-lines:
+			if !ok {
+				return http.StatusOK
+			}
+			if sl.err != nil {
+				switch {
+				case errors.Is(sl.err, context.Canceled) || errors.Is(r.Context().Err(), context.Canceled):
+					return statusClientClosed
+				default:
+					return http.StatusInternalServerError
+				}
+			}
+			if _, werr := w.Write(sl.line); werr != nil {
+				return statusClientClosed
+			}
+			if fl != nil {
+				fl.Flush()
+			}
+			if trimmed := bytes.TrimSpace(sl.line); bytes.HasPrefix(trimmed, []byte("data:")) {
+				acc.feed(bytes.TrimSpace(trimmed[5:]))
+			}
+			tk.Reset(keepaliveInterval)
+		case <-tk.C:
+			if _, werr := w.Write(keepaliveLine); werr != nil {
+				return statusClientClosed
+			}
+			if fl != nil {
+				fl.Flush()
+			}
+		case <-r.Context().Done():
 			return statusClientClosed
 		}
-		if fl != nil {
-			fl.Flush()
-		}
-		if trimmed := bytes.TrimSpace(line); bytes.HasPrefix(trimmed, []byte("data:")) {
-			acc.feed(bytes.TrimSpace(trimmed[5:]))
-		}
 	}
-	if err := sc.Err(); err != nil {
-		switch {
-		case errors.Is(err, context.Canceled) || errors.Is(r.Context().Err(), context.Canceled):
-			return statusClientClosed
-		default:
-			return http.StatusInternalServerError
-		}
-	}
-	return http.StatusOK
 }
 
 func (h *Handler) record(record bool, start time.Time, u *store.User, k *store.APIKey, r *http.Request,

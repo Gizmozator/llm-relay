@@ -27,7 +27,9 @@ priced. Admins manage backends, the model catalog and prices; users see their ow
 
 Usage is taken from upstream `usage` reports (streaming included); a chars/4 heuristic is the
 fallback and such rows are flagged `usage_estimated`. Sessions come from the `X-Session-Id`
-header or a derived conversation hash.
+header or a derived conversation hash. Streams carry an SSE comment line (`: keepalive`)
+roughly every 20 s of upstream silence so edge proxies (Cloudflare's ~100 s idle limit)
+don't cut long prefills; compliant SSE parsers ignore comments.
 
 ## Quickstart
 

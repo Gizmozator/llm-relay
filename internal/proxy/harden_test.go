@@ -3,10 +3,12 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // --- rewriteBody / forceIncludeUsage hardening -----------------------------
@@ -124,6 +126,38 @@ func TestCopyStreamCRLFAndFinalLineNoNewline(t *testing.T) {
 	}
 	if tok, ok := acc.result(); !ok || tok.Prompt != 5 || tok.Completion != 2 {
 		t.Errorf("accumulator missed usage: %+v ok=%v", tok, ok)
+	}
+}
+
+func TestCopyStreamKeepaliveDuringSilence(t *testing.T) {
+	old := keepaliveInterval
+	keepaliveInterval = 40 * time.Millisecond
+	defer func() { keepaliveInterval = old }()
+
+	rp, wp := io.Pipe()
+	go func() {
+		// silent long enough for several keepalives, then real data
+		time.Sleep(150 * time.Millisecond)
+		wp.Write([]byte("data: {\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2}}\n"))
+		wp.Close()
+	}()
+	rec := httptest.NewRecorder()
+	acc := newSSEAccum(EpChat)
+	r := httptest.NewRequest(http.MethodPost, "/", nil)
+	if got := (&Handler{}).copyStream(rec, rp, acc, r); got != http.StatusOK {
+		t.Fatalf("status = %d, want 200", got)
+	}
+	out := rec.Body.String()
+	ka := strings.Index(out, ": keepalive")
+	data := strings.Index(out, "data:")
+	if ka < 0 {
+		t.Fatalf("no keepalive injected during upstream silence: %q", out)
+	}
+	if data >= 0 && ka > data {
+		t.Errorf("keepalive must precede the first data line: %q", out)
+	}
+	if tok, ok := acc.result(); !ok || tok.Prompt != 5 || tok.Completion != 2 {
+		t.Errorf("accumulator missed usage after keepalives: %+v ok=%v", tok, ok)
 	}
 }
 
