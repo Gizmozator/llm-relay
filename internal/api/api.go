@@ -148,6 +148,32 @@ func (s *Server) Info(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
 	})
 }
 
+// PublicModels serves GET /api/models: the catalog every user may call —
+// enabled models on enabled backends — with the prices they are billed at.
+// Internal wiring (backend, upstream id) stays hidden.
+func (s *Server) PublicModels(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
+	models, err := store.ListPublicModels(s.DB)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	type pubModel struct {
+		Name            string `json:"name"`
+		PriceIn         int64  `json:"price_in"`
+		PriceOut        int64  `json:"price_out"`
+		PriceCacheRead  int64  `json:"price_cache_read"`
+		PriceCacheWrite int64  `json:"price_cache_write"`
+	}
+	out := make([]pubModel, 0, len(models))
+	for _, m := range models {
+		out = append(out, pubModel{
+			Name: m.Name, PriceIn: m.PriceIn, PriceOut: m.PriceOut,
+			PriceCacheRead: m.PriceCacheRead, PriceCacheWrite: m.PriceCacheWrite,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"models": out})
+}
+
 // UpdateMe lets a user edit their own display name.
 func (s *Server) UpdateMe(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
 	var in struct {

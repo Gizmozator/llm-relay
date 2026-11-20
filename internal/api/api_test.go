@@ -49,6 +49,7 @@ func newTestEnv(t *testing.T, upstream http.Handler) *testEnv {
 	mux.Handle("PATCH /api/me", s.Auth(s.UpdateMe))
 	mux.Handle("POST /api/auth/change_password", s.Auth(s.ChangePassword))
 	mux.Handle("GET /api/info", s.Auth(s.Info))
+	mux.Handle("GET /api/models", s.Auth(s.PublicModels))
 	mux.Handle("POST /api/keys", s.Auth(s.CreateKey))
 	mux.Handle("GET /api/keys", s.Auth(s.ListKeys))
 	mux.Handle("GET /api/usage/summary", s.Auth(s.UsageSummary))
@@ -279,6 +280,80 @@ func TestDisabledUserJWTRejected(t *testing.T) {
 }
 
 func ptrTrue() *bool { b := true; return &b }
+
+func TestPublicModelsCatalog(t *testing.T) {
+	e := newTestEnv(t, http.NotFoundHandler())
+	admin := login(t, e)
+
+	// Two models on an enabled backend (one priced), one disabled model,
+	// one model on a disabled backend: only the first two are listed.
+	resp := e.do(t, "POST", "/api/admin/backends", `{"name":"b1","base_url":"http://127.0.0.1:1"}`, admin)
+	resp.Body.Close()
+	if resp.StatusCode != 201 {
+		t.Fatalf("create backend %d", resp.StatusCode)
+	}
+	if _, err := store.CreateModel(e.db, 1, "up-a", "Model A"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateModel(e.db, 1, nil, nil, [4]*int64{ptrI(100), ptrI(200), ptrI(10), ptrI(40)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateModel(e.db, 1, "up-b", "Model B"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateModel(e.db, 2, nil, ptrB(false), [4]*int64{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateBackend(e.db, "off", "http://127.0.0.1:2", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateModel(e.db, 2, "up-c", "Model C"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateBackend(e.db, 2, nil, nil, nil, ptrB(false)); err != nil {
+		t.Fatal(err)
+	}
+
+	// A normal user sees the catalog.
+	resp = e.do(t, "POST", "/api/admin/users", `{"username":"bob","password":"bobpass123","role":"user"}`, admin)
+	resp.Body.Close()
+	bob := loginAs(t, e, "bob", "bobpass123")
+	resp = e.do(t, "GET", "/api/models", "", bob)
+	if resp.StatusCode != 200 {
+		t.Fatalf("user GET /api/models = %d", resp.StatusCode)
+	}
+	var out struct {
+		Models []struct {
+			Name            string `json:"name"`
+			PriceIn         int64  `json:"price_in"`
+			PriceOut        int64  `json:"price_out"`
+			PriceCacheRead  int64  `json:"price_cache_read"`
+			PriceCacheWrite int64  `json:"price_cache_write"`
+			BackendName     string `json:"backend_name"`
+			UpstreamModel   string `json:"upstream_model"`
+		} `json:"models"`
+	}
+	json.NewDecoder(resp.Body).Decode(&out)
+	resp.Body.Close()
+	if len(out.Models) != 1 || out.Models[0].Name != "Model A" {
+		t.Fatalf("models = %+v, want only Model A", out.Models)
+	}
+	m := out.Models[0]
+	if m.PriceIn != 100 || m.PriceOut != 200 || m.PriceCacheRead != 10 || m.PriceCacheWrite != 40 {
+		t.Errorf("prices not exposed: %+v", m)
+	}
+	if m.BackendName != "" || m.UpstreamModel != "" {
+		t.Errorf("internal fields leaked: %+v", m)
+	}
+
+	// Unauthenticated is rejected.
+	if resp := e.do(t, "GET", "/api/models", "", ""); resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("anon GET /api/models = %d, want 401", resp.StatusCode)
+	}
+}
+
+func ptrI(v int64) *int64 { return &v }
+func ptrB(v bool) *bool   { return &v }
 
 func TestChangePasswordAndUpdateMe(t *testing.T) {
 	e := newTestEnv(t, http.NotFoundHandler())

@@ -39,6 +39,9 @@ export default function Layout() {
           <NavLink to="/keys" className={navClass}>
             My keys
           </NavLink>
+          <NavLink to="/models" className={navClass}>
+            Models
+          </NavLink>
           {isAdmin && <div className="nav-group">Admin</div>}
           {isAdmin && (
             <>

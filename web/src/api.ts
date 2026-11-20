@@ -129,6 +129,15 @@ export interface CatalogModel {
   price_cache_write: number;
 }
 
+/** Model as exposed to all users on GET /api/models (no internal wiring). */
+export interface PublicModel {
+  name: string;
+  price_in: number;
+  price_out: number;
+  price_cache_read: number;
+  price_cache_write: number;
+}
+
 export interface Settings {
   currency: string;
 }
@@ -274,6 +283,9 @@ export const api = {
   keys: () => request<{ keys: ApiKey[] }>('GET', '/api/keys'),
   createKey: (name: string) => request<CreatedKey>('POST', '/api/keys', { body: { name } }),
   deleteKey: (id: number) => request<void>('DELETE', `/api/keys/${id}`),
+
+  // public model catalog (any user)
+  getModels: () => request<{ models: PublicModel[] }>('GET', '/api/models'),
 
   // usage
   usageSummary: (admin: boolean, q: UsageQuery & { group_by: GroupBy }) =>

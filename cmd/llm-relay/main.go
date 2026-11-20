@@ -73,6 +73,7 @@ func main() {
 	adminMux.Handle("PATCH /api/me", apiSrv.Auth(apiSrv.UpdateMe))
 	adminMux.Handle("POST /api/auth/change_password", apiSrv.Auth(apiSrv.ChangePassword))
 	adminMux.Handle("GET /api/info", apiSrv.Auth(apiSrv.Info))
+	adminMux.Handle("GET /api/models", apiSrv.Auth(apiSrv.PublicModels))
 	adminMux.Handle("GET /api/keys", apiSrv.Auth(apiSrv.ListKeys))
 	adminMux.Handle("POST /api/keys", apiSrv.Auth(apiSrv.CreateKey))
 	adminMux.Handle("DELETE /api/keys/{id}", apiSrv.Auth(apiSrv.RevokeKey))

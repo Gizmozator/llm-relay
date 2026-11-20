@@ -7,6 +7,7 @@ import UsagePage from './pages/Usage';
 import KeysPage from './pages/Keys';
 import BackendsPage from './pages/Backends';
 import ModelsPage from './pages/Models';
+import AdminModelsPage from './pages/AdminModels';
 import UsersPage from './pages/Users';
 import SettingsPage from './pages/Settings';
 
@@ -25,6 +26,7 @@ export default function App() {
           >
             <Route index element={<UsagePage admin={false} />} />
             <Route path="keys" element={<KeysPage />} />
+            <Route path="models" element={<ModelsPage />} />
             <Route
               path="admin/backends"
               element={
@@ -37,7 +39,7 @@ export default function App() {
               path="admin/models"
               element={
                 <RequireAdmin>
-                  <ModelsPage />
+                  <AdminModelsPage />
                 </RequireAdmin>
               }
             />

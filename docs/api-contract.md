@@ -16,6 +16,9 @@ All `/api/*` except login require `Authorization: Bearer <jwt>`. The embedded SP
 - `POST /api/auth/change_password` — `{"old_password","new_password"}` (new ≥8 chars) → `204`; `401` when the old password is wrong, `400` on validation
 - `GET /api/info` → `{"relay_url":"https://relay.example.fi/v1","dashboard_url":"https://llm-relay.example.fi","currency":"EUR"}` (empty string = not configured; `relay_url` is what users put in their apps)
 
+### Model catalog (all users)
+- `GET /api/models` → `{"models":[{"name":"Qwen3.8-flash-next","price_in":100,"price_out":200,"price_cache_read":10,"price_cache_write":40}]}` — models usable right now (enabled model on an enabled backend); prices are micro-units per 1M tokens; internal wiring (backend, upstream id) is not exposed.
+
 ### API keys (own)
 - `GET /api/keys` → `{"keys":[{"id":1,"name":"laptop","prefix":"sk-abcd1234","created_at":"...","last_used_at":"...|null","revoked_at":"...|null"}]}`
 - `POST /api/keys` — body `{"name"}` → `201 {"id":2,"name":"phone","key":"sk-<40hex>","prefix":"sk-abcd1234"}` (full key shown ONLY here)
