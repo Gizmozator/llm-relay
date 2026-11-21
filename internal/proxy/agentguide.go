@@ -15,8 +15,9 @@ var agentGuideMD string
 
 // AgentGuide serves GET /v1/agent-guide (relay port, no auth).
 func (h *Handler) AgentGuide(w http.ResponseWriter, r *http.Request) {
-	md := strings.ReplaceAll(agentGuideMD, "{{RELAY_URL}}",
-		strings.TrimRight(h.RelayURL, "/"))
+	// RelayURL is the server root (config convention: no /v1 suffix).
+	base := strings.TrimRight(h.RelayURL, "/")
+	md := strings.ReplaceAll(agentGuideMD, "{{RELAY_URL}}", base)
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)

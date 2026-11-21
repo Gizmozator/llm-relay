@@ -73,7 +73,7 @@ export default function SettingsPage() {
               <div className="form-stack">
                 <CopyField
                   label="Relay URL (what users put in their apps)"
-                  value={info.data?.relay_url ?? ''}
+                  value={info.data?.relay_url ? `${info.data.relay_url.replace(/\/+$/, '')}/v1` : ''}
                   hint="Not configured by the admin (PUBLIC_RELAY_URL)."
                 />
                 <CopyField

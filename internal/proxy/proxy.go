@@ -39,8 +39,8 @@ type Handler struct {
 	// Health caches backend reachability for the agent endpoints; the
 	// dashboard API keeps its own instance (same rules, same TTL).
 	Health *HealthCache
-	// RelayURL is the public relay base URL (PUBLIC_RELAY_URL), used to
-	// render the agent guide. Empty renders the placeholder as-is.
+	// RelayURL is the public relay ROOT (PUBLIC_RELAY_URL, no /v1),
+	// used to render the agent guide. Empty renders the placeholder as-is.
 	RelayURL string
 }
 

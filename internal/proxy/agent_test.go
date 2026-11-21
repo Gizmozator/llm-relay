@@ -242,6 +242,8 @@ func TestMCPEndpoint(t *testing.T) {
 
 func TestAgentGuidePublic(t *testing.T) {
 	h := newHarness(t, agentUpstream())
+	// RelayURL is the server root (PUBLIC_RELAY_URL convention: no /v1);
+	// the guide links /v1/... and /mcp off it.
 	h.ph.RelayURL = "https://relay.example"
 
 	resp := agentGet(t, h.server.URL+"/v1/agent-guide", "") // no key needed

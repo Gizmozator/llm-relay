@@ -30,6 +30,8 @@ function CodeBlock({ text }: { text: string }) {
  */
 export default function AgentGuidePage() {
   const info = useLoad(() => api.info(), []);
+  // relay_url is the server root (PUBLIC_RELAY_URL convention: no /v1);
+  // the guide, MCP and utilization endpoints link off it directly.
   const relay = (info.data?.relay_url ?? '').replace(/\/+$/, '');
 
   const guideUrl = relay ? `${relay}/v1/agent-guide` : '';

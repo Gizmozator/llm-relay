@@ -108,6 +108,13 @@ small JSON endpoint with its existing `sk-` key and gets per-model
   `POST /mcp` (`check_utilization` tool) on the relay port with `sk-` auth;
   public `GET /v1/agent-guide` (embedded markdown, relay URL interpolated);
   dashboard **Agent API** page with the copyable guide link.
+- 2026-11-21 — fix: guide/MCP URLs doubled `/v1` (`/v1/v1/agent-guide`)
+  because `PUBLIC_RELAY_URL` was set as the OpenAI-style base ending in
+  `/v1`. Convention changed instead of patched: **`PUBLIC_RELAY_URL` is the
+  server root** (no `/v1`); the embedded guide and Agent API page link
+  `{root}/v1/agent-guide`, `{root}/v1/utilization`, `{root}/mcp` directly,
+  and the Keys/Settings pages append `/v1` when showing the OpenAI base.
+  Set `PUBLIC_RELAY_URL=https://llm.rantaeskola.fi` in the stack env.
 - 2026-11-21 — owner directives folded in: live dashboard is server-wide for
   every role (personal `/api/live` no longer scopes to the caller) and cost
   is removed from the live view end-to-end (`LiveBucket.CostMicro`,

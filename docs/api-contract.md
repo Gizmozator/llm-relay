@@ -38,7 +38,7 @@ Proxy requests may carry `X-Session-Id: <string>`; without it the relay derives 
   `buckets`: one entry per minute over the last `window` minutes, zero-filled; a request lands in the minute it **completed** (usage rows are recorded at completion). `active`: in-flight proxied requests per model, all users — in-memory only, cleared by a restart. `models`: enabled catalog models; `online` = model enabled ∧ backend enabled ∧ backend reachable (GET `/health`, any HTTP answer counts except 503; probed at most once per 60 s per backend). `util`: per-model utilization — busy % of each minute (`values` aligns with `buckets`), from each request's wall-clock duration distributed across the minutes it occupied; >100 % = parallel streams; `concurrency_limit` (0 = unset) lets the client scale the axis to `limit × 100 %`.
 
 ### Agent API (relay port, `sk-` keys)
-- `GET /v1/agent-guide` (**no auth**, `text/markdown`) — the integration guide to hand to an AI agent: token creation, MCP config, REST usage, status semantics. `PUBLIC_RELAY_URL` is interpolated into the text.
+- `GET /v1/agent-guide` (**no auth**, `text/markdown`) — the integration guide to hand to an AI agent: token creation, MCP config, REST usage, status semantics. The `PUBLIC_RELAY_URL` server root (no `/v1` by convention) is interpolated into the text.
 - `GET /v1/utilization` (bearer `sk-` key)
   → `{"window_minutes":5,"models":[{"name":"halogen","online":true,"active":1,"concurrency_limit":4,"utilization_pct":37.5,"status":"free"}]}`
   Server-wide by design (delegation decisions are global truth). `status`: `offline` (backend unreachable) | `busy` (`active ≥ concurrency_limit` when set, or mean `utilization_pct ≥ 80` over the window) | `free`.

@@ -87,7 +87,7 @@ Environment (or `.env`, see `.env.example`):
 | `JWT_SECRET` | — **required** | dashboard JWT signing key (≥16 chars; `openssl rand -hex 32`) |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | — | bootstrap admin, first run on empty DB only |
 | `TRUST_PROXY_HEADERS` | `false` | trust `X-Forwarded-For` (set behind a reverse proxy) |
-| `PUBLIC_RELAY_URL` / `PUBLIC_DASHBOARD_URL` | — | public URLs shown in the dashboard for copying |
+| `PUBLIC_RELAY_URL` / `PUBLIC_DASHBOARD_URL` | — | public URLs shown in the dashboard; relay is the **root** (no `/v1` — the dashboard appends `/v1` for the OpenAI base) |
 | `TZ` | `Europe/Helsinki` | timezone |
 
 ## Deployment
