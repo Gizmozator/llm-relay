@@ -445,20 +445,22 @@ type Model struct {
 	ConcurrencyLimit int64   `json:"concurrency_limit"`
 	BusyThresholdPct int64   `json:"busy_threshold_pct"`
 	BenchTokPerS     float64 `json:"bench_tok_per_s"`
+	BenchPPTokPerS   float64 `json:"bench_pp_tok_per_s"`
 	BenchAt          string  `json:"bench_at"`
 }
 
 const modelCols = `m.id, m.backend_id, b.name, m.name, m.upstream_model, m.enabled,
 	m.price_in, m.price_out, m.price_cache_read, m.price_cache_write,
 	m.context_length, m.concurrency_limit, m.busy_threshold_pct, m.bench_tok_per_s,
-	COALESCE(m.bench_at,'')`
+	m.bench_pp_tok_per_s, COALESCE(m.bench_at,'')`
 
 func scanModel(row interface{ Scan(...any) error }) (*Model, error) {
 	m := &Model{}
 	var en int
 	if err := row.Scan(&m.ID, &m.BackendID, &m.BackendName, &m.Name, &m.UpstreamModel, &en,
 		&m.PriceIn, &m.PriceOut, &m.PriceCacheRead, &m.PriceCacheWrite,
-		&m.ContextLength, &m.ConcurrencyLimit, &m.BusyThresholdPct, &m.BenchTokPerS, &m.BenchAt); err != nil {
+		&m.ContextLength, &m.ConcurrencyLimit, &m.BusyThresholdPct, &m.BenchTokPerS,
+		&m.BenchPPTokPerS, &m.BenchAt); err != nil {
 		return nil, err
 	}
 	m.Enabled = en != 0
@@ -547,9 +549,9 @@ func ListPublicModels(db *sql.DB) ([]Model, error) {
 }
 
 // UpdateModelMeta sets the admin-managed model meta fields (nil = leave).
-// A manually set bench_tok_per_s clears bench_at: the stored value is then a
+// A manually set bench speed clears bench_at: the stored value is then a
 // configured speed, not a measured benchmark result.
-func UpdateModelMeta(db *sql.DB, id int64, contextLength, concurrencyLimit, busyThresholdPct *int64, benchTokPerS *float64) error {
+func UpdateModelMeta(db *sql.DB, id int64, contextLength, concurrencyLimit, busyThresholdPct *int64, benchTokPerS, benchPPTokPerS *float64) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -575,12 +577,24 @@ func UpdateModelMeta(db *sql.DB, id int64, contextLength, concurrencyLimit, busy
 			return err
 		}
 	}
+	if benchPPTokPerS != nil {
+		if _, err := tx.Exec(`UPDATE models SET bench_pp_tok_per_s=?, bench_at=NULL WHERE id=?`, *benchPPTokPerS, id); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
 }
 
-// UpdateModelBench stores the latest benchmark result for a model.
-func UpdateModelBench(db *sql.DB, id int64, tokPerS float64, at string) error {
-	_, err := db.Exec(`UPDATE models SET bench_tok_per_s=?, bench_at=? WHERE id=?`, tokPerS, at, id)
+// UpdateModelBench stores the latest benchmark result for a model. A nil PP
+// speed (the prefill pass failed) keeps the previously stored value: one
+// flaky pass must not wipe a good measurement.
+func UpdateModelBench(db *sql.DB, id int64, tokPerS float64, ppTokPerS *float64, at string) error {
+	if ppTokPerS == nil {
+		_, err := db.Exec(`UPDATE models SET bench_tok_per_s=?, bench_at=? WHERE id=?`, tokPerS, at, id)
+		return err
+	}
+	_, err := db.Exec(`UPDATE models SET bench_tok_per_s=?, bench_pp_tok_per_s=?, bench_at=? WHERE id=?`,
+		tokPerS, *ppTokPerS, at, id)
 	return err
 }
 

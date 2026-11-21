@@ -27,6 +27,7 @@ type ModelPatch = {
   concurrency_limit?: number;
   busy_threshold_pct?: number;
   bench_tok_per_s?: number;
+  bench_pp_tok_per_s?: number;
 };
 
 const PRICE_FIELDS = [
@@ -68,12 +69,22 @@ export default function AdminModelsPage() {
     }
   };
 
-  // Timed generation upstream; the request can take minutes.
+  // Timed generation + prefill upstream; the request can take minutes.
   const benchmark = async (m: CatalogModel) => {
     setBenching(m.id);
     try {
       const r = await api.benchmarkModel(m.id);
-      toast.push('success', `Benchmark: ${r.bench_tok_per_s.toFixed(1)} tok/s`);
+      if (r.bench_pp_tok_per_s) {
+        toast.push(
+          'success',
+          `Benchmark: TG ${r.bench_tok_per_s.toFixed(1)} · PP ${r.bench_pp_tok_per_s.toFixed(0)} tok/s`,
+        );
+      } else {
+        toast.push(
+          'error',
+          `Benchmark: TG ${r.bench_tok_per_s.toFixed(1)} tok/s (PP failed: ${r.pp_error ?? 'unknown'})`,
+        );
+      }
       models.reload();
     } catch (e: unknown) {
       toast.push('error', errMsg(e));
@@ -199,11 +210,22 @@ export default function AdminModelsPage() {
                             className="metric"
                             title={m.bench_at ? `Benchmarked ${fmtDateTime(m.bench_at)}` : 'Manual value'}
                           >
-                            <span className="metric-label">Speed tok/s</span>
+                            <span className="metric-label">TG tok/s</span>
                             <EditableNumber
                               display={m.bench_tok_per_s ? m.bench_tok_per_s.toFixed(1) : '0'}
-                              ariaLabel={`Speed (tok/s) of ${m.name}`}
+                              ariaLabel={`Generation speed (tok/s) of ${m.name}`}
                               onCommit={(n) => patch(m.id, { bench_tok_per_s: n })}
+                            />
+                          </span>
+                          <span
+                            className="metric"
+                            title={m.bench_at ? `Benchmarked ${fmtDateTime(m.bench_at)}` : 'Manual value'}
+                          >
+                            <span className="metric-label">PP tok/s</span>
+                            <EditableNumber
+                              display={m.bench_pp_tok_per_s ? m.bench_pp_tok_per_s.toFixed(0) : '0'}
+                              ariaLabel={`Prompt-processing speed (tok/s) of ${m.name}`}
+                              onCommit={(n) => patch(m.id, { bench_pp_tok_per_s: n })}
                             />
                           </span>
                         </div>
@@ -294,6 +316,7 @@ function PriceCalcModal({
   const [inp, setInp] = useState<CalcInputs>({
     ...stored,
     tgTps: model.bench_tok_per_s ? String(model.bench_tok_per_s) : stored.tgTps,
+    ppTps: model.bench_pp_tok_per_s ? String(model.bench_pp_tok_per_s) : stored.ppTps,
   });
   const set = (k: keyof CalcInputs) => (e: { target: { value: string } }) =>
     setInp((prev) => ({ ...prev, [k]: e.target.value }));

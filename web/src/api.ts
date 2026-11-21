@@ -138,14 +138,21 @@ export interface CatalogModel {
   concurrency_limit: number;
   busy_threshold_pct: number;
   bench_tok_per_s: number;
+  bench_pp_tok_per_s: number;
   bench_at: string;
 }
 
-/** Result of POST /api/admin/models/{id}/benchmark. */
+/** Result of POST /api/admin/models/{id}/benchmark. The prefill pass can
+ * fail without voiding the decode result: then pp_* are absent and
+ * pp_error says why (the stored PP value keeps its previous measurement). */
 export interface BenchmarkResult {
   bench_tok_per_s: number;
   completion_tokens: number;
   seconds: number;
+  bench_pp_tok_per_s?: number;
+  prompt_tokens?: number;
+  pp_seconds?: number;
+  pp_error?: string;
   bench_at: string;
 }
 
@@ -159,6 +166,7 @@ export interface PublicModel {
   context_length: number;
   concurrency_limit: number;
   bench_tok_per_s: number;
+  bench_pp_tok_per_s: number;
   bench_at: string;
 }
 
@@ -446,6 +454,7 @@ export const api = {
       concurrency_limit: number;
       busy_threshold_pct: number;
       bench_tok_per_s: number;
+      bench_pp_tok_per_s: number;
     }>,
   ) => request<CatalogModel>('PATCH', `/api/admin/models/${id}`, { body: patch }),
   deleteModel: (id: number) => request<void>('DELETE', `/api/admin/models/${id}`),

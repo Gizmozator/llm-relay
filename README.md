@@ -75,8 +75,11 @@ Open `http://localhost:8081`, log in, then: **Backends → add** the LLM server 
 **My keys → create key** → point any OpenAI-compatible client at `http://localhost:8080/v1`
 with the key as bearer token.
 
-For self-hosted engines, the admin Models page has a **Calc prices** calculator per model:
-enter the machine's power draw and speed for generation and prompt processing plus the
+For self-hosted engines, the admin Models page has a **Benchmark** button per model:
+it measures generation speed (TG — decode of a natural prose prompt) and prompt-
+processing speed (PP — a ~10k-token randomized prompt, time to first token) against
+the upstream. The **Calc prices** calculator prefills both speeds from the last run;
+enter the machine's power draw for generation and prompt processing plus the
 electricity price, and it derives cost-recovery prices (rounded up to 1 cent per 1M
 tokens, editable before applying).
 

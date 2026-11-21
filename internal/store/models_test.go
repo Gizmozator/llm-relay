@@ -43,3 +43,40 @@ func TestModelBusyThresholdDefault(t *testing.T) {
 		t.Errorf("AddModels threshold = %d, want 80", created[0].BusyThresholdPct)
 	}
 }
+
+// A failed prefill pass (nil PP) must update TG and bench_at while leaving
+// the previously stored PP measurement intact.
+func TestUpdateModelBenchKeepsPP(t *testing.T) {
+	d, err := db.Open(t.TempDir() + "/bench.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Migrate(d); err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	b, err := store.CreateBackend(d, "eng", "http://127.0.0.1:1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := store.CreateModel(d, b.ID, "bench-pp", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pp := 1234.5
+	if err := store.UpdateModelBench(d, m.ID, 40.0, &pp, "2026-11-21T10:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateModelBench(d, m.ID, 42.0, nil, "2026-11-21T11:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.ModelByID(d, m.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.BenchTokPerS != 42.0 || got.BenchPPTokPerS != 1234.5 || got.BenchAt != "2026-11-21T11:00:00Z" {
+		t.Errorf("after nil-PP run: tg=%v pp=%v at=%q, want 42 / 1234.5 kept / newer bench_at",
+			got.BenchTokPerS, got.BenchPPTokPerS, got.BenchAt)
+	}
+}

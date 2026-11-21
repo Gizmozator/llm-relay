@@ -105,7 +105,7 @@ func TestUtilizationREST(t *testing.T) {
 func TestUtilizationConcurrencyBusy(t *testing.T) {
 	h := newHarness(t, agentUpstream())
 	four := int64(4)
-	if err := store.UpdateModelMeta(h.db, 1, nil, &four, nil, nil); err != nil {
+	if err := store.UpdateModelMeta(h.db, 1, nil, &four, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	// Fill all 4 slots in the tracker (as the proxy hook would).
@@ -147,7 +147,7 @@ func TestUtilizationBusyThreshold(t *testing.T) {
 	}
 
 	thirty := int64(30)
-	if err := store.UpdateModelMeta(h.db, 1, nil, nil, &thirty, nil); err != nil {
+	if err := store.UpdateModelMeta(h.db, 1, nil, nil, &thirty, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	resp = agentGet(t, h.server.URL+"/v1/utilization", h.key)
@@ -161,7 +161,7 @@ func TestUtilizationBusyThreshold(t *testing.T) {
 	// Over 100 is legal (utilization stacks with parallel streams): 300
 	// means "busy from 3 concurrent generations", so one stream is free.
 	threeHundred := int64(300)
-	if err := store.UpdateModelMeta(h.db, 1, nil, nil, &threeHundred, nil); err != nil {
+	if err := store.UpdateModelMeta(h.db, 1, nil, nil, &threeHundred, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	resp = agentGet(t, h.server.URL+"/v1/utilization", h.key)

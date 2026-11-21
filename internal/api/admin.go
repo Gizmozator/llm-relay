@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"regexp"
 	"strings"
@@ -404,6 +405,7 @@ func (s *Server) AdminUpdateModel(w http.ResponseWriter, r *http.Request, c *aut
 		ConcurrencyLimit *int64   `json:"concurrency_limit"`
 		BusyThresholdPct *int64   `json:"busy_threshold_pct"`
 		BenchTokPerS     *float64 `json:"bench_tok_per_s"`
+		BenchPPTokPerS   *float64 `json:"bench_pp_tok_per_s"`
 	}
 	if err := decode(r, &in); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON")
@@ -439,12 +441,16 @@ func (s *Server) AdminUpdateModel(w http.ResponseWriter, r *http.Request, c *aut
 		writeErr(w, http.StatusBadRequest, "bench_tok_per_s cannot be negative")
 		return
 	}
+	if in.BenchPPTokPerS != nil && *in.BenchPPTokPerS < 0 {
+		writeErr(w, http.StatusBadRequest, "bench_pp_tok_per_s cannot be negative")
+		return
+	}
 	m, err := store.UpdateModel(s.DB, id, in.Name, in.Enabled,
 		[4]*int64{in.PriceIn, in.PriceOut, in.PriceCacheRead, in.PriceCacheWrite})
 	if err == nil && (in.ContextLength != nil || in.ConcurrencyLimit != nil ||
-		in.BusyThresholdPct != nil || in.BenchTokPerS != nil) {
+		in.BusyThresholdPct != nil || in.BenchTokPerS != nil || in.BenchPPTokPerS != nil) {
 		if err = store.UpdateModelMeta(s.DB, id, in.ContextLength, in.ConcurrencyLimit,
-			in.BusyThresholdPct, in.BenchTokPerS); err == nil {
+			in.BusyThresholdPct, in.BenchTokPerS, in.BenchPPTokPerS); err == nil {
 			m, err = store.ModelByID(s.DB, id)
 		}
 	}
@@ -460,12 +466,129 @@ func (s *Server) AdminUpdateModel(w http.ResponseWriter, r *http.Request, c *aut
 	}
 }
 
-// AdminBenchmarkModel runs one timed streaming generation against the model's
-// upstream and stores the measured decode speed (first→last token, natural
-// prose prompt) so speculative/MTP decoding is measured at realistic
-// acceptance rates. Deliberately serialized: parallel benchmarks would skew
-// each other's tokens/s numbers.
+// AdminBenchmarkModel runs two timed streaming calls against the model's
+// upstream: a decode pass (natural prose prompt, first→last token → TG
+// tok/s) so speculative/MTP decoding is measured at realistic acceptance
+// rates, and a prefill pass (~10k-token randomized prompt, max_tokens=1,
+// request→first token → PP tok/s). Deliberately serialized: parallel
+// benchmarks would skew each other's tokens/s numbers.
 var benchMu sync.Mutex
+
+// benchVocab feeds the prefill-pass filler prompt: ordinary prose words,
+// because only the token count and a cache-missing order matter.
+const benchVocab = `the harbor light folded over water while morning carts carried flour
+timber and letters across cobbled streets; children counted gulls, sailors mended nets,
+and an old clock keeper wrote weather into a ledger nobody would read. Somewhere beyond
+the breakwater a quiet engine turned, and the day began again with bread, salt, rope,
+rain and the patient sound of stone under footsteps. Long evenings gathered neighbors
+around warm windows, where stories of distant railways crossed the table with tea.`
+
+// benchFillerWords builds ~tokens worth of randomized filler prose
+// (≈3 words per 4 tokens). Randomized per run so the engine's prefix cache
+// misses: a repeated prompt would measure cache reads, not prefill.
+func benchFillerWords(tokens int64) string {
+	words := strings.Fields(benchVocab)
+	var b strings.Builder
+	prev := -1
+	for i := int64(0); i < max(tokens*3/4, 16); i++ {
+		j := rand.Intn(len(words))
+		for j == prev {
+			j = rand.Intn(len(words))
+		}
+		prev = j
+		switch {
+		case i == 0:
+		case i%12 == 0:
+			b.WriteString(". ")
+		default:
+			b.WriteByte(' ')
+		}
+		b.WriteString(words[j])
+	}
+	b.WriteByte('.')
+	return b.String()
+}
+
+// benchRun is one timed streaming exchange with the upstream: start is when
+// the request was sent; firstChunk/firstTok/lastTok mark the first chunk
+// with choices, and the first and last non-empty content delta; prompt and
+// completion token counts come from the trailing usage chunk.
+type benchRun struct {
+	start                         time.Time
+	firstChunk, firstTok, lastTok time.Time
+	prompt, completion            int64
+}
+
+// benchStreamRun POSTs one streaming chat completion (the caller's body must
+// set stream and stream_options.include_usage) and times its token stream.
+func benchStreamRun(ctx context.Context, b *store.Backend, body map[string]any) (*benchRun, error) {
+	buf, _ := json.Marshal(body)
+	r := &benchRun{start: time.Now()}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		strings.TrimRight(b.BaseURL, "/")+"/v1/chat/completions", bytes.NewReader(buf))
+	if err != nil {
+		return nil, errors.New("internal error")
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if b.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+b.APIKey)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, errors.New("upstream request failed")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+		return nil, fmt.Errorf("upstream returned HTTP %d", resp.StatusCode)
+	}
+	sc := bufio.NewScanner(resp.Body)
+	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
+	for sc.Scan() {
+		line := sc.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		payload := strings.TrimPrefix(line, "data: ")
+		if payload == "[DONE]" {
+			break
+		}
+		var chunk struct {
+			Usage *struct {
+				PromptTokens     int64 `json:"prompt_tokens"`
+				CompletionTokens int64 `json:"completion_tokens"`
+			} `json:"usage"`
+			Choices []struct {
+				Delta struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if json.Unmarshal([]byte(payload), &chunk) != nil {
+			continue
+		}
+		if chunk.Usage != nil {
+			r.prompt = max(r.prompt, chunk.Usage.PromptTokens)
+			r.completion = max(r.completion, chunk.Usage.CompletionTokens)
+		}
+		if len(chunk.Choices) > 0 {
+			now := time.Now()
+			if r.firstChunk.IsZero() {
+				r.firstChunk = now
+			}
+			if chunk.Choices[0].Delta.Content != "" {
+				if r.firstTok.IsZero() {
+					r.firstTok = now
+				}
+				r.lastTok = now
+			}
+		}
+	}
+	if sc.Err() != nil {
+		return nil, errors.New("upstream stream failed")
+	}
+	return r, nil
+}
 
 func (s *Server) AdminBenchmarkModel(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
 	id, err := pathID(r)
@@ -495,12 +618,13 @@ func (s *Server) AdminBenchmarkModel(w http.ResponseWriter, r *http.Request, c *
 
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 	defer cancel()
-	// Natural-prose prompt on purpose: trivially predictable text (counting,
-	// repetition) lets speculative/MTP decoding accept nearly every draft
-	// token, inflating the measurement well past real-traffic speed. The
-	// request streams so the timer covers only first-token → last-token
-	// (decode time), not prefill.
-	buf, _ := json.Marshal(map[string]any{
+
+	// Decode pass (TG). Natural-prose prompt on purpose: trivially
+	// predictable text (counting, repetition) lets speculative/MTP decoding
+	// accept nearly every draft token, inflating the measurement well past
+	// real-traffic speed. The request streams so the timer covers only
+	// first-token → last-token (decode time), not prefill.
+	tg, err := benchStreamRun(ctx, b, map[string]any{
 		"model": m.UpstreamModel,
 		"messages": []map[string]string{
 			{"role": "user", "content": "Write a detailed, original essay about how harbor cities changed when steam shipping replaced sailing ships. Discuss trade, migration, shipyard work and daily life, with concrete examples. Write in flowing prose without lists."},
@@ -510,93 +634,84 @@ func (s *Server) AdminBenchmarkModel(w http.ResponseWriter, r *http.Request, c *
 		"stream":         true,
 		"stream_options": map[string]any{"include_usage": true},
 	})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		strings.TrimRight(b.BaseURL, "/")+"/v1/chat/completions", bytes.NewReader(buf))
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal error")
+		writeErr(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	req.Header.Set("Content-Type", "application/json")
-	if b.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+b.APIKey)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		writeErr(w, http.StatusBadGateway, "upstream request failed")
-		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
-		writeErr(w, http.StatusBadGateway, fmt.Sprintf("upstream returned HTTP %d", resp.StatusCode))
-		return
-	}
-	var (
-		completion int64
-		firstTok   time.Time
-		lastTok    time.Time
-		sc         = bufio.NewScanner(resp.Body)
-	)
-	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
-	for sc.Scan() {
-		line := sc.Text()
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-		payload := strings.TrimPrefix(line, "data: ")
-		if payload == "[DONE]" {
-			break
-		}
-		var chunk struct {
-			Usage *struct {
-				CompletionTokens int64 `json:"completion_tokens"`
-			} `json:"usage"`
-			Choices []struct {
-				Delta struct {
-					Content string `json:"content"`
-				} `json:"delta"`
-			} `json:"choices"`
-		}
-		if json.Unmarshal([]byte(payload), &chunk) != nil {
-			continue
-		}
-		if chunk.Usage != nil && chunk.Usage.CompletionTokens > 0 {
-			completion = chunk.Usage.CompletionTokens
-		}
-		if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
-			now := time.Now()
-			if firstTok.IsZero() {
-				firstTok = now
-			}
-			lastTok = now
-		}
-	}
-	if sc.Err() != nil {
-		writeErr(w, http.StatusBadGateway, "upstream stream failed")
-		return
-	}
-	if completion <= 0 || firstTok.IsZero() || !lastTok.After(firstTok) {
+	if tg.completion <= 0 || tg.firstTok.IsZero() || !tg.lastTok.After(tg.firstTok) {
 		writeErr(w, http.StatusBadGateway, "upstream returned no usage or too few streamed tokens; cannot benchmark")
 		return
 	}
 	// first→last spans completion-1 token intervals.
-	n := completion - 1
+	n := tg.completion - 1
 	if n < 1 {
 		n = 1
 	}
-	secs := lastTok.Sub(firstTok).Seconds()
-	tokPerS := float64(n) / secs
+	tgSecs := tg.lastTok.Sub(tg.firstTok).Seconds()
+	tokPerS := float64(n) / tgSecs
+
+	// Prefill pass (PP): ~10k-token filler prompt, one generated token.
+	// Prefill completes before the first token is emitted, so request →
+	// first token is the prefill time. The prompt shrinks to ¾ of the
+	// model's context when that is smaller, so small-context upstreams do
+	// not reject it. A failure here never voids the decode result: TG is
+	// stored and the old PP value is kept.
+	target := int64(10000)
+	if m.ContextLength > 0 && m.ContextLength < target*4/3 {
+		target = m.ContextLength * 3 / 4
+	}
+	pp, ppErr := benchStreamRun(ctx, b, map[string]any{
+		"model":          m.UpstreamModel,
+		"messages":       []map[string]string{{"role": "user", "content": benchFillerWords(target)}},
+		"max_tokens":     1,
+		"temperature":    0,
+		"stream":         true,
+		"stream_options": map[string]any{"include_usage": true},
+	})
+	var ppTokPerS *float64
+	var ppSecs float64
+	ppErrMsg := ""
+	switch {
+	case ppErr != nil:
+		ppErrMsg = ppErr.Error()
+	case pp.prompt <= 0:
+		ppErrMsg = "prefill pass returned no prompt token count"
+	default:
+		// The first content delta is the true first token; an engine that
+		// streams no content field at all has still finished prefill once
+		// any choices chunk arrived, so fall back to that.
+		first := pp.firstTok
+		if first.IsZero() {
+			first = pp.firstChunk
+		}
+		if first.IsZero() || !first.After(pp.start) {
+			ppErrMsg = "prefill pass streamed no token"
+		} else {
+			ppSecs = first.Sub(pp.start).Seconds()
+			v := float64(pp.prompt) / ppSecs
+			ppTokPerS = &v
+		}
+	}
+
 	at := time.Now().UTC().Format(time.RFC3339)
-	if err := store.UpdateModelBench(s.DB, id, tokPerS, at); err != nil {
+	if err := store.UpdateModelBench(s.DB, id, tokPerS, ppTokPerS, at); err != nil {
 		writeErr(w, http.StatusInternalServerError, "benchmark save failed")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	res := map[string]any{
 		"bench_tok_per_s":   tokPerS,
-		"completion_tokens": completion,
-		"seconds":           secs,
+		"completion_tokens": tg.completion,
+		"seconds":           tgSecs,
 		"bench_at":          at,
-	})
+	}
+	if ppTokPerS != nil {
+		res["bench_pp_tok_per_s"] = *ppTokPerS
+		res["prompt_tokens"] = pp.prompt
+		res["pp_seconds"] = ppSecs
+	} else {
+		res["pp_error"] = ppErrMsg
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 func (s *Server) AdminDeleteModel(w http.ResponseWriter, r *http.Request, c *auth.Claims) {

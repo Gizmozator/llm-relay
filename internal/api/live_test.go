@@ -306,7 +306,7 @@ func TestLiveUtilization(t *testing.T) {
 		t.Fatalf("models = %+v, err = %v", models, err)
 	}
 	four := int64(4)
-	if err := store.UpdateModelMeta(e.db, models[0].ID, nil, &four, nil, nil); err != nil {
+	if err := store.UpdateModelMeta(e.db, models[0].ID, nil, &four, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	// A 90 s request completed one minute ago: total busy = 90 s = 150 %

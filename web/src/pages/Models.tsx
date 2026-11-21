@@ -41,7 +41,12 @@ export default function ModelsPage() {
                     </th>
                   ))}
                   <th className="num">Context</th>
-                  <th className="num">Speed</th>
+                  <th className="num" title="Token generation speed">
+                    TG
+                  </th>
+                  <th className="num" title="Prompt-processing speed">
+                    PP
+                  </th>
                   <th className="num">Parallel</th>
                 </tr>
               </thead>
@@ -57,6 +62,9 @@ export default function ModelsPage() {
                     <td className="num">{m.context_length ? `${fmtInt(m.context_length)} tokens` : '—'}</td>
                     <td className="num" title={m.bench_at ? fmtDateTime(m.bench_at) : undefined}>
                       {m.bench_tok_per_s ? `${m.bench_tok_per_s.toFixed(1)} tok/s` : '—'}
+                    </td>
+                    <td className="num" title={m.bench_at ? fmtDateTime(m.bench_at) : undefined}>
+                      {m.bench_pp_tok_per_s ? `${m.bench_pp_tok_per_s.toFixed(0)} tok/s` : '—'}
                     </td>
                     <td className="num">{m.concurrency_limit ? fmtInt(m.concurrency_limit) : '—'}</td>
                   </tr>

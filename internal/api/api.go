@@ -223,6 +223,7 @@ func (s *Server) PublicModels(w http.ResponseWriter, r *http.Request, c *auth.Cl
 		ContextLength    int64   `json:"context_length"`
 		ConcurrencyLimit int64   `json:"concurrency_limit"`
 		BenchTokPerS     float64 `json:"bench_tok_per_s"`
+		BenchPPTokPerS   float64 `json:"bench_pp_tok_per_s"`
 		BenchAt          string  `json:"bench_at"`
 	}
 	out := make([]pubModel, 0, len(models))
@@ -231,7 +232,7 @@ func (s *Server) PublicModels(w http.ResponseWriter, r *http.Request, c *auth.Cl
 			Name: m.Name, PriceIn: m.PriceIn, PriceOut: m.PriceOut,
 			PriceCacheRead: m.PriceCacheRead, PriceCacheWrite: m.PriceCacheWrite,
 			ContextLength: m.ContextLength, ConcurrencyLimit: m.ConcurrencyLimit,
-			BenchTokPerS: m.BenchTokPerS, BenchAt: m.BenchAt,
+			BenchTokPerS: m.BenchTokPerS, BenchPPTokPerS: m.BenchPPTokPerS, BenchAt: m.BenchAt,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"models": out})

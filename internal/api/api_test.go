@@ -687,20 +687,26 @@ func TestUserMultiplierAndModelMeta(t *testing.T) {
 		t.Errorf("busy_threshold_pct = %d, want 150", bt.BusyThresholdPct)
 	}
 
-	// Benchmark: fake upstream reports 100 completion tokens.
+	// Benchmark: fake upstream reports 100 completion + 10 prompt tokens;
+	// both the decode (TG) and prefill (PP) passes must come back measured.
 	resp = e.do(t, "POST", "/api/admin/models/1/benchmark", "", admin)
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("benchmark: %d %s", resp.StatusCode, body)
 	}
 	var br struct {
-		BenchTokPerS float64 `json:"bench_tok_per_s"`
-		Completion   int64   `json:"completion_tokens"`
+		BenchTokPerS   float64 `json:"bench_tok_per_s"`
+		BenchPPTokPerS float64 `json:"bench_pp_tok_per_s"`
+		Completion     int64   `json:"completion_tokens"`
+		Prompt         int64   `json:"prompt_tokens"`
 	}
 	json.NewDecoder(resp.Body).Decode(&br)
 	resp.Body.Close()
 	if br.Completion != 100 || br.BenchTokPerS <= 0 {
 		t.Errorf("benchmark result: %+v", br)
+	}
+	if br.Prompt != 10 || br.BenchPPTokPerS <= 0 {
+		t.Errorf("benchmark prefill result: %+v", br)
 	}
 
 	// Manual speed override: negative → 400; a set value is stored and
@@ -709,12 +715,17 @@ func TestUserMultiplierAndModelMeta(t *testing.T) {
 		resp.Body.Close()
 		t.Errorf("negative speed PATCH = %d, want 400", resp.StatusCode)
 	}
-	resp = e.do(t, "PATCH", "/api/admin/models/1", `{"bench_tok_per_s":70}`, admin)
+	if resp := e.do(t, "PATCH", "/api/admin/models/1", `{"bench_pp_tok_per_s":-1}`, admin); resp.StatusCode != 400 {
+		resp.Body.Close()
+		t.Errorf("negative pp speed PATCH = %d, want 400", resp.StatusCode)
+	}
+	resp = e.do(t, "PATCH", "/api/admin/models/1", `{"bench_tok_per_s":70,"bench_pp_tok_per_s":900}`, admin)
 	var sm store.Model
 	json.NewDecoder(resp.Body).Decode(&sm)
 	resp.Body.Close()
-	if sm.BenchTokPerS != 70 || sm.BenchAt != "" {
-		t.Errorf("manual speed = %v/%q, want 70 and cleared bench_at", sm.BenchTokPerS, sm.BenchAt)
+	if sm.BenchTokPerS != 70 || sm.BenchPPTokPerS != 900 || sm.BenchAt != "" {
+		t.Errorf("manual speed = %v/%v/%q, want 70/900 and cleared bench_at",
+			sm.BenchTokPerS, sm.BenchPPTokPerS, sm.BenchAt)
 	}
 
 	// Public catalog carries meta + benchmark for users.
@@ -733,6 +744,9 @@ func TestUserMultiplierAndModelMeta(t *testing.T) {
 	}
 	if tp, _ := m["bench_tok_per_s"].(float64); tp <= 0 {
 		t.Errorf("catalog bench_tok_per_s: %v", m["bench_tok_per_s"])
+	}
+	if pp, _ := m["bench_pp_tok_per_s"].(float64); pp != 900 {
+		t.Errorf("catalog bench_pp_tok_per_s: %v", m["bench_pp_tok_per_s"])
 	}
 }
 
