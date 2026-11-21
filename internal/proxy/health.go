@@ -5,7 +5,8 @@ package proxy
 
 import (
 	"context"
-	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -16,9 +17,11 @@ import (
 var healthTimeout = 2 * time.Second
 
 // Reachable GETs {base}/health and reports whether the backend is up. Any
-// HTTP answer counts as online — a 401 means the server is alive but keyed
-// (same rule as the admin probe). Only a transport failure or a 503
-// (llama.cpp-style "model not loaded") counts as offline.
+// non-5xx HTTP answer counts as online — a 401 means the server is alive
+// but keyed (same rule as the admin probe). A transport failure or any 5xx
+// counts as offline: 503 is the llama.cpp-style "model not loaded", while
+// 502/504 typically mean a fronting reverse proxy cannot reach the engine
+// at all, which is exactly the outage this probe must surface.
 func Reachable(ctx context.Context, baseURL string) error {
 	ctx, cancel := context.WithTimeout(ctx, healthTimeout)
 	defer cancel()
@@ -31,9 +34,14 @@ func Reachable(ctx context.Context, baseURL string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusServiceUnavailable {
-		return errors.New("backend reports not ready (503)")
+	defer func() {
+		// Drain a bounded amount so the keep-alive connection returns to
+		// the pool instead of being dialed fresh on the next probe.
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+		resp.Body.Close()
+	}()
+	if resp.StatusCode >= 500 {
+		return fmt.Errorf("backend reports error (%d)", resp.StatusCode)
 	}
 	return nil
 }

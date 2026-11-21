@@ -51,6 +51,7 @@ func main() {
 	ph := proxy.New(d, rec, cfg.TrustProxyHeaders)
 	apiSrv.Flight = ph.Flight
 	ph.RelayURL = cfg.PublicRelayURL
+	ph.DashboardURL = cfg.PublicDashboardURL
 
 	healthz := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

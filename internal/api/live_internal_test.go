@@ -1,5 +1,5 @@
 // Health cache internals: TTL reuse, re-probe on expiry, disabled backends,
-// and the Reachable status rules (401 = online, 503 = offline).
+// and the Reachable status rules (401 = online, 5xx = offline).
 package api
 
 import (
@@ -106,6 +106,8 @@ func TestReachableStatusRules(t *testing.T) {
 		{http.StatusOK, true},
 		{http.StatusUnauthorized, true}, // keyed but alive
 		{http.StatusServiceUnavailable, false},
+		{http.StatusInternalServerError, false}, // wedged engine
+		{http.StatusBadGateway, false},          // proxy up, engine down
 	}
 	for _, tc := range cases {
 		up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

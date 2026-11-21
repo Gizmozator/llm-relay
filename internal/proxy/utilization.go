@@ -7,6 +7,7 @@ package proxy
 
 import (
 	"context"
+	"log"
 	"math"
 	"net/http"
 	"sort"
@@ -46,20 +47,28 @@ func (h *Handler) Utilization(ctx context.Context) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Mean busy % per model over the window: total busy ms / window ms.
-	// Models with no traffic in the window simply keep 0.
+	// Mean busy % per model: total busy ms / elapsed window ms. The
+	// divisor is the FIXED window length minus the still-running part of
+	// the last bucket — BusyByModel's final bucket is the current minute,
+	// and busy time can only have accumulated up to now, so dividing by
+	// the full window would under-report by up to a minute's worth and
+	// could keep a saturated model under the busy threshold. Values may
+	// exceed 100 % (parallel streams stack); that is the intended
+	// semantics, so no clamp. Mirrors BusyByModel's window-start math.
 	now := time.Now()
 	busy, err := store.BusyByModel(h.DB, &store.UsageFilter{}, now, utilWindowMinutes)
 	if err != nil {
 		return nil, err
 	}
+	start := now.UTC().Truncate(time.Minute).Add(-time.Duration(utilWindowMinutes-1) * time.Minute)
+	elapsedMS := math.Max(float64(now.Sub(start).Milliseconds()), 1)
 	busyPct := map[string]float64{}
 	for _, mb := range busy {
 		var total int64
 		for _, ms := range mb.Values {
 			total += ms
 		}
-		busyPct[mb.Model] = float64(total) / (float64(len(mb.Values)) * 60000) * 100
+		busyPct[mb.Model] = float64(total) / elapsedMS * 100
 	}
 
 	status := h.Health.Status(ctx, backends)
@@ -80,7 +89,7 @@ func (h *Handler) Utilization(ctx context.Context) (map[string]any, error) {
 		switch {
 		case !ms.Online:
 			ms.Status = "offline"
-		case m.ConcurrencyLimit > 0 && ms.Active >= int(m.ConcurrencyLimit):
+		case m.ConcurrencyLimit > 0 && int64(ms.Active) >= m.ConcurrencyLimit:
 			ms.Status = "busy"
 		case ms.UtilizationPct >= busyPctThreshold:
 			ms.Status = "busy"
@@ -105,6 +114,7 @@ func (h *Handler) UtilizationREST(w http.ResponseWriter, r *http.Request) {
 	}
 	payload, err := h.Utilization(r.Context())
 	if err != nil {
+		log.Printf("relay: /v1/utilization failed: %v", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}

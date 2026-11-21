@@ -187,6 +187,22 @@ func TestMCPEndpoint(t *testing.T) {
 		t.Errorf("notification status = %d, want 202", nresp.StatusCode)
 	}
 
+	// A malformed notification (no id at all) must still be 202 with no
+	// body: a server must never answer a notification, valid or not.
+	nreq, _ := http.NewRequest(http.MethodPost, h.server.URL+"/mcp",
+		strings.NewReader(`{"method":"notifications/cancelled"}`))
+	nreq.Header.Set("Authorization", "Bearer "+h.key)
+	mresp, err := http.DefaultClient.Do(nreq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mbody, _ := io.ReadAll(mresp.Body)
+	mresp.Body.Close()
+	if mresp.StatusCode != http.StatusAccepted || len(mbody) != 0 {
+		t.Errorf("malformed notification: status=%d body=%q, want 202 empty",
+			mresp.StatusCode, mbody)
+	}
+
 	// tools/list advertises check_utilization.
 	_, out = mcpCall(t, h, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`, "")
 	tools := out["result"].(map[string]any)["tools"].([]any)
@@ -214,12 +230,28 @@ func TestMCPEndpoint(t *testing.T) {
 		t.Errorf("text content missing model: %s", text)
 	}
 
-	// model filter narrows (and can return nothing).
+	// model filter narrows to the named model.
 	_, out = mcpCall(t, h, `{"jsonrpc":"2.0","id":4,"method":"tools/call",
-		"params":{"name":"check_utilization","arguments":{"model":"other"}}}`, "")
+		"params":{"name":"check_utilization","arguments":{"model":"pub-model"}}}`, "")
 	sc = out["result"].(map[string]any)["structuredContent"].(map[string]any)
-	if len(sc["models"].([]any)) != 0 {
-		t.Errorf("filtered models = %v, want empty", sc["models"])
+	if len(sc["models"].([]any)) != 1 {
+		t.Errorf("filtered models = %v, want one", sc["models"])
+	}
+
+	// Unknown model name → in-band error, not an empty list that an agent
+	// could confuse with "no enabled models".
+	_, out = mcpCall(t, h, `{"jsonrpc":"2.0","id":4.1,"method":"tools/call",
+		"params":{"name":"check_utilization","arguments":{"model":"other"}}}`, "")
+	if out["result"].(map[string]any)["isError"] != true {
+		t.Errorf("unknown model filter: %v, want isError", out)
+	}
+
+	// Non-string model filter → -32602; silently dropping the filter would
+	// answer for the whole fleet when the caller asked about one model.
+	_, out = mcpCall(t, h, `{"jsonrpc":"2.0","id":4.2,"method":"tools/call",
+		"params":{"name":"check_utilization","arguments":{"model":42}}}`, "")
+	if e, ok := out["error"].(map[string]any); !ok || e["code"].(float64) != -32602 {
+		t.Errorf("non-string filter: %v, want -32602", out)
 	}
 
 	// Unknown tool → protocol error -32602 (spec); unknown method → -32601.
@@ -243,8 +275,10 @@ func TestMCPEndpoint(t *testing.T) {
 func TestAgentGuidePublic(t *testing.T) {
 	h := newHarness(t, agentUpstream())
 	// RelayURL is the server root (PUBLIC_RELAY_URL convention: no /v1);
-	// the guide links /v1/... and /mcp off it.
+	// the guide links /v1/... and /mcp off it, and names the dashboard so
+	// the agent can point its human at key creation.
 	h.ph.RelayURL = "https://relay.example"
+	h.ph.DashboardURL = "https://dash.example"
 
 	resp := agentGet(t, h.server.URL+"/v1/agent-guide", "") // no key needed
 	if resp.StatusCode != 200 {
@@ -256,13 +290,35 @@ func TestAgentGuidePublic(t *testing.T) {
 	}
 	body, _ := io.ReadAll(resp.Body)
 	md := string(body)
-	for _, want := range []string{"https://relay.example/v1/utilization", "check_utilization", "sk-"} {
+	for _, want := range []string{"https://relay.example/v1/utilization",
+		"check_utilization", "sk-", "https://dash.example"} {
 		if !strings.Contains(md, want) {
 			t.Errorf("guide missing %q", want)
 		}
 	}
-	if strings.Contains(md, "{{RELAY_URL}}") {
+	if strings.Contains(md, "{{RELAY_URL}}") || strings.Contains(md, "{{DASHBOARD_URL}}") {
 		t.Error("placeholder not substituted")
+	}
+}
+
+// Unconfigured public URLs must degrade visibly: the relay placeholder
+// stays (documented contract — an agent must never be told to call a
+// relative URL) and the dashboard parenthetical disappears cleanly.
+func TestAgentGuideUnconfigured(t *testing.T) {
+	h := newHarness(t, agentUpstream())
+
+	resp := agentGet(t, h.server.URL+"/v1/agent-guide", "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	md := string(body)
+	if !strings.Contains(md, "{{RELAY_URL}}") {
+		t.Error("empty RelayURL must keep the placeholder, not render empty URLs")
+	}
+	if strings.Contains(md, "{{DASHBOARD_URL}}") || strings.Contains(md, "dashboard** (") {
+		t.Error("empty DashboardURL must drop the parenthetical")
 	}
 }
 

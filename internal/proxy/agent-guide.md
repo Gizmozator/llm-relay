@@ -12,11 +12,12 @@ The server you are reading this on is reachable at: `{{RELAY_URL}}`
 All agent endpoints authenticate with a relay API key: a secret starting
 with `sk-`, sent as `Authorization: Bearer sk-...`.
 
-Your human creates one for you: open the relay **dashboard** → **My keys** →
-*Create key* (name it after you, e.g. `subagent`). The full key is shown
-**once** — store it and give it to you via your config or environment. The
-same key also works for inference (`POST {{RELAY_URL}}/v1/chat/completions`
-and friends), so one token covers both.
+Your human creates one for you: open the relay **dashboard**{{DASHBOARD_URL}}
+→ **My keys** → *Create key* (name it after you, e.g. `subagent`). The full
+key is shown **once** — store it and give it to you via your config or
+environment. The same key also works for inference
+(`POST {{RELAY_URL}}/v1/chat/completions` and friends), so one token covers
+both.
 
 ## 2. Check utilization before delegating
 

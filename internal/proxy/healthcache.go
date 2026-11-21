@@ -42,6 +42,9 @@ func (hc *HealthCache) Status(ctx context.Context, backends []store.Backend) map
 	hc.mu.Lock()
 	defer hc.mu.Unlock()
 	out := make(map[int64]HealthEntry, len(backends))
+	// entries is intentionally never pruned: keys are backend IDs, bounded
+	// by the number of backends ever created (tiny on a homelab), and a
+	// stale entry for a deleted ID is simply never read again.
 	for _, b := range backends {
 		e, fresh := hc.entries[b.ID], hc.entries[b.ID].At.After(time.Now().Add(-HealthTTL))
 		switch {

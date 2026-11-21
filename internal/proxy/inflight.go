@@ -23,12 +23,17 @@ func NewInFlight() *InFlight {
 }
 
 // Enter records one request starting on the model for the user. Nil
-// receiver is a no-op so handlers built without a tracker (tests) stay safe.
+// receiver is a no-op so handlers built without a tracker (tests) stay
+// safe, and the map is lazily created so a zero-value &InFlight{} works
+// too (a nil-map write would panic on the hot request path).
 func (f *InFlight) Enter(userID int64, model string) {
 	if f == nil {
 		return
 	}
 	f.mu.Lock()
+	if f.counts == nil {
+		f.counts = map[inflightKey]int{}
+	}
 	f.counts[inflightKey{userID, model}]++
 	f.mu.Unlock()
 }

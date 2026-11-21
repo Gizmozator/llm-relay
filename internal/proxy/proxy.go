@@ -42,6 +42,10 @@ type Handler struct {
 	// RelayURL is the public relay ROOT (PUBLIC_RELAY_URL, no /v1),
 	// used to render the agent guide. Empty renders the placeholder as-is.
 	RelayURL string
+	// DashboardURL is the public dashboard ROOT (PUBLIC_DASHBOARD_URL),
+	// shown in the agent guide so it can point its human at the key
+	// creation page. Empty drops the mention.
+	DashboardURL string
 }
 
 func New(db *sql.DB, rec *usage.Recorder, trustProxyHeaders bool) *Handler {

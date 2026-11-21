@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 )
 
@@ -48,9 +49,15 @@ func (h *Handler) MCP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "invalid API key")
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20+1))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "could not read request body")
+		return
+	}
+	if len(body) > 1<<20 {
+		// Same rule as the proxy routes: oversize is an HTTP-level
+		// rejection, not a JSON parse failure.
+		writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
 		return
 	}
 	var req jsonrpcRequest
@@ -58,13 +65,15 @@ func (h *Handler) MCP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, mcpError(nil, -32700, "parse error"))
 		return
 	}
-	if req.JSONRPC != "2.0" || req.Method == "" {
-		writeJSON(w, http.StatusOK, mcpError(req.ID, -32600, "invalid request"))
-		return
-	}
-	// Notifications get 202 with no body (streamable-HTTP rule).
+	// Notifications (absent/null id) get 202 with no body — even malformed
+	// ones: a server must never answer a notification (streamable-HTTP rule),
+	// so this check runs before envelope validation.
 	if req.ID == nil || string(req.ID) == "null" {
 		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+	if req.JSONRPC != "2.0" || req.Method == "" {
+		writeJSON(w, http.StatusOK, mcpError(req.ID, -32600, "invalid request"))
 		return
 	}
 
@@ -130,24 +139,47 @@ func (h *Handler) mcpToolCall(w http.ResponseWriter, ctx context.Context, req js
 		writeJSON(w, http.StatusOK, mcpError(req.ID, -32602, "Unknown tool: "+params.Name))
 		return
 	}
-	filter, _ := params.Arguments["model"].(string)
+	filter := ""
+	if v, ok := params.Arguments["model"]; ok {
+		s, ok := v.(string)
+		if !ok {
+			writeJSON(w, http.StatusOK, mcpError(req.ID, -32602,
+				"model filter must be a string"))
+			return
+		}
+		filter = s
+	}
 
 	payload, err := h.Utilization(ctx)
 	if err != nil {
-		// Tool execution failures come back in-band so the agent can read why.
+		// In-band so the agent sees the failure, but the raw error stays
+		// server-side: it can carry SQLite/driver text (the REST sibling
+		// masks the same failure with "internal error").
+		log.Printf("relay: mcp check_utilization failed: %v", err)
 		writeJSON(w, http.StatusOK, mcpResult(req.ID, map[string]any{
 			"isError": true,
 			"content": []any{map[string]any{"type": "text",
-				"text": "utilization check failed: " + err.Error()}},
+				"text": "utilization check failed (internal error)"}},
 		}))
 		return
 	}
 	if filter != "" {
 		models := []ModelStatus{}
-		for _, m := range payload["models"].([]ModelStatus) {
+		all, _ := payload["models"].([]ModelStatus)
+		for _, m := range all {
 			if m.Name == filter {
 				models = append(models, m)
 			}
+		}
+		if len(models) == 0 {
+			// Ambiguity guard: an empty list would be indistinguishable
+			// from "no enabled models" for a typo'd name.
+			writeJSON(w, http.StatusOK, mcpResult(req.ID, map[string]any{
+				"isError": true,
+				"content": []any{map[string]any{"type": "text",
+					"text": "no enabled model named: " + filter}},
+			}))
+			return
 		}
 		payload = map[string]any{
 			"window_minutes": payload["window_minutes"],

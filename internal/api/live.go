@@ -60,8 +60,10 @@ func (s *Server) Live(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
 	// point is that anyone can see whether the server is free (owner
 	// decision, supersedes the v1 per-user scoping). The admin route
 	// keeps user_id as a drill-down; the personal route ignores it.
+	// Privilege comes from the claims (same rule as usageScope), not
+	// from the URL alone, so the drill-down cannot leak if routes move.
 	f := &store.UsageFilter{}
-	if strings.HasPrefix(r.URL.Path, "/api/admin/") {
+	if c.Role == "admin" && strings.HasPrefix(r.URL.Path, "/api/admin/") {
 		if v := r.URL.Query().Get("user_id"); v != "" {
 			id, err := strconv.ParseInt(v, 10, 64)
 			if err != nil {

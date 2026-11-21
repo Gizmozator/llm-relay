@@ -101,6 +101,24 @@ small JSON endpoint with its existing `sk-` key and gets per-model
 
 ## Changelog
 
+- 2026-11-21 — OCR scan triage & hardening (16+3 findings, 13 fixed):
+  live `user_id` drill-down now requires the admin **role**, not just the
+  `/api/admin/` path prefix (matches `usageScope`); utilization % now
+  divides by the elapsed window (the last bucket is the in-progress
+  minute — full-window divisor under-reported up to ~20 % and could keep
+  a saturated model `free`), compares `active` vs limit in int64, and
+  logs its 500s; MCP masks internal error text (was leaking SQLite
+  driver errors), rejects non-string `model` filters with `-32602`,
+  answers unknown filter names with in-band `isError` instead of an
+  ambiguous empty list, returns 413 for oversize bodies, and never
+  answers malformed notifications; health probe treats **all 5xx** as
+  offline (502/504 from a fronting proxy = engine down) and drains
+  bodies for keep-alive reuse; agent guide keeps `{{RELAY_URL}}` visible
+  when unconfigured (was rendering empty URLs) and now names the
+  dashboard (`{{DASHBOARD_URL}}`, new `Handler.DashboardURL`);
+  `InFlight` zero value no longer panics on `Enter`. Accepted as-is:
+  health-cache mutex across probes (intentional stampede dedupe, homelab
+  scale) and unpruned cache entries (bounded by backend IDs ever created).
 - 2026-11-21 — plan created.
 - 2026-11-21 — implemented: `proxy.HealthCache` (moved from api, same rules);
   `Handler.Utilization` core (5-min mean busy %, derived
