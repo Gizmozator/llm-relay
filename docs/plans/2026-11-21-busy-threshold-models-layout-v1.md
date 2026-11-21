@@ -1,6 +1,6 @@
 # Plan: Per-model busy threshold + Models page two-row layout
 
-- **Status:** active
+- **Status:** done
 - **Owner:** antti
 - **Started:** 2026-11-21
 - **Issue:** —
@@ -65,12 +65,12 @@ Two things, one increment:
 
 | # | task | blocked by | done |
 |---|---|---|---|
-| 1 | migration 0007 + store field + UpdateModelMeta | — | ☐ |
-| 2 | utilization per-model threshold | 1 | ☐ |
-| 3 | AdminUpdateModel busy_threshold_pct (0–100) | 1 | ☐ |
-| 4 | AdminModels two-row layout + Busy ≥ % cell | 3 | ☐ |
-| 5 | tests (store round-trip, threshold respected incl. 0=default, PATCH validation) | 2,3 | ☐ |
-| 6 | docs: api-contract + agent-guide + plan changelog | 2 | ☐ |
+| 1 | migration 0007 + store field + UpdateModelMeta | — | ☑ |
+| 2 | utilization per-model threshold | 1 | ☑ |
+| 3 | AdminUpdateModel busy_threshold_pct (0–100) | 1 | ☑ |
+| 4 | AdminModels two-row layout + Busy ≥ % cell | 3 | ☑ |
+| 5 | tests (store round-trip, threshold respected incl. 0=default, PATCH validation) | 2,3 | ☑ |
+| 6 | docs: api-contract + agent-guide + plan changelog | 2 | ☑ |
 
 ## Verification
 
@@ -92,4 +92,13 @@ Two things, one increment:
 
 ## Changelog
 
+- 2026-11-21 — implemented as planned: migration `0007_busy_threshold.sql`
+  (`models.busy_threshold_pct`, 0 = default 80); `store.Model.BusyThresholdPct`
+  + `UpdateModelMeta` param; `utilization.go` per-model threshold
+  (`0 → 80`); `AdminUpdateModel` accepts `busy_threshold_pct` (0–100, else
+  400); AdminModels page split into two rows per model (identity row +
+  dimmed metrics row carrying prices/context/parallel/speed/**Busy ≥ %**,
+  flex-wrapped so the table stays narrow); guide + api-contract status-rule
+  wording updated. Tests: PATCH validation + round-trip, threshold 30 makes
+  a 40–50 % model `busy` while default keeps it `free`.
 - 2026-11-21 — plan created.

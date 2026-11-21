@@ -493,6 +493,37 @@ td.money {
   margin-left: 6px;
 }
 
+/* Two-row model table: identity row + a dimmer metrics row per model, so
+   the catalog stays narrow instead of growing a column per field. */
+tr.model-main > td {
+  border-bottom: none;
+}
+
+tr.sub-row > td {
+  padding-top: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.model-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+}
+
+.model-metrics .metric {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.model-metrics .metric-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+
 .flags .tag {
   margin-right: 4px;
 }

@@ -133,6 +133,7 @@ export interface CatalogModel {
   price_cache_write: number;
   context_length: number;
   concurrency_limit: number;
+  busy_threshold_pct: number;
   bench_tok_per_s: number;
   bench_at: string;
 }
@@ -437,6 +438,7 @@ export const api = {
       price_cache_write: number;
       context_length: number;
       concurrency_limit: number;
+      busy_threshold_pct: number;
       bench_tok_per_s: number;
     }>,
   ) => request<CatalogModel>('PATCH', `/api/admin/models/${id}`, { body: patch }),

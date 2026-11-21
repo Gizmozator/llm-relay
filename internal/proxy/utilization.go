@@ -20,8 +20,9 @@ import (
 // to not be twitchy, short enough to answer "free now" (plan decision 4).
 const utilWindowMinutes = 5
 
-// busyPctThreshold is the mean-busy percentage at or above which a model
-// counts as busy even when the concurrency limit is unset or not reached.
+// busyPctThreshold is the default mean-busy percentage at or above which a
+// model counts as busy even when the concurrency limit is unset or not
+// reached; a model's busy_threshold_pct (0 = unset) overrides it.
 const busyPctThreshold = 80.0
 
 // ModelStatus is one model's delegation-readiness snapshot.
@@ -34,8 +35,8 @@ type ModelStatus struct {
 	UtilizationPct   float64 `json:"utilization_pct"`
 	// Status is the derived verdict: "offline" (backend unreachable),
 	// "draining" (admin is shutting the backend down: finish existing
-	// sessions, start none), "busy" (all slots in use or mean busy
-	// >= 80 %), else "free".
+	// sessions, start none), "busy" (all slots in use or mean busy at or
+	// above the model's threshold, default 80 %), else "free".
 	Status string `json:"status"`
 }
 
@@ -109,6 +110,11 @@ func (h *Handler) Utilization(ctx context.Context) (map[string]any, error) {
 		}
 		ms.Online = status[m.BackendID].Online
 		ms.Draining = draining[m.BackendID]
+		// Mean-busy threshold: per-model admin setting, 0 = default.
+		thr := m.BusyThresholdPct
+		if thr <= 0 {
+			thr = int64(busyPctThreshold)
+		}
 		switch {
 		case !ms.Online:
 			ms.Status = "offline"
@@ -116,7 +122,7 @@ func (h *Handler) Utilization(ctx context.Context) (map[string]any, error) {
 			ms.Status = "draining"
 		case m.ConcurrencyLimit > 0 && int64(ms.Active) >= m.ConcurrencyLimit:
 			ms.Status = "busy"
-		case ms.UtilizationPct >= busyPctThreshold:
+		case ms.UtilizationPct >= float64(thr):
 			ms.Status = "busy"
 		default:
 			ms.Status = "free"

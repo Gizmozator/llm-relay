@@ -443,13 +443,14 @@ type Model struct {
 	PriceCacheWrite  int64   `json:"price_cache_write"`
 	ContextLength    int64   `json:"context_length"`
 	ConcurrencyLimit int64   `json:"concurrency_limit"`
+	BusyThresholdPct int64   `json:"busy_threshold_pct"`
 	BenchTokPerS     float64 `json:"bench_tok_per_s"`
 	BenchAt          string  `json:"bench_at"`
 }
 
 const modelCols = `m.id, m.backend_id, b.name, m.name, m.upstream_model, m.enabled,
 	m.price_in, m.price_out, m.price_cache_read, m.price_cache_write,
-	m.context_length, m.concurrency_limit, m.bench_tok_per_s,
+	m.context_length, m.concurrency_limit, m.busy_threshold_pct, m.bench_tok_per_s,
 	COALESCE(m.bench_at,'')`
 
 func scanModel(row interface{ Scan(...any) error }) (*Model, error) {
@@ -457,7 +458,7 @@ func scanModel(row interface{ Scan(...any) error }) (*Model, error) {
 	var en int
 	if err := row.Scan(&m.ID, &m.BackendID, &m.BackendName, &m.Name, &m.UpstreamModel, &en,
 		&m.PriceIn, &m.PriceOut, &m.PriceCacheRead, &m.PriceCacheWrite,
-		&m.ContextLength, &m.ConcurrencyLimit, &m.BenchTokPerS, &m.BenchAt); err != nil {
+		&m.ContextLength, &m.ConcurrencyLimit, &m.BusyThresholdPct, &m.BenchTokPerS, &m.BenchAt); err != nil {
 		return nil, err
 	}
 	m.Enabled = en != 0
@@ -548,7 +549,7 @@ func ListPublicModels(db *sql.DB) ([]Model, error) {
 // UpdateModelMeta sets the admin-managed model meta fields (nil = leave).
 // A manually set bench_tok_per_s clears bench_at: the stored value is then a
 // configured speed, not a measured benchmark result.
-func UpdateModelMeta(db *sql.DB, id int64, contextLength, concurrencyLimit *int64, benchTokPerS *float64) error {
+func UpdateModelMeta(db *sql.DB, id int64, contextLength, concurrencyLimit, busyThresholdPct *int64, benchTokPerS *float64) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -561,6 +562,11 @@ func UpdateModelMeta(db *sql.DB, id int64, contextLength, concurrencyLimit *int6
 	}
 	if concurrencyLimit != nil {
 		if _, err := tx.Exec(`UPDATE models SET concurrency_limit=? WHERE id=?`, *concurrencyLimit, id); err != nil {
+			return err
+		}
+	}
+	if busyThresholdPct != nil {
+		if _, err := tx.Exec(`UPDATE models SET busy_threshold_pct=? WHERE id=?`, *busyThresholdPct, id); err != nil {
 			return err
 		}
 	}

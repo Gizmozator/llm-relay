@@ -59,7 +59,8 @@ Response:
 being taken down for maintenance — a request starting a **new** session gets
 `503` (`Retry-After: 60`), while sessions active within the last 15 minutes
 keep working; `busy` = `active` reached `concurrency_limit` (when set) **or**
-`utilization_pct >= 80`; otherwise `free`.
+`utilization_pct` at or above the model's admin-set threshold (default 80);
+otherwise `free`.
 
 ### MCP (preferred for MCP-capable agents)
 

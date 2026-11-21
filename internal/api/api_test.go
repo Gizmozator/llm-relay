@@ -603,6 +603,23 @@ func TestUserMultiplierAndModelMeta(t *testing.T) {
 		t.Errorf("meta = %d/%d, want 262144/4", mm.ContextLength, mm.ConcurrencyLimit)
 	}
 
+	// Busy threshold: 0–100 enforced, value round-trips.
+	if resp := e.do(t, "PATCH", "/api/admin/models/1", `{"busy_threshold_pct":101}`, admin); resp.StatusCode != 400 {
+		resp.Body.Close()
+		t.Errorf("busy_threshold_pct=101 PATCH = %d, want 400", resp.StatusCode)
+	}
+	if resp := e.do(t, "PATCH", "/api/admin/models/1", `{"busy_threshold_pct":-1}`, admin); resp.StatusCode != 400 {
+		resp.Body.Close()
+		t.Errorf("busy_threshold_pct=-1 PATCH = %d, want 400", resp.StatusCode)
+	}
+	resp = e.do(t, "PATCH", "/api/admin/models/1", `{"busy_threshold_pct":50}`, admin)
+	var bt store.Model
+	json.NewDecoder(resp.Body).Decode(&bt)
+	resp.Body.Close()
+	if bt.BusyThresholdPct != 50 {
+		t.Errorf("busy_threshold_pct = %d, want 50", bt.BusyThresholdPct)
+	}
+
 	// Benchmark: fake upstream reports 100 completion tokens.
 	resp = e.do(t, "POST", "/api/admin/models/1/benchmark", "", admin)
 	if resp.StatusCode != 200 {

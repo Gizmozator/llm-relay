@@ -105,7 +105,7 @@ func TestUtilizationREST(t *testing.T) {
 func TestUtilizationConcurrencyBusy(t *testing.T) {
 	h := newHarness(t, agentUpstream())
 	four := int64(4)
-	if err := store.UpdateModelMeta(h.db, 1, nil, &four, nil); err != nil {
+	if err := store.UpdateModelMeta(h.db, 1, nil, &four, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	// Fill all 4 slots in the tracker (as the proxy hook would).
@@ -126,6 +126,36 @@ func TestUtilizationConcurrencyBusy(t *testing.T) {
 	m := r.Models[0]
 	if m.Active != 4 || m.ConcurrencyLimit != 4 || m.Status != "busy" {
 		t.Errorf("full slots: %+v, want active=4 limit=4 busy", m)
+	}
+}
+
+// Busy threshold: Busy ≥ % is the mean-busy verdict line; 0 = default 80.
+func TestUtilizationBusyThreshold(t *testing.T) {
+	h := newHarness(t, agentUpstream())
+	// A stream running for 2 minutes → 40–50 % mean busy over the elapsed
+	// 4–5 min window: under the default 80 (free), at or above 30 (busy).
+	id := h.ph.Flight.EnterAt(proxy.Stream{UserID: 1, Model: "pub-model"}, time.Now().Add(-2*time.Minute))
+	defer h.ph.Flight.Leave(id)
+
+	resp := agentGet(t, h.server.URL+"/v1/utilization", h.key)
+	var r utilResp
+	json.NewDecoder(resp.Body).Decode(&r)
+	resp.Body.Close()
+	m := r.Models[0]
+	if m.UtilizationPct >= 80 || m.Status != "free" {
+		t.Fatalf("default threshold: pct=%.1f status=%s, want <80 free", m.UtilizationPct, m.Status)
+	}
+
+	thirty := int64(30)
+	if err := store.UpdateModelMeta(h.db, 1, nil, nil, &thirty, nil); err != nil {
+		t.Fatal(err)
+	}
+	resp = agentGet(t, h.server.URL+"/v1/utilization", h.key)
+	json.NewDecoder(resp.Body).Decode(&r)
+	resp.Body.Close()
+	m = r.Models[0]
+	if m.UtilizationPct < 30 || m.Status != "busy" {
+		t.Errorf("threshold 30: pct=%.1f status=%s, want >=30 busy", m.UtilizationPct, m.Status)
 	}
 }
 

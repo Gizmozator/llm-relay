@@ -383,6 +383,7 @@ func (s *Server) AdminUpdateModel(w http.ResponseWriter, r *http.Request, c *aut
 		PriceCacheWrite  *int64   `json:"price_cache_write"`
 		ContextLength    *int64   `json:"context_length"`
 		ConcurrencyLimit *int64   `json:"concurrency_limit"`
+		BusyThresholdPct *int64   `json:"busy_threshold_pct"`
 		BenchTokPerS     *float64 `json:"bench_tok_per_s"`
 	}
 	if err := decode(r, &in); err != nil {
@@ -409,14 +410,20 @@ func (s *Server) AdminUpdateModel(w http.ResponseWriter, r *http.Request, c *aut
 			return
 		}
 	}
+	if in.BusyThresholdPct != nil && (*in.BusyThresholdPct < 0 || *in.BusyThresholdPct > 100) {
+		writeErr(w, http.StatusBadRequest, "busy_threshold_pct must be 0-100 (0 = default 80)")
+		return
+	}
 	if in.BenchTokPerS != nil && *in.BenchTokPerS < 0 {
 		writeErr(w, http.StatusBadRequest, "bench_tok_per_s cannot be negative")
 		return
 	}
 	m, err := store.UpdateModel(s.DB, id, in.Name, in.Enabled,
 		[4]*int64{in.PriceIn, in.PriceOut, in.PriceCacheRead, in.PriceCacheWrite})
-	if err == nil && (in.ContextLength != nil || in.ConcurrencyLimit != nil || in.BenchTokPerS != nil) {
-		if err = store.UpdateModelMeta(s.DB, id, in.ContextLength, in.ConcurrencyLimit, in.BenchTokPerS); err == nil {
+	if err == nil && (in.ContextLength != nil || in.ConcurrencyLimit != nil ||
+		in.BusyThresholdPct != nil || in.BenchTokPerS != nil) {
+		if err = store.UpdateModelMeta(s.DB, id, in.ContextLength, in.ConcurrencyLimit,
+			in.BusyThresholdPct, in.BenchTokPerS); err == nil {
 			m, err = store.ModelByID(s.DB, id)
 		}
 	}

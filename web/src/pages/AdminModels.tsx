@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 import { api, errMsg } from '../api';
 import type { CatalogModel } from '../api';
 import { fmtDateTime, microToPerM } from '../format';
@@ -23,6 +23,7 @@ type ModelPatch = {
   price_cache_write?: number;
   context_length?: number;
   concurrency_limit?: number;
+  busy_threshold_pct?: number;
   bench_tok_per_s?: number;
 };
 
@@ -109,86 +110,93 @@ export default function AdminModelsPage() {
                   <th>Backend</th>
                   <th>Upstream id</th>
                   <th>Enabled</th>
-                  {PRICE_FIELDS.map((p) => (
-                    <th className="num" key={p.key}>
-                      {p.label}
-                      <div className="th-sub">{currency ? `${currency}/1M` : 'per 1M'}</div>
-                    </th>
-                  ))}
-                  <th className="num">
-                    Context length
-                    <div className="th-sub">tokens</div>
-                  </th>
-                  <th className="num">
-                    Concurrency
-                    <div className="th-sub">parallel</div>
-                  </th>
-                  <th className="num">
-                    Speed
-                    <div className="th-sub">tok/s</div>
-                  </th>
-                  <th></th>
+                  <th className="actions">Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {rows.map((m) => (
-                  <tr key={m.id}>
-                    <td>
-                      <EditableText
-                        value={m.name}
-                        ariaLabel={`Public name of ${m.name}`}
-                        onCommit={(v) => patch(m.id, { name: v })}
-                      />
-                    </td>
-                    <td>{m.backend_name}</td>
-                    <td className="mono">{m.upstream_model}</td>
-                    <td>
-                      <Toggle checked={m.enabled} onChange={(v) => patch(m.id, { enabled: v })} />
-                    </td>
-                    {PRICE_FIELDS.map((p) => (
-                      <td className="num" key={p.key}>
-                        <EditableNumber
-                          display={microToPerM(m[p.key])}
-                          ariaLabel={`${p.label} price of ${m.name}`}
-                          onCommit={(n) => patch(m.id, { [p.key]: Math.round(n * 1e6) } as ModelPatch)}
+                  <Fragment key={m.id}>
+                    <tr className="model-main">
+                      <td>
+                        <EditableText
+                          value={m.name}
+                          ariaLabel={`Public name of ${m.name}`}
+                          onCommit={(v) => patch(m.id, { name: v })}
                         />
                       </td>
-                    ))}
-                    <td className="num">
-                      <EditableNumber
-                        display={String(m.context_length)}
-                        ariaLabel={`Context length of ${m.name}`}
-                        onCommit={(n) => patch(m.id, { context_length: Math.round(n) })}
-                      />
-                    </td>
-                    <td className="num">
-                      <EditableNumber
-                        display={String(m.concurrency_limit)}
-                        ariaLabel={`Concurrency limit of ${m.name}`}
-                        onCommit={(n) => patch(m.id, { concurrency_limit: Math.round(n) })}
-                      />
-                    </td>
-                    <td
-                      className="num"
-                      title={m.bench_at ? `Benchmarked ${fmtDateTime(m.bench_at)}` : 'Manual value'}
-                    >
-                      <EditableNumber
-                        display={m.bench_tok_per_s ? m.bench_tok_per_s.toFixed(1) : '0'}
-                        ariaLabel={`Speed (tok/s) of ${m.name}`}
-                        onCommit={(n) => patch(m.id, { bench_tok_per_s: n })}
-                      />
-                    </td>
-                    <td className="actions">
-                      <button
-                        className="btn small"
-                        disabled={benching !== null}
-                        onClick={() => benchmark(m)}
-                      >
-                        {benching === m.id ? 'Benching…' : 'Benchmark'}
-                      </button>
-                      <ConfirmButton label="Delete" onConfirm={() => remove(m)} />
-                    </td>
-                  </tr>
+                      <td>{m.backend_name}</td>
+                      <td className="mono">{m.upstream_model}</td>
+                      <td>
+                        <Toggle checked={m.enabled} onChange={(v) => patch(m.id, { enabled: v })} />
+                      </td>
+                      <td className="actions">
+                        <button
+                          className="btn small"
+                          disabled={benching !== null}
+                          onClick={() => benchmark(m)}
+                        >
+                          {benching === m.id ? 'Benching…' : 'Benchmark'}
+                        </button>
+                        <ConfirmButton label="Delete" onConfirm={() => remove(m)} />
+                      </td>
+                    </tr>
+                    <tr className="sub-row">
+                      <td colSpan={5}>
+                        <div className="model-metrics">
+                          {PRICE_FIELDS.map((p) => (
+                            <span className="metric" key={p.key}>
+                              <span className="metric-label">
+                                {p.label} <span className="dim">{currency ? `${currency}/1M` : 'per 1M'}</span>
+                              </span>
+                              <EditableNumber
+                                display={microToPerM(m[p.key])}
+                                ariaLabel={`${p.label} price of ${m.name}`}
+                                onCommit={(n) => patch(m.id, { [p.key]: Math.round(n * 1e6) } as ModelPatch)}
+                              />
+                            </span>
+                          ))}
+                          <span className="metric">
+                            <span className="metric-label">Context</span>
+                            <EditableNumber
+                              display={String(m.context_length)}
+                              ariaLabel={`Context length of ${m.name}`}
+                              onCommit={(n) => patch(m.id, { context_length: Math.round(n) })}
+                            />
+                          </span>
+                          <span className="metric" title="Parallel streams the engine serves at once (0 = unset)">
+                            <span className="metric-label">Parallel</span>
+                            <EditableNumber
+                              display={String(m.concurrency_limit)}
+                              ariaLabel={`Concurrency limit of ${m.name}`}
+                              onCommit={(n) => patch(m.id, { concurrency_limit: Math.round(n) })}
+                            />
+                          </span>
+                          <span
+                            className="metric"
+                            title={m.bench_at ? `Benchmarked ${fmtDateTime(m.bench_at)}` : 'Manual value'}
+                          >
+                            <span className="metric-label">Speed tok/s</span>
+                            <EditableNumber
+                              display={m.bench_tok_per_s ? m.bench_tok_per_s.toFixed(1) : '0'}
+                              ariaLabel={`Speed (tok/s) of ${m.name}`}
+                              onCommit={(n) => patch(m.id, { bench_tok_per_s: n })}
+                            />
+                          </span>
+                          <span
+                            className="metric"
+                            title="Mean busy % at which agents see “busy” (0 = default 80)"
+                          >
+                            <span className="metric-label">Busy ≥ %</span>
+                            <EditableNumber
+                              display={String(m.busy_threshold_pct)}
+                              ariaLabel={`Busy threshold (percent) of ${m.name}`}
+                              onCommit={(n) => patch(m.id, { busy_threshold_pct: Math.round(n) })}
+                            />
+                          </span>
+                        </div>
+                      </td>
+                    </tr>
+                  </Fragment>
                 ))}
               </tbody>
             </table>
