@@ -39,6 +39,9 @@ export default function Layout() {
         </div>
         <nav>
           <NavLink to="/" end className={navClass}>
+            Dashboard
+          </NavLink>
+          <NavLink to="/usage" className={navClass}>
             Usage
           </NavLink>
           <NavLink to="/keys" className={navClass}>

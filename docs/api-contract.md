@@ -31,6 +31,11 @@ Proxy requests may carry `X-Session-Id: <string>`; without it the relay derives 
   (`key`/`label`: day → date string; user → username (`(deleted user)` when the account is gone); key → key name; model → model name; ip → client IP; endpoint → endpoint id)
 - `GET /api/usage/detail?from&to&model=&page=1&page_size=50` (`model` = exact `model_requested` match) → `{"total":123,"rows":[{"id":1,"ts":"...","username":"bob","key_name":"laptop","client_ip":"1.2.3.4","session_id":"a1b2c3d4e5f6","endpoint":"chat","model_requested":"halogen","prompt_tokens":10,"completion_tokens":20,"cached_tokens":0,"cache_write_tokens":0,"cost_micro":300,"streamed":true,"usage_estimated":false,"status_code":200,"latency_ms":1200,"error":null}]}` (newest first)
 
+### Live dashboard
+- `GET /api/live?window=60` and `GET /api/admin/live?window=60` (`window` in minutes, default 60, clamped to 5–360; scoping follows the usage routes: personal always the caller, admin variant unscoped + `user_id` filter)
+  → `{"currency":"EUR","buckets":[{"minute":"2026-11-21T12:34","requests":0,"prompt_tokens":0,"completion_tokens":0,"cached_tokens":0,"cache_write_tokens":0,"cost_micro":0}],"active":[{"model":"halogen","count":1}],"models":[{"name":"halogen","backend":"halogen (iGPU)","online":true,"active":1}]}`
+  `buckets`: one entry per minute over the last `window` minutes, zero-filled; a request lands in the minute it **completed** (usage rows are recorded at completion). `active`: in-flight proxied requests per model, scoped like the buckets (personal route = caller's own streams only) — in-memory only, cleared by a restart. `models`: enabled catalog models; `online` = model enabled ∧ backend enabled ∧ backend reachable (GET `/health`, any HTTP answer counts except 503; probed at most once per 60 s per backend).
+
 ### Admin — users
 - `GET /api/admin/users` → `{"users":[{"id":1,"username":"a","display_name":"Ada","role":"admin","disabled":false,"created_at":"...","price_multiplier":1,"pass_changed_at":"...|"}]}` (`pass_changed_at` = last password change; JWTs issued earlier are revoked; `""` = never)
 - `POST /api/admin/users` — `{"username","display_name"?,"password","role":"admin"|"user"}` → `201` user object

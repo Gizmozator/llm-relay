@@ -161,6 +161,31 @@ export interface Settings {
   currency: string;
 }
 
+/** One minute of the live dashboard window (GET /api/live). */
+export interface LiveBucket {
+  minute: string;
+  requests: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cached_tokens: number;
+  cache_write_tokens: number;
+  cost_micro: number;
+}
+
+export interface LiveModel {
+  name: string;
+  backend: string;
+  online: boolean;
+  active: number;
+}
+
+export interface LiveResponse {
+  currency: string;
+  buckets: LiveBucket[];
+  active: { model: string; count: number }[];
+  models: LiveModel[];
+}
+
 export interface Info {
   relay_url: string;
   dashboard_url: string;
@@ -324,6 +349,12 @@ export const api = {
   usageDetail: (admin: boolean, q: UsageQuery & { page: number; page_size: number }) =>
     request<UsageDetail>('GET', admin ? '/api/admin/usage/detail' : '/api/usage/detail', {
       query: q,
+    }),
+
+  // live dashboard
+  live: (admin: boolean, window?: number) =>
+    request<LiveResponse>('GET', admin ? '/api/admin/live' : '/api/live', {
+      query: { window },
     }),
 
   // admin — users

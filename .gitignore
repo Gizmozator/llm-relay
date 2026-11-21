@@ -3,6 +3,7 @@
 /build/
 /dist/
 /out/
+/llm-relay
 *.exe
 *.out
 *.test

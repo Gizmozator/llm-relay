@@ -1,0 +1,114 @@
+// Store-level tests for the live-window aggregation, using a fixed clock so
+// bucket boundaries and labels are exact.
+package store_test
+
+import (
+	"testing"
+	"time"
+
+	"llm-relay/internal/db"
+	"llm-relay/internal/store"
+)
+
+func TestLiveBucketsFixedClock(t *testing.T) {
+	d, err := db.Open(t.TempDir() + "/live.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Migrate(d); err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	seed := func(ts string, prompt, completion, cost int64) {
+		err := store.InsertUsage(d, &store.UsageEvent{
+			TS: ts, Endpoint: "chat", Prompt: prompt, Completion: completion,
+			CostTotal: cost, Status: 200,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Window anchor 14:03:30, 5 minutes → buckets 13:59 … 14:03.
+	now := time.Date(2026, 11, 21, 14, 3, 30, 0, time.UTC)
+	seed("2026-11-21T13:58:59Z", 1, 1, 1)    // before the window
+	seed("2026-11-21T13:59:00Z", 10, 5, 100) // first bucket, boundary-inclusive
+	seed("2026-11-21T13:59:30Z", 1, 1, 10)   // same bucket, must aggregate
+	seed("2026-11-21T14:03:59Z", 7, 2, 50)   // last bucket
+	seed("2026-11-21T14:04:00Z", 9, 9, 9)    // future minute, outside labels
+
+	buckets, err := store.LiveBuckets(d, &store.UsageFilter{}, now, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(buckets) != 5 {
+		t.Fatalf("buckets = %d, want 5", len(buckets))
+	}
+	wantLabels := []string{
+		"2026-11-21T13:59", "2026-11-21T14:00", "2026-11-21T14:01",
+		"2026-11-21T14:02", "2026-11-21T14:03",
+	}
+	for i, want := range wantLabels {
+		if buckets[i].Minute != want {
+			t.Fatalf("bucket %d label = %q, want %q", i, buckets[i].Minute, want)
+		}
+	}
+	first := buckets[0]
+	if first.Requests != 2 || first.Prompt != 11 || first.Completion != 6 || first.CostMicro != 110 {
+		t.Errorf("first bucket = %+v, want 2 reqs / 11 prompt / 6 completion / 110 cost", first)
+	}
+	last := buckets[4]
+	if last.Requests != 1 || last.CostMicro != 50 {
+		t.Errorf("last bucket = %+v, want 1 req / 50 cost", last)
+	}
+	for _, b := range buckets[1:4] {
+		if b.Requests != 0 || b.CostMicro != 0 {
+			t.Errorf("middle bucket should be zero-filled: %+v", b)
+		}
+	}
+}
+
+func TestLiveBucketsScoping(t *testing.T) {
+	d, err := db.Open(t.TempDir() + "/live2.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Migrate(d); err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	u1, err := store.CreateUser(d, "one", "", "hash", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u2, err := store.CreateUser(d, "two", "", "hash", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 11, 21, 14, 0, 0, 0, time.UTC)
+	insert := func(userID int64) {
+		err := store.InsertUsage(d, &store.UsageEvent{
+			TS: now.Add(-time.Minute).Format(time.RFC3339), UserID: userID,
+			Endpoint: "chat", CostTotal: 42, Status: 200,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	insert(u1.ID)
+	insert(u2.ID)
+
+	buckets, err := store.LiveBuckets(d, &store.UsageFilter{UserID: u1.ID}, now, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reqs int64
+	for _, b := range buckets {
+		reqs += b.Requests
+	}
+	if reqs != 1 {
+		t.Errorf("scoped requests = %d, want 1", reqs)
+	}
+}

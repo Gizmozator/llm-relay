@@ -35,6 +35,7 @@ type Handler struct {
 	Rec               *usage.Recorder
 	TrustProxyHeaders bool
 	Client            *http.Client
+	Flight            *InFlight
 }
 
 func New(db *sql.DB, rec *usage.Recorder, trustProxyHeaders bool) *Handler {
@@ -42,6 +43,7 @@ func New(db *sql.DB, rec *usage.Recorder, trustProxyHeaders bool) *Handler {
 		DB:                db,
 		Rec:               rec,
 		TrustProxyHeaders: trustProxyHeaders,
+		Flight:            NewInFlight(),
 		// No overall client timeout: generations may run for many minutes
 		// (OCR sends 10+ min non-streaming requests). Bounded at the
 		// transport level instead: dial and TLS handshake only.
@@ -144,6 +146,11 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request, endpoint string
 		writeError(w, http.StatusNotFound, fmt.Sprintf("model %q not found", peek.Model))
 		return
 	}
+	// Counted in-flight from successful routing until the handler returns:
+	// the stream is fully copied (or the body read) before this deferred
+	// Leave runs. Keyed by user so the live view can scope active streams.
+	h.Flight.Enter(user.ID, model.Name)
+	defer h.Flight.Leave(user.ID, model.Name)
 
 	session := r.Header.Get("X-Session-Id")
 	if session == "" {

@@ -23,6 +23,7 @@ type harness struct {
 	key    string // plaintext relay API key
 	server *httptest.Server
 	rec    *usage.Recorder
+	ph     *proxy.Handler // live handler (in-flight counts, ...)
 }
 
 // newHarness boots a full relay against a fake upstream serving the given
@@ -69,7 +70,8 @@ func newHarnessWithURL(t *testing.T, up *httptest.Server) *harness {
 	rec := usage.NewRecorder(d)
 	rec.Start()
 	h := &harness{db: d, key: plain, rec: rec}
-	h.server = httptest.NewServer(proxy.New(d, rec, false).Mux())
+	h.ph = proxy.New(d, rec, false)
+	h.server = httptest.NewServer(h.ph.Mux())
 	t.Cleanup(h.server.Close)
 	return h
 }

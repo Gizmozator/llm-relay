@@ -49,6 +49,7 @@ func main() {
 	apiSrv := &api.Server{DB: d, JWTSecret: cfg.JWTSecret, JWTTTL: 12 * time.Hour,
 		RelayURL: cfg.PublicRelayURL, DashboardURL: cfg.PublicDashboardURL}
 	ph := proxy.New(d, rec, cfg.TrustProxyHeaders)
+	apiSrv.Flight = ph.Flight
 
 	healthz := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -81,6 +82,7 @@ func main() {
 	adminMux.Handle("DELETE /api/keys/{id}", apiSrv.Auth(apiSrv.RevokeKey))
 	adminMux.Handle("GET /api/usage/summary", apiSrv.Auth(apiSrv.UsageSummary))
 	adminMux.Handle("GET /api/usage/detail", apiSrv.Auth(apiSrv.UsageDetail))
+	adminMux.Handle("GET /api/live", apiSrv.Auth(apiSrv.Live))
 
 	adminMux.Handle("GET /api/admin/users", apiSrv.Admin(apiSrv.AdminListUsers))
 	adminMux.Handle("POST /api/admin/users", apiSrv.Admin(apiSrv.AdminCreateUser))
@@ -99,6 +101,7 @@ func main() {
 	adminMux.Handle("PUT /api/admin/settings", apiSrv.Admin(apiSrv.AdminPutSettings))
 	adminMux.Handle("GET /api/admin/usage/summary", apiSrv.Admin(apiSrv.UsageSummary))
 	adminMux.Handle("GET /api/admin/usage/detail", apiSrv.Admin(apiSrv.UsageDetail))
+	adminMux.Handle("GET /api/admin/live", apiSrv.Admin(apiSrv.Live))
 
 	// Embedded SPA with index.html fallback for client-side routes.
 	spa, err := fs.Sub(assets.Web, "web/dist")

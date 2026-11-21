@@ -3,6 +3,7 @@ import { AuthProvider } from './auth';
 import { ToastProvider } from './components/Toast';
 import Layout, { RequireAdmin, RequireAuth } from './Layout';
 import LoginPage from './pages/Login';
+import DashboardPage from './pages/Dashboard';
 import UsagePage from './pages/Usage';
 import KeysPage from './pages/Keys';
 import BackendsPage from './pages/Backends';
@@ -24,7 +25,8 @@ export default function App() {
               </RequireAuth>
             }
           >
-            <Route index element={<UsagePage admin={false} />} />
+            <Route index element={<DashboardPage />} />
+            <Route path="usage" element={<UsagePage admin={false} />} />
             <Route path="keys" element={<KeysPage />} />
             <Route path="models" element={<ModelsPage />} />
             <Route

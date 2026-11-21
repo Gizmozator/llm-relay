@@ -22,9 +22,13 @@ type Server struct {
 	JWTTTL       time.Duration
 	RelayURL     string
 	DashboardURL string
+	// Flight sees the proxy's in-flight request counts (nil = no live data).
+	Flight FlightSource
 
 	loginLimit *loginLimiter
 	limitOnce  sync.Once
+	health     *healthCache
+	healthOnce sync.Once
 }
 
 // limiter returns the lazily created login limiter (Server is built as a

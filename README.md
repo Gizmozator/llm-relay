@@ -13,6 +13,12 @@ priced. Admins manage backends, the model catalog and prices; users see their ow
 
 ## Dashboard
 
+After login every user lands on the **Dashboard**: a live view of the last hour —
+a per-minute traffic graph (requests / tokens / cost), how many streams are
+decoding right now per model, and which catalog models are online (backend
+health is re-probed at most once a minute). The **Usage** page keeps the
+date-range analysis.
+
 ![llm-relay usage dashboard — per-key token metering and cost breakdown](docs/screenshots/usage.png)
 
 ![llm-relay admin backends — upstream LLM servers, health probe and model sync](docs/screenshots/backends.png)

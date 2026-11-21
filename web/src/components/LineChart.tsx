@@ -15,6 +15,11 @@ export default function LineChart({ labels, values, label, format }: LineChartPr
   const chartRef = useRef<Chart | null>(null);
   const formatRef = useRef(format);
   formatRef.current = format;
+  // Same ref trick for the label: the tooltip callback is created once, so
+  // it must read the current label through a ref, and the dataset label
+  // needs updating on every data change.
+  const labelRef = useRef(label);
+  labelRef.current = label;
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -46,7 +51,7 @@ export default function LineChart({ labels, values, label, format }: LineChartPr
           tooltip: {
             callbacks: {
               label: (item) =>
-                ` ${label}: ${formatRef.current(Number((item.parsed as { y: number }).y))}`,
+                ` ${labelRef.current}: ${formatRef.current(Number((item.parsed as { y: number }).y))}`,
             },
           },
         },
@@ -77,9 +82,10 @@ export default function LineChart({ labels, values, label, format }: LineChartPr
     const chart = chartRef.current;
     if (!chart) return;
     chart.data.labels = labels;
+    chart.data.datasets[0].label = label;
     chart.data.datasets[0].data = values;
     chart.update('none');
-  }, [labels, values]);
+  }, [labels, values, label]);
 
   return (
     <div className="chart-wrap">

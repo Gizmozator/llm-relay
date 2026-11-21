@@ -4,6 +4,7 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"time"
 )
 
 // UsageEvent is one row of the usage_log.
@@ -62,11 +63,17 @@ type UsageFilter struct {
 	Model  string // exact model_requested match, "" = any
 	From   string // YYYY-MM-DD inclusive, "" = open
 	To     string // YYYY-MM-DD inclusive, "" = open
+	Since  string // RFC3339 UTC inclusive, "" = open (live-window queries)
 }
 
 func (f *UsageFilter) where() (string, []any) {
 	conds := []string{}
 	args := []any{}
+	if f.Since != "" {
+		// ts is stored as UTC RFC3339 text, so lexicographic >= is exact.
+		conds = append(conds, `u.ts >= ?`)
+		args = append(args, f.Since)
+	}
 	if f.UserID != 0 {
 		conds = append(conds, `u.user_id = ?`)
 		args = append(args, f.UserID)
@@ -171,6 +178,60 @@ func SummarizeUsage(db *sql.DB, f *UsageFilter, groupBy string) (UsageGroup, []U
 		groups = append(groups, g)
 	}
 	return totals, groups, rows.Err()
+}
+
+// LiveBucket is one minute of the live dashboard window.
+type LiveBucket struct {
+	Minute     string `json:"minute"`
+	Requests   int64  `json:"requests"`
+	Prompt     int64  `json:"prompt_tokens"`
+	Completion int64  `json:"completion_tokens"`
+	Cached     int64  `json:"cached_tokens"`
+	CacheWrite int64  `json:"cache_write_tokens"`
+	CostMicro  int64  `json:"cost_micro"`
+}
+
+// LiveBuckets aggregates the last `minutes` minutes into one bucket per
+// minute, zero-filled so the series is continuous (the chart never has to
+// guess gaps). `now` anchors the window; rows are bucketed by the minute
+// prefix of their UTC RFC3339 ts.
+func LiveBuckets(db *sql.DB, f *UsageFilter, now time.Time, minutes int) ([]LiveBucket, error) {
+	start := now.UTC().Truncate(time.Minute).Add(time.Duration(-minutes+1) * time.Minute)
+	f.Since = start.Format(time.RFC3339)
+	where, args := f.where()
+
+	rows, err := db.Query(`SELECT substr(u.ts,1,16) AS minute, COUNT(*),
+			COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0),
+			COALESCE(SUM(cached_tokens),0), COALESCE(SUM(cache_write_tokens),0),
+			COALESCE(SUM(cost_total),0)
+		FROM usage_log u`+where+` GROUP BY minute ORDER BY minute`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	byMinute := map[string]LiveBucket{}
+	for rows.Next() {
+		var b LiveBucket
+		if err := rows.Scan(&b.Minute, &b.Requests, &b.Prompt, &b.Completion,
+			&b.Cached, &b.CacheWrite, &b.CostMicro); err != nil {
+			return nil, err
+		}
+		byMinute[b.Minute] = b
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]LiveBucket, 0, minutes)
+	for i := 0; i < minutes; i++ {
+		label := start.Add(time.Duration(i) * time.Minute).Format("2006-01-02T15:04")
+		if b, ok := byMinute[label]; ok {
+			out = append(out, b)
+		} else {
+			out = append(out, LiveBucket{Minute: label})
+		}
+	}
+	return out, nil
 }
 
 // UsageRow is one detailed usage record for the detail table.
