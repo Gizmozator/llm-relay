@@ -27,7 +27,16 @@ help: ## list all targets
 build: ## build the static binary -> $(BIN)
 	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BIN) ./cmd/$(BIN)
 
-web: ## build the web dashboard -> web/dist (Docker build does this automatically)
+# Shared design system (base-styles repo). web/src/base.css is vendored and
+# committed; refresh with `make css`. The Docker web stage copies it from the
+# build context, so no network access to Gitea is needed there.
+BASE_STYLES_TAG ?= v1.0.0
+BASE_STYLES_URL := http://gitea.rantaeskola.fi/gizmoz/base-styles/raw/tag/$(BASE_STYLES_TAG)
+
+css: ## Fetch shared base.css from base-styles
+	curl -fsSL $(BASE_STYLES_URL)/base.css -o web/src/base.css
+
+web: css ## build the web dashboard -> web/dist (Docker build does this automatically)
 	cd web && npm ci && npm run build
 
 test: ## run unit tests

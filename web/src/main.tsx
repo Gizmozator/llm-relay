@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import App from './App';
 import { brandName } from './brand';
+import './base.css';
 import './styles.css';
 
 document.title = brandName();
