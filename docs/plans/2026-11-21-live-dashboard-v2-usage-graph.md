@@ -1,7 +1,7 @@
 # Plan: Per-model utilization % graph (live dashboard)
 
 - **Status:** done
-- **Owner:** antti
+- **Owner:** maintainer
 - **Started:** 2026-11-21
 - **Issue:** —
 - **Supersedes / superseded by:** extends 2026-11-21-live-dashboard-v1.md

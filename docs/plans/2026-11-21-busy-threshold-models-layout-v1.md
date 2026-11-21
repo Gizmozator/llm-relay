@@ -1,7 +1,7 @@
 # Plan: Per-model busy threshold + Models page two-row layout
 
 - **Status:** done
-- **Owner:** antti
+- **Owner:** maintainer
 - **Started:** 2026-11-21
 - **Issue:** —
 - **Supersedes / superseded by:** extends 2026-11-21-agent-utilization-api-v1.md

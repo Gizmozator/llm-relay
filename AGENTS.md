@@ -15,6 +15,23 @@ Any change that alters behaviour, interfaces, config, or workflow must update th
 
 A change that leaves the docs describing the old behaviour is not finished.
 
+## Public repo — no private info
+
+This repo is published to GitHub (`github` remote, `github.com/Gizmozator/llm-relay`,
+**public**). Nothing homelab-specific or personal may enter it: no home hostnames,
+domains or IPs (`*.rantaeskola.fi`, `10.0.1.x`, …), usernames, emails, tokens or
+real deployment URLs — in code, docs, screenshots or commit messages. The one
+allowed exception is `gitea.rantaeskola.fi` (public style repo + image registry)
+and its `gizmoz` org paths. Use generic examples (`relay.example.fi`) in docs and
+overridable placeholders in config. Plan docs use `**Owner:** maintainer`, never
+a personal name. Before pushing, scan the diff's added lines (AGENTS.md is
+excluded — it names the patterns):
+
+```bash
+git fetch github && git diff github/main -- ':!AGENTS.md' \
+  | grep -iP '^\+.*((?<!gitea\.)rantaeskola|10\.0\.1\.|\bantti\b)'
+```
+
 ## Read on demand
 
 Detail lives in `docs/` — read the one file you need, never the whole folder:

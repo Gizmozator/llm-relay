@@ -1,6 +1,6 @@
 /* ==========================================================================
    base-styles — base.css
-   Shared design-system core for rantaeskola.fi projects.
+   Shared design-system core, vendored from the base-styles repo.
 
    Layer order in a page:
      1. base.css   (this file — tokens, reset, typography, buttons, utilities)

@@ -1,7 +1,7 @@
 /* llm-relay dashboard — single stylesheet, slightly-dark admin theme. */
 
 :root {
-  /* Palette adapted from the rantaeskola.fi homepage design system:
+  /* Palette adapted from the base-styles design system:
      deep navy base, cyan primary, indigo secondary. */
   color-scheme: dark; /* dark-first dashboard; keeps UA controls dark even on a light OS */
   --bg: #0b0f19;

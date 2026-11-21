@@ -1,7 +1,7 @@
 # Plan: Live dashboard (default view with utilization graph)
 
 - **Status:** done
-- **Owner:** antti
+- **Owner:** maintainer
 - **Started:** 2026-11-21
 - **Issue:** —
 - **Supersedes / superseded by:** —

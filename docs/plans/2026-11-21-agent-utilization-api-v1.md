@@ -1,7 +1,7 @@
 # Plan: Agent-facing utilization API + guide
 
 - **Status:** done
-- **Owner:** antti
+- **Owner:** maintainer
 - **Started:** 2026-11-21
 - **Issue:** —
 - **Supersedes / superseded by:** extends 2026-11-21-live-dashboard-v2-usage-graph.md
@@ -138,7 +138,7 @@ small JSON endpoint with its existing `sk-` key and gets per-model
   server root** (no `/v1`); the embedded guide and Agent API page link
   `{root}/v1/agent-guide`, `{root}/v1/utilization`, `{root}/mcp` directly,
   and the Keys/Settings pages append `/v1` when showing the OpenAI base.
-  Set `PUBLIC_RELAY_URL=https://llm.rantaeskola.fi` in the stack env.
+  Set `PUBLIC_RELAY_URL=https://relay.example.fi` in the stack env.
 - 2026-11-21 — owner directives folded in: live dashboard is server-wide for
   every role (personal `/api/live` no longer scopes to the caller) and cost
   is removed from the live view end-to-end (`LiveBucket.CostMicro`,

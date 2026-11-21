@@ -1,7 +1,7 @@
 # Plan: Admin active-connections view
 
 - **Status:** done
-- **Owner:** antti
+- **Owner:** maintainer
 - **Started:** 2026-11-21
 - **Issue:** —
 - **Supersedes / superseded by:** extends 2026-11-21-live-dashboard-v2-usage-graph.md

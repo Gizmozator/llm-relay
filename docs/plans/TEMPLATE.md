@@ -1,7 +1,7 @@
 # Plan: <title>
 
 - **Status:** draft | active | done | abandoned
-- **Owner:** <who>
+- **Owner:** <role, e.g. `maintainer` — no personal names, the repo is public>
 - **Started:** YYYY-MM-DD
 - **Issue:** #N (or `—`)
 - **Supersedes / superseded by:** <plan file or —>
