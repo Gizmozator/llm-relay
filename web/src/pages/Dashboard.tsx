@@ -158,7 +158,14 @@ export default function DashboardPage() {
       </section>
 
       <section className="panel">
-        <h3>Utilization by model</h3>
+        <div className="panel-head">
+          <h3>Utilization by model</h3>
+          <span className="dim">
+            {utilYMax
+              ? `busy time per minute · axis max ${utilYMax} % = ${utilYMax / 100} parallel streams`
+              : 'busy time per minute · over 100 % means parallel streams'}
+          </span>
+        </div>
         {utilSeries.length === 0 ? (
           <Empty label="No requests in this window." />
         ) : (
