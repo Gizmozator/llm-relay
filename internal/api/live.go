@@ -21,11 +21,13 @@ import (
 // Snapshot(0) returns all users' counts; a non-zero userID scopes to one.
 // BusySince returns start times of streams still running, used to credit
 // in-flight busy time before the usage row exists. List returns the full
-// records for the admin connections panel.
+// records for the admin connections panel; Recent the ones that finished
+// within the memory window (also admin connections only).
 type FlightSource interface {
 	Snapshot(userID int64) map[string]int
 	BusySince(userID int64) map[string][]time.Time
 	List(userID int64) []proxy.Stream
+	Recent(userID int64) []proxy.Stream
 }
 
 // healthStatus returns the lazily created shared health cache (the probe
@@ -182,7 +184,9 @@ func (s *Server) Live(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
 		"util":    util,
 	}
 	// Admin-only detail: connection rows name other users, so they ride
-	// only on the admin route (personal /api/live omits the keys).
+	// only on the admin route (personal /api/live omits the keys). Active
+	// streams plus recently-finished ones (60 s memory) so short-request
+	// traffic is visible between polls, not just the frozen instant.
 	if isAdmin {
 		conns := []LiveConnection{}
 		for _, st := range s.activeStreams(f.UserID) {
@@ -192,10 +196,23 @@ func (s *Server) Live(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
 			}
 			conns = append(conns, LiveConnection{
 				Stream:    st,
+				Running:   true,
 				StartedAt: st.Start.UTC().Format(time.RFC3339),
 				Seconds:   sec,
 			})
 		}
+		for _, st := range s.recentStreams(f.UserID) {
+			conns = append(conns, LiveConnection{
+				Stream:    st,
+				Running:   false,
+				StartedAt: st.Start.UTC().Format(time.RFC3339),
+				EndedAt:   st.End.UTC().Format(time.RFC3339),
+				Seconds:   int64(st.End.Sub(st.Start).Seconds()),
+			})
+		}
+		sort.SliceStable(conns, func(i, j int) bool {
+			return conns[i].Stream.Start.Before(conns[j].Stream.Start)
+		})
 		resp["connections"] = conns
 		lastUsed, err := store.LastUsedByUser(s.DB, now.Add(-24*time.Hour))
 		if err != nil {
@@ -207,12 +224,15 @@ func (s *Server) Live(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// LiveConnection is one active proxied request with elapsed-time fields
-// (the admin connections panel). proxy.Stream carries who/what/where;
-// started_at and seconds say for how long.
+// LiveConnection is one proxied request in the admin connections panel:
+// active now, or finished within the recent window (Running=false).
+// proxy.Stream carries who/what/where; started_at and seconds say how long
+// it ran; ended_at dates finished rows.
 type LiveConnection struct {
 	proxy.Stream
+	Running   bool   `json:"running"`
 	StartedAt string `json:"started_at"`
+	EndedAt   string `json:"ended_at,omitempty"`
 	Seconds   int64  `json:"seconds"`
 }
 
@@ -221,6 +241,13 @@ func (s *Server) activeStreams(userID int64) []proxy.Stream {
 		return []proxy.Stream{}
 	}
 	return s.Flight.List(userID)
+}
+
+func (s *Server) recentStreams(userID int64) []proxy.Stream {
+	if s.Flight == nil {
+		return []proxy.Stream{}
+	}
+	return s.Flight.Recent(userID)
 }
 
 func (s *Server) activeByModel(userID int64) map[string]int {

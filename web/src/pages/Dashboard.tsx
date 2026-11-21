@@ -177,7 +177,7 @@ export default function DashboardPage() {
             <span className="dim">who is on which model right now</span>
           </div>
           {!data || (data.connections ?? []).length === 0 ? (
-            <Empty label="No active requests." />
+            <Empty label="No requests in the last minute." />
           ) : (
             <div className="table-scroll">
               <table>
@@ -194,7 +194,7 @@ export default function DashboardPage() {
                 </thead>
                 <tbody>
                   {(data.connections ?? []).map((c, i) => (
-                    <tr key={`${c.user}/${c.model}/${c.started_at}/${i}`}>
+                    <tr key={`${c.user}/${c.model}/${c.started_at}/${i}`} className={c.running ? undefined : 'row-muted'}>
                       <td>{c.user}</td>
                       <td>{c.key}</td>
                       <td className="mono">
@@ -210,7 +210,9 @@ export default function DashboardPage() {
                         {c.session ? c.session.slice(0, 8) : '—'}
                       </td>
                       <td className="mono">{c.ip || '—'}</td>
-                      <td className="num">{fmtDurationSec(c.seconds)}</td>
+                      <td className="num" title={c.running ? undefined : `Finished ${fmtDateTime(c.ended_at)}`}>
+                        {c.running ? fmtDurationSec(c.seconds) : `done ${fmtAgo(c.ended_at)}`}
+                      </td>
                     </tr>
                   ))}
                 </tbody>

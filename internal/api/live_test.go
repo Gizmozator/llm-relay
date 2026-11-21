@@ -25,6 +25,7 @@ type fakeFlight struct {
 	byUser  map[int64]map[string]int
 	since   map[int64]map[string][]time.Time
 	streams map[int64][]proxy.Stream
+	recent  map[int64][]proxy.Stream
 }
 
 func (f fakeFlight) Snapshot(userID int64) map[string]int {
@@ -56,6 +57,17 @@ func (f fakeFlight) BusySince(userID int64) map[string][]time.Time {
 func (f fakeFlight) List(userID int64) []proxy.Stream {
 	out := []proxy.Stream{}
 	for uid, streams := range f.streams {
+		if userID != 0 && uid != userID {
+			continue
+		}
+		out = append(out, streams...)
+	}
+	return out
+}
+
+func (f fakeFlight) Recent(userID int64) []proxy.Stream {
+	out := []proxy.Stream{}
+	for uid, streams := range f.recent {
 		if userID != 0 && uid != userID {
 			continue
 		}
@@ -429,8 +441,9 @@ func TestLiveConnectionsAdminOnly(t *testing.T) {
 		1: {{UserID: 1, User: "admin", Key: "cli", Model: "test-model", Endpoint: "chat",
 			Session: "sess-abc123", IP: "10.0.0.5", Streaming: true,
 			Start: time.Now().Add(-90 * time.Second)}},
+	}, recent: map[int64][]proxy.Stream{
 		2: {{UserID: 2, User: "friend", Key: "laptop", Model: "test-model", Endpoint: "chat",
-			Start: time.Now().Add(-10 * time.Second)}},
+			Start: time.Now().Add(-20 * time.Second), End: time.Now().Add(-15 * time.Second)}},
 	}}
 	e := newLiveEnv(t, fl)
 	seedUsage(t, e.db, userID(t, e.db, "friend"), time.Now().Add(-5*time.Minute), 10, 5, 100)
@@ -444,6 +457,8 @@ func TestLiveConnectionsAdminOnly(t *testing.T) {
 			Model     string `json:"model"`
 			Session   string `json:"session"`
 			Streaming bool   `json:"streaming"`
+			Running   bool   `json:"running"`
+			EndedAt   string `json:"ended_at"`
 			Seconds   int64  `json:"seconds"`
 		} `json:"connections"`
 		LastUsed []struct {
@@ -455,20 +470,35 @@ func TestLiveConnectionsAdminOnly(t *testing.T) {
 	resp.Body.Close()
 
 	if len(r.Connections) != 2 {
-		t.Fatalf("connections = %+v, want 2 rows", r.Connections)
+		t.Fatalf("connections = %+v, want 2 rows (1 active + 1 recent)", r.Connections)
 	}
-	byUser := map[string]int64{}
+	byUser := map[string]bool{}
+	secs := map[string]int64{}
 	for _, c := range r.Connections {
-		byUser[c.User] = c.Seconds
+		byUser[c.User] = c.Running
+		secs[c.User] = c.Seconds
 		if c.Model != "test-model" || c.Key == "" {
 			t.Errorf("connection row = %+v, want model + key set", c)
 		}
 	}
-	if s, ok := byUser["admin"]; !ok || s < 85 || s > 95 {
-		t.Errorf("admin seconds = %d, want ~90", byUser["admin"])
+	if running, ok := byUser["admin"]; !ok || !running {
+		t.Errorf("admin row running = %v (present=%v), want true", byUser["admin"], ok)
 	}
-	if s, ok := byUser["friend"]; !ok || s < 5 || s > 15 {
-		t.Errorf("friend seconds = %d, want ~10", byUser["friend"])
+	if s := secs["admin"]; s < 85 || s > 95 {
+		t.Errorf("admin seconds = %d, want ~90", s)
+	}
+	if running, ok := byUser["friend"]; !ok || running {
+		t.Errorf("friend row running = %v (present=%v), want false", byUser["friend"], ok)
+	}
+	for _, c := range r.Connections {
+		if c.User == "friend" {
+			if c.EndedAt == "" {
+				t.Error("finished row missing ended_at")
+			}
+			if c.Seconds < 4 || c.Seconds > 6 {
+				t.Errorf("friend ran %d s, want ~5", c.Seconds)
+			}
+		}
 	}
 	if len(r.LastUsed) != 1 || r.LastUsed[0].User != "friend" {
 		t.Errorf("last_used = %+v, want [friend]", r.LastUsed)

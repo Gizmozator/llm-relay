@@ -189,7 +189,8 @@ export interface LiveUtil {
   concurrency_limit: number;
 }
 
-/** One active proxied request (admin route only). */
+/** One proxied request in the admin connections panel: running now, or
+ *  finished within the 60 s memory window (running=false). */
 export interface LiveConnection {
   user: string;
   key: string;
@@ -198,7 +199,9 @@ export interface LiveConnection {
   session?: string;
   ip?: string;
   streaming: boolean;
+  running: boolean;
   started_at: string;
+  ended_at?: string;
   seconds: number;
 }
 

@@ -21,15 +21,28 @@ type Stream struct {
 	IP        string    `json:"ip,omitempty"`
 	Streaming bool      `json:"streaming"`
 	Start     time.Time `json:"-"`
+	End       time.Time `json:"-"` // set on finished copies (Recent)
 }
+
+// recentMemory is how long a finished stream stays listed in the admin
+// connections panel. Owner decision: 60 s — enough that short-request
+// traffic (bursts between 5 s polls) is visible, short enough that the
+// panel stays "right now", not history. A var so tests can shrink it.
+var recentMemory = 60 * time.Second
+
+// recentCap bounds the finished-stream list regardless of traffic volume.
+const recentCap = 200
 
 // InFlight tracks active proxied requests by opaque id so the live view
 // can count them per model, scope them per user, fold their busy time and
-// (for admins) list who is on what right now.
+// (for admins) list who is on what right now. Finished streams are kept
+// briefly (recentMemory) for the connections panel only; every other
+// reader (counts, busy fold) sees active streams only.
 type InFlight struct {
 	mu      sync.Mutex
 	next    int64
 	streams map[int64]*Stream
+	recent  []Stream
 }
 
 func NewInFlight() *InFlight {
@@ -62,14 +75,39 @@ func (f *InFlight) EnterAt(s Stream, start time.Time) int64 {
 	return id
 }
 
-// Leave releases the stream with the given id (0 / unknown is a no-op).
+// Leave releases the stream with the given id (0 / unknown is a no-op) and
+// keeps a finished copy in the recent list for the connections panel.
 func (f *InFlight) Leave(id int64) {
 	if f == nil || id == 0 {
 		return
 	}
+	now := time.Now()
 	f.mu.Lock()
-	delete(f.streams, id)
+	if s, ok := f.streams[id]; ok {
+		done := *s
+		done.End = now
+		f.recent = append(f.recent, done)
+		f.pruneRecent(now)
+		delete(f.streams, id)
+	}
 	f.mu.Unlock()
+}
+
+// pruneRecent drops finished streams older than recentMemory (the list is
+// append-ordered by End, so stale entries are always at the front) and
+// trims to recentCap from the front if traffic outpaces the window.
+// Caller holds the mutex.
+func (f *InFlight) pruneRecent(now time.Time) {
+	i := 0
+	for i < len(f.recent) && now.Sub(f.recent[i].End) > recentMemory {
+		i++
+	}
+	if i > 0 {
+		f.recent = append(f.recent[:0], f.recent[i:]...)
+	}
+	if len(f.recent) > recentCap {
+		f.recent = append(f.recent[:0], f.recent[len(f.recent)-recentCap:]...)
+	}
 }
 
 // Snapshot returns the current per-model counts (copy, safe to keep).
@@ -124,6 +162,27 @@ func (f *InFlight) List(userID int64) []Stream {
 			continue
 		}
 		out = append(out, *s)
+	}
+	f.mu.Unlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].Start.Before(out[j].Start) })
+	return out
+}
+
+// Recent returns copies of streams that finished within recentMemory,
+// oldest start first (same order as List). Admin connections panel only.
+func (f *InFlight) Recent(userID int64) []Stream {
+	if f == nil {
+		return []Stream{}
+	}
+	now := time.Now()
+	f.mu.Lock()
+	f.pruneRecent(now)
+	out := []Stream{}
+	for _, s := range f.recent {
+		if userID != 0 && s.UserID != userID {
+			continue
+		}
+		out = append(out, s)
 	}
 	f.mu.Unlock()
 	sort.Slice(out, func(i, j int) bool { return out[i].Start.Before(out[j].Start) })

@@ -85,6 +85,15 @@ the per-model counts they already have.
 
 ## Changelog
 
+- 2026-11-21 — owner follow-up (short-request traffic invisible between
+  polls): finished streams now stay in the connections panel for 60 s
+  (`recentMemory`, bounded by `recentCap`=200, pruned on leave/read).
+  `InFlight.Leave` keeps a finished copy with `End`; new `Recent(userID)`
+  returns them (active `List` untouched, so counts/busy/utilization are
+  unaffected). `connections` rows gained `running` + `ended_at`; dashboard
+  dims finished rows and shows "done 4s ago". Tests: recent window/scope/
+  cap/double-leave in `inflight_test.go`, e2e finished record, live merge
+  of active+recent with running flags and ended_at.
 - 2026-11-21 — implemented: `proxy.Stream` records in `InFlight` (`Enter`/
   `EnterAt` return ids, `Leave(id)` exact removal, `List(userID)` sorted
   copies; `Snapshot`/`BusySince` unchanged semantics); `handle()` computes

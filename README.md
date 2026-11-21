@@ -21,8 +21,9 @@ decoding right now per model, and which catalog models are online (backend
 health is re-probed at most once a minute). Cost stays off this view — it is
 per-user and lives on the **Usage** pages. Admins additionally see **Active
 connections** — who is on which model right now (user, key, endpoint, session,
-IP, running time) — and a per-user **Last used** list, both as relative times
-("1 min ago") refreshed with the same 5 s poll.
+IP, running time; finished requests stay listed for a minute as "done 4s ago")
+— and a per-user **Last used** list, both as relative times ("1 min ago")
+refreshed with the same 5 s poll.
 
 The **Agent API** page explains how to point an AI agent at the relay: hand
 your agent the public guide link (`{relay}/v1/agent-guide`), or wire the MCP

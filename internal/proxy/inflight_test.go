@@ -102,6 +102,48 @@ func TestInFlightList(t *testing.T) {
 	}
 }
 
+func TestInFlightRecent(t *testing.T) {
+	old := recentMemory
+	defer func() { recentMemory = old }()
+
+	f := NewInFlight()
+	id := f.Enter(Stream{UserID: 1, Model: "a", User: "u1"})
+	f.Leave(id)
+	f.Leave(id) // second leave of the same id must not duplicate the record
+
+	rec := f.Recent(0)
+	if len(rec) != 1 || rec[0].User != "u1" || rec[0].End.IsZero() {
+		t.Fatalf("recent = %+v, want one finished u1 record", rec)
+	}
+	if len(f.List(0)) != 0 {
+		t.Fatal("Recent must not leak into active List")
+	}
+	if len(f.Recent(2)) != 0 || len(f.Recent(1)) != 1 {
+		t.Fatal("Recent must scope by user")
+	}
+
+	// Window expiry: entries older than the memory window disappear.
+	recentMemory = time.Nanosecond
+	time.Sleep(time.Millisecond)
+	if n := len(f.Recent(0)); n != 0 {
+		t.Fatalf("after window = %d entries, want 0", n)
+	}
+
+	// Cap: a flood of finishes stays bounded (window wide open here).
+	recentMemory = time.Hour
+	for i := 0; i < recentCap+50; i++ {
+		f.Leave(f.Enter(Stream{UserID: 1, Model: "m"}))
+	}
+	if n := len(f.Recent(0)); n != recentCap {
+		t.Fatalf("after flood = %d entries, want cap %d", n, recentCap)
+	}
+
+	var nilF *InFlight
+	if nilF.Recent(0) == nil {
+		t.Fatal("nil Recent must return an empty slice, not nil")
+	}
+}
+
 func TestFoldBusyWindows(t *testing.T) {
 	windowStart := time.Date(2026, 11, 21, 14, 0, 0, 0, time.UTC)
 	now := windowStart.Add(4*time.Minute + 30*time.Second)

@@ -65,4 +65,9 @@ func TestProxyInFlightHook(t *testing.T) {
 	if n := len(h.ph.Flight.List(0)); n != 0 {
 		t.Fatalf("connections after completion = %d, want 0", n)
 	}
+	// The finished stream stays listed briefly (recent memory) so short
+	// requests are visible between dashboard polls.
+	if rec := h.ph.Flight.Recent(0); len(rec) != 1 || rec[0].Model != "pub-model" || rec[0].End.IsZero() {
+		t.Fatalf("recent after completion = %+v, want one finished pub-model record", rec)
+	}
 }
