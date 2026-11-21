@@ -6,6 +6,7 @@ package api
 
 import (
 	"context"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
@@ -113,7 +114,14 @@ func (s *Server) Live(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
 			f.UserID = id
 		}
 	}
-	buckets, err := store.LiveBuckets(s.DB, f, time.Now(), minutes)
+	// One clock for the whole response: buckets and busy windows must align.
+	now := time.Now()
+	buckets, err := store.LiveBuckets(s.DB, f, now, minutes)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	busy, err := store.BusyByModel(s.DB, f, now, minutes)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
@@ -157,6 +165,27 @@ func (s *Server) Live(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Model < rows[j].Model })
 
+	// Utilization: busy ms per minute as % of the minute (parallel streams
+	// stack, so >100 % means multiple concurrent generations). The model's
+	// concurrency_limit lets the frontend scale the axis to the slots.
+	limits := map[string]int64{}
+	for _, m := range models {
+		limits[m.Name] = m.ConcurrencyLimit
+	}
+	type utilRow struct {
+		Model            string    `json:"model"`
+		Values           []float64 `json:"values"`
+		ConcurrencyLimit int64     `json:"concurrency_limit"`
+	}
+	util := []utilRow{}
+	for _, mb := range busy {
+		vals := make([]float64, len(mb.Values))
+		for i, ms := range mb.Values {
+			vals[i] = math.Round(float64(ms)/60) / 10 // ms → % of 60 s, 1 decimal
+		}
+		util = append(util, utilRow{Model: mb.Model, Values: vals, ConcurrencyLimit: limits[mb.Model]})
+	}
+
 	currency, ok := s.currencySetting()
 	if !ok {
 		writeErr(w, http.StatusInternalServerError, "internal error")
@@ -167,6 +196,7 @@ func (s *Server) Live(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
 		"buckets":  buckets,
 		"active":   rows,
 		"models":   liveModels,
+		"util":     util,
 	})
 }
 

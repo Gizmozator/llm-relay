@@ -122,6 +122,11 @@ type liveResp struct {
 		Count int    `json:"count"`
 	} `json:"active"`
 	Models []api.LiveModel `json:"models"`
+	Util   []struct {
+		Model            string    `json:"model"`
+		Values           []float64 `json:"values"`
+		ConcurrencyLimit int64     `json:"concurrency_limit"`
+	} `json:"util"`
 }
 
 func (r liveResp) sum() (requests, cost int64) {
@@ -241,6 +246,52 @@ func TestLiveWindowClamping(t *testing.T) {
 	if resp := liveGet(t, e, "/api/live?window=x", tok); resp.StatusCode != 400 {
 		t.Errorf("bad window status = %d, want 400", resp.StatusCode)
 		resp.Body.Close()
+	}
+}
+
+func TestLiveUtilization(t *testing.T) {
+	e := newLiveEnv(t, nil)
+	admID := userID(t, e.db, "admin")
+	models, err := store.ListModels(e.db)
+	if err != nil || len(models) != 1 {
+		t.Fatalf("models = %+v, err = %v", models, err)
+	}
+	four := int64(4)
+	if err := store.UpdateModelMeta(e.db, models[0].ID, nil, &four, nil); err != nil {
+		t.Fatal(err)
+	}
+	// A 90 s request completed one minute ago: total busy = 90 s = 150 %
+	// of a minute, split across the minutes it actually occupied.
+	err = store.InsertUsage(e.db, &store.UsageEvent{
+		TS: time.Now().UTC().Add(-time.Minute).Format(time.RFC3339), UserID: admID,
+		Endpoint: "chat", ModelRequ: "test-model", LatencyMS: 90_000, Status: 200,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tok := liveLogin(t, e, "admin", "adminpass1")
+	resp := liveGet(t, e, "/api/live", tok)
+	var r liveResp
+	json.NewDecoder(resp.Body).Decode(&r)
+	resp.Body.Close()
+
+	if len(r.Util) != 1 {
+		t.Fatalf("util = %+v, want one model", r.Util)
+	}
+	u := r.Util[0]
+	if u.Model != "test-model" || u.ConcurrencyLimit != 4 {
+		t.Errorf("util row = %s limit=%d, want test-model limit=4", u.Model, u.ConcurrencyLimit)
+	}
+	if len(u.Values) != 60 {
+		t.Fatalf("util values = %d, want 60 (window-aligned)", len(u.Values))
+	}
+	var total float64
+	for _, v := range u.Values {
+		total += v
+	}
+	if diff := total - 150.0; diff > 0.5 || diff < -0.5 {
+		t.Errorf("total busy = %.1f%%, want ~150%%", total)
 	}
 }
 

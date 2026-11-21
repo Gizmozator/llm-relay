@@ -69,6 +69,94 @@ func TestLiveBucketsFixedClock(t *testing.T) {
 	}
 }
 
+func TestBusyByModelFixedClock(t *testing.T) {
+	d, err := db.Open(t.TempDir() + "/busy.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Migrate(d); err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	seed := func(ts string, latency int64, model string) {
+		err := store.InsertUsage(d, &store.UsageEvent{
+			TS: ts, Endpoint: "chat", ModelRequ: model, LatencyMS: latency, Status: 200,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Window 13:59 … 14:03 (anchor 14:03:30, 5 minutes).
+	now := time.Date(2026, 11, 21, 14, 3, 30, 0, time.UTC)
+	seed("2026-11-21T14:00:30Z", 90_000, "m-a")  // spans 13:59 (60 s) + 14:00 (30 s)
+	seed("2026-11-21T13:59:30Z", 120_000, "m-a") // starts before the window → clipped to 30 s
+	seed("2026-11-21T14:01:00Z", 0, "m-a")       // zero latency contributes nothing
+	seed("2026-11-21T14:02:30Z", 30_000, "m-b")  // fully inside 14:02
+
+	busy, err := store.BusyByModel(d, &store.UsageFilter{}, now, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(busy) != 2 {
+		t.Fatalf("models = %d, want 2: %+v", len(busy), busy)
+	}
+	wantA := []int64{90_000, 30_000, 0, 0, 0}
+	wantB := []int64{0, 0, 0, 30_000, 0}
+	if busy[0].Model != "m-a" || busy[1].Model != "m-b" {
+		t.Fatalf("models = %q, %q, want m-a, m-b", busy[0].Model, busy[1].Model)
+	}
+	for i := range wantA {
+		if busy[0].Values[i] != wantA[i] {
+			t.Errorf("m-a[%d] = %d, want %d", i, busy[0].Values[i], wantA[i])
+		}
+		if busy[1].Values[i] != wantB[i] {
+			t.Errorf("m-b[%d] = %d, want %d", i, busy[1].Values[i], wantB[i])
+		}
+	}
+}
+
+func TestBusyByModelScoping(t *testing.T) {
+	d, err := db.Open(t.TempDir() + "/busy2.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Migrate(d); err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	u1, err := store.CreateUser(d, "one", "", "hash", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u2, err := store.CreateUser(d, "two", "", "hash", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 11, 21, 14, 0, 0, 0, time.UTC)
+	insert := func(userID int64, model string) {
+		err := store.InsertUsage(d, &store.UsageEvent{
+			TS: now.Add(-30 * time.Second).Format(time.RFC3339), UserID: userID,
+			Endpoint: "chat", ModelRequ: model, LatencyMS: 10_000, Status: 200,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	insert(u1.ID, "mine")
+	insert(u2.ID, "theirs")
+
+	busy, err := store.BusyByModel(d, &store.UsageFilter{UserID: u1.ID}, now, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(busy) != 1 || busy[0].Model != "mine" {
+		t.Fatalf("scoped busy = %+v, want only mine", busy)
+	}
+}
+
 func TestLiveBucketsScoping(t *testing.T) {
 	d, err := db.Open(t.TempDir() + "/live2.db")
 	if err != nil {

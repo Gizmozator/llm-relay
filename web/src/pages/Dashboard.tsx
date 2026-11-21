@@ -87,6 +87,20 @@ export default function DashboardPage() {
       ? (v: number) => fmtMoney(v * 1e6, currency)
       : (v: number) => fmtInt(v);
 
+  // Utilization graph: one line per model with traffic in the window. The
+  // axis tops out at the widest concurrency_limit × 100 % (4 slots → 400 %),
+  // auto-scaling when no model has a limit set.
+  const utilSeries = useMemo(
+    () => (data?.util ?? []).map((u) => ({ label: u.model, values: u.values })),
+    [data],
+  );
+  const utilYMax = useMemo(() => {
+    const limits = (data?.util ?? [])
+      .map((u) => u.concurrency_limit * 100)
+      .filter((v) => v > 0);
+    return limits.length ? Math.max(...limits) : undefined;
+  }, [data]);
+
   if (!data && !error) return <Loading label="Loading live data…" />;
 
   return (
@@ -139,6 +153,23 @@ export default function DashboardPage() {
             values={chart.values}
             label={METRIC_OPTIONS.find((o) => o.value === metric)?.label ?? ''}
             format={fmtValue}
+          />
+        )}
+      </section>
+
+      <section className="panel">
+        <h3>Utilization by model</h3>
+        {utilSeries.length === 0 ? (
+          <Empty label="No requests in this window." />
+        ) : (
+          <LineChart
+            labels={chart.labels}
+            values={[]}
+            label=""
+            format={(v) => `${Math.round(v)}%`}
+            series={utilSeries}
+            legend
+            yMax={utilYMax}
           />
         )}
       </section>

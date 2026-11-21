@@ -179,11 +179,20 @@ export interface LiveModel {
   active: number;
 }
 
+export interface LiveUtil {
+  model: string;
+  /** Busy % of each minute (aligned with buckets); >100 = parallel streams. */
+  values: number[];
+  /** Catalog concurrency limit; 0 = unset (frontend auto-scales the axis). */
+  concurrency_limit: number;
+}
+
 export interface LiveResponse {
   currency: string;
   buckets: LiveBucket[];
   active: { model: string; count: number }[];
   models: LiveModel[];
+  util: LiveUtil[];
 }
 
 export interface Info {

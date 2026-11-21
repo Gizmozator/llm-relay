@@ -7,19 +7,29 @@ interface LineChartProps {
   label: string;
   /** Formats a value for the tooltip and y-axis ticks. */
   format: (v: number) => string;
+  /**
+   * Multi-series mode: when set, renders one line per series (palette
+   * colors) instead of the single `values` dataset.
+   */
+  series?: { label: string; values: number[] }[];
+  /** Show the dataset legend (use with multi-series charts). */
+  legend?: boolean;
+  /** Fixed y-axis maximum (e.g. concurrency_limit × 100 for utilization). */
+  yMax?: number;
 }
 
-/** Thin wrapper around Chart.js (no React binding): one line chart instance. */
-export default function LineChart({ labels, values, label, format }: LineChartProps) {
+const PALETTE = [
+  '#38bdf8', '#818cf8', '#34d399', '#fbbf24',
+  '#fb7185', '#a78bfa', '#22d3ee', '#f472b6',
+];
+
+/** Thin wrapper around Chart.js (no React binding): one or more line datasets. */
+export default function LineChart({ labels, values, label, format, series, legend, yMax }: LineChartProps) {
+  const multi = Boolean(series && series.length > 0);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const chartRef = useRef<Chart | null>(null);
   const formatRef = useRef(format);
   formatRef.current = format;
-  // Same ref trick for the label: the tooltip callback is created once, so
-  // it must read the current label through a ref, and the dataset label
-  // needs updating on every data change.
-  const labelRef = useRef(label);
-  labelRef.current = label;
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -28,30 +38,44 @@ export default function LineChart({ labels, values, label, format }: LineChartPr
       type: 'line',
       data: {
         labels: [],
-        datasets: [
-          {
-            label,
-            data: [],
-            borderColor: '#38bdf8',
-            backgroundColor: 'rgba(56, 189, 248, 0.12)',
-            fill: true,
-            tension: 0.25,
-            pointRadius: 2,
-            pointHoverRadius: 4,
-            borderWidth: 2,
-          },
-        ],
+        datasets: multi
+          ? (series ?? []).map((s, i) => ({
+              label: s.label,
+              data: [] as number[],
+              borderColor: PALETTE[i % PALETTE.length],
+              backgroundColor: 'transparent',
+              fill: false,
+              tension: 0.25,
+              pointRadius: 0,
+              pointHoverRadius: 3,
+              borderWidth: 2,
+            }))
+          : [
+              {
+                label,
+                data: [],
+                borderColor: '#38bdf8',
+                backgroundColor: 'rgba(56, 189, 248, 0.12)',
+                fill: true,
+                tension: 0.25,
+                pointRadius: 2,
+                pointHoverRadius: 4,
+                borderWidth: 2,
+              },
+            ],
       },
       options: {
         responsive: true,
         maintainAspectRatio: false,
         interaction: { mode: 'index', intersect: false },
         plugins: {
-          legend: { display: false },
+          legend: { display: Boolean(legend), labels: { color: '#94a3b8' } },
           tooltip: {
             callbacks: {
+              // dataset.label is kept current by the update effect, so the
+              // tooltip follows metric switches without recreating the chart.
               label: (item) =>
-                ` ${labelRef.current}: ${formatRef.current(Number((item.parsed as { y: number }).y))}`,
+                ` ${item.dataset.label}: ${formatRef.current(Number((item.parsed as { y: number }).y))}`,
             },
           },
         },
@@ -76,16 +100,43 @@ export default function LineChart({ labels, values, label, format }: LineChartPr
       chartRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [multi, legend]);
 
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart) return;
     chart.data.labels = labels;
-    chart.data.datasets[0].label = label;
-    chart.data.datasets[0].data = values;
+    if (multi) {
+      // Rebuild datasets when the model set changes; update data in place
+      // when it matches (keeps Chart.js diffing cheap).
+      const src = series ?? [];
+      if (chart.data.datasets.length !== src.length) {
+        chart.data.datasets = src.map((s, i) => ({
+          label: s.label,
+          data: s.values,
+          borderColor: PALETTE[i % PALETTE.length],
+          backgroundColor: 'transparent',
+          fill: false,
+          tension: 0.25,
+          pointRadius: 0,
+          pointHoverRadius: 3,
+          borderWidth: 2,
+        }));
+      } else {
+        src.forEach((s, i) => {
+          chart.data.datasets[i].label = s.label;
+          chart.data.datasets[i].data = s.values;
+        });
+      }
+    } else {
+      chart.data.datasets[0].label = label;
+      chart.data.datasets[0].data = values;
+    }
+    // Fixed axis ceiling (utilization: concurrency_limit × 100 %);
+    // undefined restores Chart.js auto-scaling.
+    if (chart.options.scales?.y) chart.options.scales.y.max = yMax;
     chart.update('none');
-  }, [labels, values, label]);
+  }, [labels, values, label, multi, series, yMax]);
 
   return (
     <div className="chart-wrap">

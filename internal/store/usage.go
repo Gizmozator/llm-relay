@@ -4,6 +4,7 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"sort"
 	"time"
 )
 
@@ -231,6 +232,95 @@ func LiveBuckets(db *sql.DB, f *UsageFilter, now time.Time, minutes int) ([]Live
 			out = append(out, LiveBucket{Minute: label})
 		}
 	}
+	return out, nil
+}
+
+// ModelBusy is one model's per-minute busy time over the live window.
+type ModelBusy struct {
+	Model  string  `json:"model"`
+	Values []int64 `json:"values"` // busy ms per minute, aligned with LiveBuckets
+}
+
+// BusyByModel distributes each request's wall-clock duration
+// [ts − latency_ms, ts] across the minute series (clipped at both window
+// ends) and aggregates busy milliseconds per model. A row can only overlap
+// the window if it completed inside it, so the Since bound is sufficient.
+// Values align with the same window as LiveBuckets.
+func BusyByModel(db *sql.DB, f *UsageFilter, now time.Time, minutes int) ([]ModelBusy, error) {
+	start := now.UTC().Truncate(time.Minute).Add(time.Duration(-minutes+1) * time.Minute)
+	f.Since = start.Format(time.RFC3339)
+	where, args := f.where()
+
+	rows, err := db.Query(`SELECT u.ts, u.latency_ms, COALESCE(u.model_requested,'(unknown)')
+		FROM usage_log u`+where, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	byModel := map[string][]int64{}
+	for rows.Next() {
+		var tsStr, model string
+		var latency int64
+		if err := rows.Scan(&tsStr, &latency, &model); err != nil {
+			return nil, err
+		}
+		if latency <= 0 {
+			continue
+		}
+		end, perr := time.Parse(time.RFC3339, tsStr)
+		if perr != nil {
+			continue // malformed row: nothing sensible to place
+		}
+		end = end.UTC()
+		begin := end.Add(-time.Duration(latency) * time.Millisecond)
+		// Minute indices the request overlaps, clipped to the window.
+		i0 := int(begin.Sub(start) / time.Minute)
+		if i0 < 0 {
+			i0 = 0
+		}
+		i1 := int(end.Sub(start) / time.Minute)
+		if i1 > minutes-1 {
+			i1 = minutes - 1
+		}
+		if i0 > i1 {
+			continue
+		}
+		vals, ok := byModel[model]
+		if !ok {
+			vals = make([]int64, minutes)
+			byModel[model] = vals
+		}
+		for i := i0; i <= i1; i++ {
+			mStart := start.Add(time.Duration(i) * time.Minute)
+			mEnd := mStart.Add(time.Minute)
+			ovStart, ovEnd := begin, end
+			if ovStart.Before(mStart) {
+				ovStart = mStart
+			}
+			if ovEnd.After(mEnd) {
+				ovEnd = mEnd
+			}
+			if d := ovEnd.Sub(ovStart); d > 0 {
+				vals[i] += d.Milliseconds()
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := []ModelBusy{}
+	for model, vals := range byModel {
+		var total int64
+		for _, v := range vals {
+			total += v
+		}
+		if total == 0 {
+			continue
+		}
+		out = append(out, ModelBusy{Model: model, Values: vals})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Model < out[j].Model })
 	return out, nil
 }
 
