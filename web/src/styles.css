@@ -879,3 +879,73 @@ tr.sub-row > td {
   padding: 2px 0;
   font-size: 13px;
 }
+
+/* ---------- mobile (≤720px) ----------
+   The shell stacks: the sidebar becomes a top bar with wrapping nav pills
+   and the content gets the full width. Tables keep their own horizontal
+   scroll (.table-scroll); modals and charts are already fluid. */
+@media (max-width: 720px) {
+  .shell {
+    flex-direction: column;
+  }
+
+  .sidebar {
+    width: auto;
+    padding: 10px 12px 8px;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .brand {
+    padding: 0 4px 10px;
+  }
+
+  .sidebar nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 6px;
+  }
+
+  .sidebar nav a {
+    padding: 5px 10px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    font-size: 13px;
+    white-space: nowrap;
+  }
+
+  .nav-group {
+    margin: 4px 4px 0 2px;
+  }
+
+  .topbar {
+    padding: 8px 12px;
+  }
+
+  .topbar-user {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .content {
+    padding: 12px;
+  }
+
+  .page-head {
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  .cards {
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: 8px;
+  }
+
+  .chart-wrap {
+    height: 220px;
+  }
+
+  .modal-overlay {
+    padding: 16px 10px;
+  }
+}
