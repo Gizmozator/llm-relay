@@ -31,10 +31,22 @@ build: ## build the static binary -> $(BIN)
 # committed; refresh with `make css`. The Docker web stage copies it from the
 # build context, so no network access to Gitea is needed there.
 BASE_STYLES_TAG ?= v1.0.0
-BASE_STYLES_URL := http://gitea.rantaeskola.fi/gizmoz/base-styles/raw/tag/$(BASE_STYLES_TAG)
+BASE_STYLES_HOST ?= gitea.rantaeskola.fi
+BASE_STYLES_URL := http://$(BASE_STYLES_HOST)/gizmoz/base-styles/raw/tag/$(BASE_STYLES_TAG)
 
+# Public-repo rule (AGENTS.md): the upstream header names the bare home domain;
+# re-apply the scrubbed provenance line after every fetch so a refresh never
+# reintroduces it (matches the scrub in 3afb222). Fetch+scrub+validate run on a
+# temp file so a failed gate leaves the committed copy untouched. Two gates:
+# the scrub must have matched, and the fetched file must not name the bare
+# home host (derived from BASE_STYLES_HOST — the bare form is never spelled
+# in this file).
 css: ## Fetch shared base.css from base-styles
-	curl -fsSL $(BASE_STYLES_URL)/base.css -o web/src/base.css
+	curl -fsSL $(BASE_STYLES_URL)/base.css -o web/src/base.css.tmp
+	sed 's|^   Shared design-system core.*$$|   Shared design-system core, vendored from the base-styles repo.|' web/src/base.css.tmp > web/src/base.css.new
+	@grep -q 'vendored from the base-styles repo' web/src/base.css.new || { rm -f web/src/base.css.tmp web/src/base.css.new; echo 'css: provenance scrub did not match the fetched header — update the sed rule'; exit 1; }
+	@! grep -q '$(BASE_STYLES_HOST:gitea.%=%)' web/src/base.css.new || { rm -f web/src/base.css.tmp web/src/base.css.new; echo 'css: fetched file still names the home host — scrub missed'; exit 1; }
+	@mv web/src/base.css.new web/src/base.css && rm -f web/src/base.css.tmp
 
 web: css ## build the web dashboard -> web/dist (Docker build does this automatically)
 	cd web && npm ci && npm run build
