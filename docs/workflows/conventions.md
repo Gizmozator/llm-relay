@@ -4,14 +4,12 @@
 
 | what | value |
 |---|---|
-| git remote (SSH) | `ssh://git@gitea-host:8022/gizmoz/llm-relay.git` |
-| Gitea API / web | `http://gitea-host:3000/gizmoz/llm-relay` |
 | Gitea owner/repo | `gizmoz/llm-relay` |
+| GitHub (public mirror) | `https://github.com/Gizmozator/llm-relay` |
 
-The git remote uses the LAN SSH endpoint `gitea-host:8022`, **not** the public
-domain. `tea` talks to the API URL from `~/.config/tea/config.yml`. Same server,
-different doors — when parsing a remote URL for `owner/repo`, ignore the host and
-take the last two path segments.
+The git remote points at the owner's Gitea instance (host varies per network);
+`tea` talks to the API URL from `~/.config/tea/config.yml`. When parsing a remote
+URL for `owner/repo`, ignore the host and take the last two path segments.
 
 ## Commits
 

@@ -37,7 +37,7 @@ Proxy requests may carry `X-Session-Id: <string>`; without it the relay derives 
 - `PATCH /api/admin/users/{id}` — any of `{"password","disabled","role","display_name","price_multiplier"}` → user object. `price_multiplier` (float >0, default 1) scales every cost recorded for that user at request time (snapshot semantics: changing it never rewrites existing rows). Admin-only: `GET /api/me` deliberately omits it. Guard: an update that would leave zero enabled admins → `400`; setting a password >72 bytes → `400`.
 
 ### Admin — backends
-- `GET /api/admin/backends` → `{"backends":[{"id":1,"name":"halogen","base_url":"http://engine-host:8731","has_key":false,"enabled":true,"last_probe_at":"...|null","last_probe_error":"...|null","server_version":"...|null","created_at":"...","model_count":2}]}`
+- `GET /api/admin/backends` → `{"backends":[{"id":1,"name":"halogen","base_url":"http://llm-host:8731","has_key":false,"enabled":true,"last_probe_at":"...|null","last_probe_error":"...|null","server_version":"...|null","created_at":"...","model_count":2}]}`
 - `POST /api/admin/backends` — `{"name","base_url","api_key"?}` → `201` backend object
 - `PATCH /api/admin/backends/{id}` — any of `{"name","base_url","api_key","enabled"}` (`api_key:""` clears) → backend object
 - `DELETE /api/admin/backends/{id}` → `204` · `409` if catalog models still reference it

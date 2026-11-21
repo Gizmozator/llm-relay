@@ -1,4 +1,4 @@
-# llm-relay — Dockge stack for prod-host (prod-host).
+# llm-relay — example Dockge stack.
 # Paste into Dockge as a new stack; create the .env next to it with the values
 # below before the first start. Data persists in /docker/llm-proxy/data.
 #
@@ -6,7 +6,7 @@
 #   JWT_SECRET        openssl rand -hex 32
 #   ADMIN_USERNAME    first-run bootstrap admin
 #   ADMIN_PASSWORD    first-run bootstrap admin password
-# Optional: RELAY_PORT / DASHBOARD_PORT overrides if 8080/8081 are taken on prod-host.
+# Optional: RELAY_PORT / DASHBOARD_PORT overrides if 8080/8081 are taken on the host.
 
 services:
   llm-relay:

@@ -209,7 +209,7 @@ function BackendFormModal({
         <Field label="Base URL">
           <input
             className="input mono"
-            placeholder="http://gitea-host:8080"
+            placeholder="http://localhost:8080"
             value={baseUrl}
             onChange={(e) => setBaseUrl(e.target.value)}
           />

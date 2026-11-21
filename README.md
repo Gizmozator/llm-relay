@@ -9,9 +9,13 @@ priced. Admins manage backends, the model catalog and prices; users see their ow
 
 - **Relay API:** `:8080` (`/v1/*`, `sk-` keys) — what friends' apps point at
 - **Dashboard + admin API:** `:8081` (JWT, embedded SPA) — the port to front with a reverse proxy
-- **Repo (SSH):** `ssh://git@gitea-host:8022/gizmoz/llm-relay.git`
-- **Repo (web):** http://gitea-host:3000/gizmoz/llm-relay
-- **Image registry:** `gitea.rantaeskola.fi/gizmoz/llm-relay`
+- **Repo:** https://github.com/Gizmozator/llm-relay
+
+## Dashboard
+
+![llm-relay usage dashboard — per-key token metering and cost breakdown](docs/screenshots/usage.png)
+
+![llm-relay admin backends — upstream LLM servers, health probe and model sync](docs/screenshots/backends.png)
 
 ## Supported upstream dialects
 
@@ -39,7 +43,7 @@ make docker-up            # build image + start: relay :8080, dashboard :8081
 ```
 
 Open `http://localhost:8081`, log in, then: **Backends → add** the LLM server base URL
-(e.g. `http://engine-host:8731`) → **Sync** → pick discovered models → set prices →
+(e.g. `http://your-llm-host:8731`) → **Sync** → pick discovered models → set prices →
 **My keys → create key** → point any OpenAI-compatible client at `http://localhost:8080/v1`
 with the key as bearer token.
 
@@ -55,7 +59,7 @@ For local dev without Docker: `make web && make run`.
 | run locally | `make run` (relay `:PORT`, dashboard `:ADMIN_PORT`) |
 | build container | `make docker-build` |
 | start / stop local stack | `make docker-up` / `make docker-down` |
-| publish image to Gitea registry | `make docker-release VERSION=0.1.1` |
+| publish container image | `make docker-release VERSION=0.1.1` |
 
 ## Configuration
 
@@ -72,12 +76,11 @@ Environment (or `.env`, see `.env.example`):
 | `PUBLIC_RELAY_URL` / `PUBLIC_DASHBOARD_URL` | — | public URLs shown in the dashboard for copying |
 | `TZ` | `Europe/Helsinki` | timezone |
 
-## Deployment (prod-host via Dockge)
+## Deployment
 
-`deploy/dockge-compose.yml` is the stack file for Dockge on prod-host: pulls
-`gitea.rantaeskola.fi/gizmoz/llm-relay:latest`, persists `/docker/llm-relay/data`,
-expects `JWT_SECRET` (+ admin bootstrap creds) in the stack `.env`. Publish a new
-version with `make docker-release VERSION=x.y.z` (needs `docker login gitea.rantaeskola.fi`).
+`deploy/` ships a sample container-compose stack. Point it at your own registry and
+data directory, set `JWT_SECRET` (+ optional bootstrap admin) in the stack `.env`,
+and publish a new image version with `make docker-release VERSION=x.y.z`.
 
 ## Layout
 
@@ -93,9 +96,10 @@ llm-relay
 ├── internal/proxy         dialect forwarder, SSE scanning, backend discovery
 ├── internal/api           dashboard JSON API (user + admin)
 ├── web/                   Vite + React + Chart.js dashboard (embedded via go:embed)
-├── deploy/                dockge-compose.yml (prod-host production stack)
+├── deploy/                sample container-compose stack
 ├── docs/
 │   ├── api-contract.md    authoritative HTTP API contract
+│   ├── screenshots/       dashboard screenshots (shown in README)
 │   ├── workflows/         how we work: review, bug loop, feature loop, conventions
 │   └── plans/             implementation plans (current + archived)
 ├── Dockerfile             node → go → scratch multi-stage
