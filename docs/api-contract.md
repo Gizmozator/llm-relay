@@ -51,7 +51,7 @@ Proxy requests may carry `X-Session-Id: <string>`; without it the relay derives 
 - `PATCH /api/admin/users/{id}` — any of `{"password","disabled","role","display_name","price_multiplier"}` → user object. `price_multiplier` (float >0, default 1) scales every cost recorded for that user at request time (snapshot semantics: changing it never rewrites existing rows). Admin-only: `GET /api/me` deliberately omits it. Guard: an update that would leave zero enabled admins → `400`; setting a password >72 bytes → `400`.
 
 ### Admin — backends
-- `GET /api/admin/backends` → `{"backends":[{"id":1,"name":"halogen","base_url":"http://llm-host:8731","has_key":false,"enabled":true,"draining":false,"last_probe_at":"...|null","last_probe_error":"...|null","server_version":"...|null","created_at":"...","model_count":2}]}`
+- `GET /api/admin/backends` → `{"backends":[{"id":1,"name":"halogen","base_url":"http://llm-host:8731","has_key":false,"enabled":true,"draining":false,"online":true,"health_error":"","last_probe_at":"...|null","last_probe_error":"...|null","server_version":"...|null","created_at":"...","model_count":2}]}` — `online` is the **live** reachability verdict (shared health cache, re-probed at most once per minute per backend; disabled backends are offline without a probe) and `health_error` explains a live `false`; `last_probe_*` are the stored result of the last manual Probe only
 - `POST /api/admin/backends` — `{"name","base_url","api_key"?}` → `201` backend object
 - `PATCH /api/admin/backends/{id}` — any of `{"name","base_url","api_key","enabled","draining"}` (`api_key:""` clears) → backend object
 - `DELETE /api/admin/backends/{id}` → `204` · `409` if catalog models still reference it

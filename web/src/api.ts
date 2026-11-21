@@ -99,6 +99,9 @@ export interface Backend {
   has_key: boolean;
   enabled: boolean;
   draining: boolean;
+  /** Live reachability from the shared health cache (re-probed ≤ once/min). */
+  online: boolean;
+  health_error?: string;
   last_probe_at: string | null;
   last_probe_error: string | null;
   server_version: string | null;

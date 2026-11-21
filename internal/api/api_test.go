@@ -62,6 +62,7 @@ func newTestEnv(t *testing.T, upstream http.Handler) *testEnv {
 	mux.Handle("POST /api/admin/models/{id}/benchmark", s.Admin(s.AdminBenchmarkModel))
 	mux.Handle("POST /api/admin/users", s.Admin(s.AdminCreateUser))
 	mux.Handle("GET /api/admin/usage/detail", s.Admin(s.UsageDetail))
+	mux.Handle("GET /api/admin/backends", s.Admin(s.AdminListBackends))
 	mux.Handle("POST /api/admin/backends", s.Admin(s.AdminCreateBackend))
 	mux.Handle("PATCH /api/admin/backends/{id}", s.Admin(s.AdminUpdateBackend))
 	mux.Handle("POST /api/admin/backends/{id}/probe", s.Admin(s.AdminProbeBackend))
@@ -218,6 +219,71 @@ func TestBackendDiscoveryFlow(t *testing.T) {
 	resp.Body.Close()
 	if !pr.Models[0].InCatalog || pr.Models[1].InCatalog {
 		t.Errorf("in_catalog flags wrong: %+v", pr.Models)
+	}
+}
+
+// The Backends page Status column must reflect live reachability (shared
+// health cache), not the stored manual-probe fields.
+func TestAdminBackendsLiveStatus(t *testing.T) {
+	up := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"version":"9.9.9"}`))
+	})
+	e := newTestEnv(t, up)
+	tok := login(t, e)
+
+	upSrv := httptest.NewServer(up)
+	defer upSrv.Close()
+	create := func(name, url string) int64 {
+		t.Helper()
+		resp := e.do(t, "POST", "/api/admin/backends",
+			fmt.Sprintf(`{"name":%q,"base_url":%q}`, name, url), tok)
+		if resp.StatusCode != 201 {
+			resp.Body.Close()
+			t.Fatalf("create %s: %d", name, resp.StatusCode)
+		}
+		var b store.Backend
+		json.NewDecoder(resp.Body).Decode(&b)
+		resp.Body.Close()
+		return b.ID
+	}
+	create("live", upSrv.URL)
+	create("dead", "http://127.0.0.1:1")
+	offID := create("off", upSrv.URL)
+	if resp := e.do(t, "PATCH", pathf("/api/admin/backends/%d", offID), `{"enabled":false}`, tok); resp.StatusCode != 200 {
+		resp.Body.Close()
+		t.Fatalf("disable off backend: %d", resp.StatusCode)
+	}
+
+	resp := e.do(t, "GET", "/api/admin/backends", "", tok)
+	var bl struct {
+		Backends []struct {
+			Name      string `json:"name"`
+			Online    bool   `json:"online"`
+			HealthErr string `json:"health_error"`
+		} `json:"backends"`
+	}
+	json.NewDecoder(resp.Body).Decode(&bl)
+	resp.Body.Close()
+	online := map[string]bool{}
+	herr := map[string]string{}
+	for _, b := range bl.Backends {
+		online[b.Name], herr[b.Name] = b.Online, b.HealthErr
+	}
+	if !online["live"] {
+		t.Errorf("live backend online=false, want true")
+	}
+	if online["dead"] {
+		t.Errorf("dead backend online=true, want false")
+	}
+	if herr["dead"] == "" {
+		t.Errorf("dead backend health_error empty, want probe failure")
+	}
+	// Disabled backends are offline without a probe, even when reachable.
+	if online["off"] {
+		t.Errorf("disabled backend online=true, want false")
+	}
+	if herr["off"] != "backend disabled" {
+		t.Errorf("disabled backend health_error = %q, want %q", herr["off"], "backend disabled")
 	}
 }
 

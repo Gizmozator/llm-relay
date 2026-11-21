@@ -164,13 +164,32 @@ func (s *Server) AdminUpdateUser(w http.ResponseWriter, r *http.Request, c *auth
 
 var urlRe = regexp.MustCompile(`^https?://[^ ]+$`)
 
+// backendView is a store.Backend plus the live reachability verdict from the
+// shared health cache (re-probed at most once per TTL). The stored
+// last_probe_* fields only change when the admin presses Probe, so the page
+// must not rely on them for "is it up right now".
+type backendView struct {
+	store.Backend
+	Online    bool   `json:"online"`
+	HealthErr string `json:"health_error,omitempty"`
+}
+
 func (s *Server) AdminListBackends(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
 	backends, err := store.ListBackends(s.DB)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"backends": backends})
+	status := s.healthStatus().Status(r.Context(), backends)
+	views := make([]backendView, 0, len(backends))
+	for _, b := range backends {
+		v := backendView{Backend: b, Online: status[b.ID].Online}
+		if h := status[b.ID]; !h.Online {
+			v.HealthErr = h.Err
+		}
+		views = append(views, v)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"backends": views})
 }
 
 func (s *Server) AdminCreateBackend(w http.ResponseWriter, r *http.Request, c *auth.Claims) {

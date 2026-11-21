@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api, errMsg } from '../api';
-import type { LiveResponse } from '../api';
+import type { LiveConnection, LiveResponse } from '../api';
 import { useAuth } from '../auth';
 import { fmtAgo, fmtDateTime, fmtDurationSec, fmtInt } from '../format';
 import { Banner, Empty, Loading } from '../components/ui';
@@ -15,6 +15,21 @@ const METRIC_OPTIONS: { value: Metric; label: string }[] = [
   { value: 'requests', label: 'Requests / min' },
   { value: 'tokens', label: 'Tokens / min' },
 ];
+
+/** Group connection rows per session (user+key+model+endpoint+session+IP).
+ *  One busy agent session is many short requests, but the panel answers
+ *  "who is on which model" — that is one row per group. Rows arrive sorted
+ *  by start, so insertion order keeps the oldest group first. */
+function groupConnections(rows: LiveConnection[]): LiveConnection[][] {
+  const map = new Map<string, LiveConnection[]>();
+  for (const c of rows) {
+    const k = [c.user, c.key, c.model, c.endpoint, c.session ?? '', c.ip ?? ''].join('|');
+    const g = map.get(k);
+    if (g) g.push(c);
+    else map.set(k, [c]);
+  }
+  return [...map.values()];
+}
 
 /**
  * Default landing view: what the relay is doing right now. Polls /api/live
@@ -193,28 +208,49 @@ export default function DashboardPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {(data.connections ?? []).map((c, i) => (
-                    <tr key={`${c.user}/${c.model}/${c.started_at}/${i}`} className={c.running ? undefined : 'row-muted'}>
-                      <td>{c.user}</td>
-                      <td>{c.key}</td>
-                      <td className="mono">
-                        {c.model}
-                        {c.streaming && (
-                          <span className="badge ok" title="streaming response">
-                            stream
-                          </span>
-                        )}
-                      </td>
-                      <td>{c.endpoint}</td>
-                      <td className="mono" title={c.session}>
-                        {c.session ? c.session.slice(0, 8) : '—'}
-                      </td>
-                      <td className="mono">{c.ip || '—'}</td>
-                      <td className="num" title={c.running ? undefined : `Finished ${fmtDateTime(c.ended_at)}`}>
-                        {c.running ? fmtDurationSec(c.seconds) : `done ${fmtAgo(c.ended_at)}`}
-                      </td>
-                    </tr>
-                  ))}
+                  {groupConnections(data.connections ?? []).map((rows, i) => {
+                    const first = rows[0];
+                    const running = rows.filter((c) => c.running);
+                    const done = rows.length - running.length;
+                    let cell: string;
+                    if (running.length > 0) {
+                      const secs = Math.max(...running.map((c) => c.seconds));
+                      cell =
+                        fmtDurationSec(secs) +
+                        (running.length > 1 ? ` ×${running.length}` : '') +
+                        (done > 0 ? ` · ${done} done` : '');
+                    } else {
+                      const latest = rows.reduce((a, c) =>
+                        (c.ended_at ?? '') >= (a.ended_at ?? '') ? c : a,
+                      );
+                      cell = `done ${fmtAgo(latest.ended_at)}` + (rows.length > 1 ? ` ×${rows.length}` : '');
+                    }
+                    return (
+                      <tr
+                        key={`${first.user}/${first.model}/${first.started_at}/${i}`}
+                        className={running.length > 0 ? undefined : 'row-muted'}
+                      >
+                        <td>{first.user}</td>
+                        <td>{first.key}</td>
+                        <td className="mono">
+                          {first.model}
+                          {first.streaming && (
+                            <span className="badge ok" title="streaming response">
+                              stream
+                            </span>
+                          )}
+                        </td>
+                        <td>{first.endpoint}</td>
+                        <td className="mono" title={first.session}>
+                          {first.session ? first.session.slice(0, 8) : '—'}
+                        </td>
+                        <td className="mono">{first.ip || '—'}</td>
+                        <td className="num" title={`${running.length} running · ${done} finished in the last minute`}>
+                          {cell}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

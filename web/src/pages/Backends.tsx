@@ -12,6 +12,15 @@ export default function BackendsPage() {
   const backends = useLoad(() => api.backends().then((r) => r.backends), []);
   const models = useLoad(() => api.models().then((r) => r.models), []);
 
+  // Keep the live status badge honest without a manual refresh; the shared
+  // health cache caps the real probes at one per backend per minute, so this
+  // poll is cheap. Modals hold their own copies, so a reload never disturbs
+  // editing.
+  useEffect(() => {
+    const t = setInterval(() => backends.reload(), 10_000);
+    return () => clearInterval(t);
+  }, [backends.reload]);
+
   const [showAdd, setShowAdd] = useState(false);
   const [editTarget, setEditTarget] = useState<Backend | null>(null);
   const [syncTarget, setSyncTarget] = useState<Backend | null>(null);
@@ -86,19 +95,21 @@ export default function BackendsPage() {
                         </span>
                       </td>
                       <td>
-                        {b.last_probe_error ? (
-                          <span className="badge err" title={b.last_probe_error}>
-                            error
+                        {b.online ? (
+                          <span className="badge ok" title="Live reachability, re-checked at most once a minute">
+                            ok
                           </span>
-                        ) : b.last_probe_at ? (
-                          <span className="badge ok">ok</span>
                         ) : (
-                          <span className="badge err">not probed</span>
+                          <span className="badge err" title={b.health_error || 'unreachable'}>
+                            offline
+                          </span>
                         )}
                         {b.has_key && <span className="tag" title="API key stored">key</span>}
                       </td>
                       <td className="mono">{b.server_version ?? '—'}</td>
-                      <td className="nowrap">{fmtDateTime(b.last_probe_at)}</td>
+                      <td className="nowrap" title={b.last_probe_error ?? undefined}>
+                        {fmtDateTime(b.last_probe_at)}
+                      </td>
                       <td className="num">{b.model_count}</td>
                       <td className="actions">
                         <button className="btn small" onClick={() => setSyncTarget(b)}>
