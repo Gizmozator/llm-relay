@@ -92,6 +92,16 @@ Two things, one increment:
 
 ## Changelog
 
+- 2026-11-21 — owner follow-up: threshold cap raised 100 → 10000 (over 100
+  = "busy from N parallel streams", e.g. 300); PATCH validation + tests
+  updated (10001 → 400, 150 round-trips, utilization free at 300).
+  Migration `0008_busy_threshold_default.sql` backfills stored 0 → 80 and
+  both model-insert paths (`CreateModel`, and `AddModels` — the production
+  backend-sync path, reviewer round-1 catch) insert 80 explicitly, so new
+  models show 80 instead of 0 (SQLite cannot ALTER a column default; 0
+  still means "default"). Layout
+  rebalanced: Parallel + Busy ≥ % moved to the identity row (7 columns),
+  sub-row keeps prices/context/speed.
 - 2026-11-21 — implemented as planned: migration `0007_busy_threshold.sql`
   (`models.busy_threshold_pct`, 0 = default 80); `store.Model.BusyThresholdPct`
   + `UpdateModelMeta` param; `utilization.go` per-model threshold

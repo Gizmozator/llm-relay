@@ -110,6 +110,12 @@ export default function AdminModelsPage() {
                   <th>Backend</th>
                   <th>Upstream id</th>
                   <th>Enabled</th>
+                  <th className="num" title="Parallel streams the engine serves at once (0 = unset)">
+                    Parallel
+                  </th>
+                  <th className="num" title="Mean busy % at which agents see “busy” (0 = default 80; over 100 = several parallel streams)">
+                    Busy ≥ %
+                  </th>
                   <th className="actions">Actions</th>
                 </tr>
               </thead>
@@ -129,6 +135,20 @@ export default function AdminModelsPage() {
                       <td>
                         <Toggle checked={m.enabled} onChange={(v) => patch(m.id, { enabled: v })} />
                       </td>
+                      <td className="num">
+                        <EditableNumber
+                          display={String(m.concurrency_limit)}
+                          ariaLabel={`Concurrency limit of ${m.name}`}
+                          onCommit={(n) => patch(m.id, { concurrency_limit: Math.round(n) })}
+                        />
+                      </td>
+                      <td className="num">
+                        <EditableNumber
+                          display={String(m.busy_threshold_pct)}
+                          ariaLabel={`Busy threshold (percent) of ${m.name}`}
+                          onCommit={(n) => patch(m.id, { busy_threshold_pct: Math.round(n) })}
+                        />
+                      </td>
                       <td className="actions">
                         <button
                           className="btn small"
@@ -141,7 +161,7 @@ export default function AdminModelsPage() {
                       </td>
                     </tr>
                     <tr className="sub-row">
-                      <td colSpan={5}>
+                      <td colSpan={7}>
                         <div className="model-metrics">
                           {PRICE_FIELDS.map((p) => (
                             <span className="metric" key={p.key}>
@@ -163,14 +183,6 @@ export default function AdminModelsPage() {
                               onCommit={(n) => patch(m.id, { context_length: Math.round(n) })}
                             />
                           </span>
-                          <span className="metric" title="Parallel streams the engine serves at once (0 = unset)">
-                            <span className="metric-label">Parallel</span>
-                            <EditableNumber
-                              display={String(m.concurrency_limit)}
-                              ariaLabel={`Concurrency limit of ${m.name}`}
-                              onCommit={(n) => patch(m.id, { concurrency_limit: Math.round(n) })}
-                            />
-                          </span>
                           <span
                             className="metric"
                             title={m.bench_at ? `Benchmarked ${fmtDateTime(m.bench_at)}` : 'Manual value'}
@@ -180,17 +192,6 @@ export default function AdminModelsPage() {
                               display={m.bench_tok_per_s ? m.bench_tok_per_s.toFixed(1) : '0'}
                               ariaLabel={`Speed (tok/s) of ${m.name}`}
                               onCommit={(n) => patch(m.id, { bench_tok_per_s: n })}
-                            />
-                          </span>
-                          <span
-                            className="metric"
-                            title="Mean busy % at which agents see “busy” (0 = default 80)"
-                          >
-                            <span className="metric-label">Busy ≥ %</span>
-                            <EditableNumber
-                              display={String(m.busy_threshold_pct)}
-                              ariaLabel={`Busy threshold (percent) of ${m.name}`}
-                              onCommit={(n) => patch(m.id, { busy_threshold_pct: Math.round(n) })}
                             />
                           </span>
                         </div>

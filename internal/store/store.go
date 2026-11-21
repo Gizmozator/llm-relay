@@ -469,7 +469,7 @@ func CreateModel(db *sql.DB, backendID int64, upstreamModel, name string) (*Mode
 	if name == "" {
 		name = upstreamModel
 	}
-	res, err := db.Exec(`INSERT INTO models(backend_id, upstream_model, name) VALUES(?,?,?)`,
+	res, err := db.Exec(`INSERT INTO models(backend_id, upstream_model, name, busy_threshold_pct) VALUES(?,?,?,80)`,
 		backendID, upstreamModel, name)
 	if err != nil {
 		if isUniqueErr(err) {
@@ -596,7 +596,10 @@ func AddModels(db *sql.DB, backendID int64, upstreamIDs []string) ([]Model, []st
 	var ids []int64
 	skipped := []string{}
 	for _, mid := range upstreamIDs {
-		res, err := tx.Exec(`INSERT INTO models(backend_id, upstream_model, name) VALUES(?,?,?)`,
+		// busy_threshold_pct=80 explicitly: the column default is 0
+		// (SQLite cannot ALTER defaults), and synced models must show the
+		// real default like everything else.
+		res, err := tx.Exec(`INSERT INTO models(backend_id, upstream_model, name, busy_threshold_pct) VALUES(?,?,?,80)`,
 			backendID, mid, mid)
 		if err != nil {
 			if isUniqueErr(err) {

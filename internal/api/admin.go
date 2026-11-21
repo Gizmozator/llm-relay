@@ -410,8 +410,10 @@ func (s *Server) AdminUpdateModel(w http.ResponseWriter, r *http.Request, c *aut
 			return
 		}
 	}
-	if in.BusyThresholdPct != nil && (*in.BusyThresholdPct < 0 || *in.BusyThresholdPct > 100) {
-		writeErr(w, http.StatusBadRequest, "busy_threshold_pct must be 0-100 (0 = default 80)")
+	// Over 100 is meaningful: utilization stacks with parallel streams,
+	// so e.g. 300 means "busy from 3 concurrent generations".
+	if in.BusyThresholdPct != nil && (*in.BusyThresholdPct < 0 || *in.BusyThresholdPct > 10000) {
+		writeErr(w, http.StatusBadRequest, "busy_threshold_pct must be 0-10000 (0 = default 80)")
 		return
 	}
 	if in.BenchTokPerS != nil && *in.BenchTokPerS < 0 {

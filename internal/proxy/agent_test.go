@@ -157,6 +157,19 @@ func TestUtilizationBusyThreshold(t *testing.T) {
 	if m.UtilizationPct < 30 || m.Status != "busy" {
 		t.Errorf("threshold 30: pct=%.1f status=%s, want >=30 busy", m.UtilizationPct, m.Status)
 	}
+
+	// Over 100 is legal (utilization stacks with parallel streams): 300
+	// means "busy from 3 concurrent generations", so one stream is free.
+	threeHundred := int64(300)
+	if err := store.UpdateModelMeta(h.db, 1, nil, nil, &threeHundred, nil); err != nil {
+		t.Fatal(err)
+	}
+	resp = agentGet(t, h.server.URL+"/v1/utilization", h.key)
+	json.NewDecoder(resp.Body).Decode(&r)
+	resp.Body.Close()
+	if m := r.Models[0]; m.Status != "free" {
+		t.Errorf("threshold 300: pct=%.1f status=%s, want free", m.UtilizationPct, m.Status)
+	}
 }
 
 func TestUtilizationInFlightBusy(t *testing.T) {
