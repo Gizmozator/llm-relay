@@ -128,6 +128,28 @@ func TestUtilizationConcurrencyBusy(t *testing.T) {
 	}
 }
 
+func TestUtilizationInFlightBusy(t *testing.T) {
+	h := newHarness(t, agentUpstream())
+	// A stream running for 2 minutes with no usage row yet (rows are
+	// written at completion) must already count as busy: busy = 120 s
+	// over an elapsed window of 4–5 min → 40–50 %. Before the in-flight
+	// overlay this read 0 % ("free") until the request finished.
+	h.ph.Flight.EnterAt(1, "pub-model", time.Now().Add(-2*time.Minute))
+	defer h.ph.Flight.Leave(1, "pub-model")
+
+	resp := agentGet(t, h.server.URL+"/v1/utilization", h.key)
+	var r utilResp
+	json.NewDecoder(resp.Body).Decode(&r)
+	resp.Body.Close()
+	m := r.Models[0]
+	if m.UtilizationPct < 39.0 || m.UtilizationPct > 51.0 {
+		t.Errorf("in-flight pct = %.1f, want 40–50", m.UtilizationPct)
+	}
+	if m.Active != 1 {
+		t.Errorf("active = %d, want 1", m.Active)
+	}
+}
+
 // mcpCall posts one JSON-RPC request and returns status + decoded response.
 func mcpCall(t *testing.T, h *harness, body, key string) (int, map[string]any) {
 	t.Helper()

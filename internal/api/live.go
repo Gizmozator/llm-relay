@@ -17,10 +17,13 @@ import (
 	"llm-relay/internal/store"
 )
 
-// FlightSource exposes the proxy's in-flight counts (proxy.InFlight).
+// FlightSource exposes the proxy's in-flight tracking (proxy.InFlight).
 // Snapshot(0) returns all users' counts; a non-zero userID scopes to one.
+// BusySince returns start times of streams still running, used to credit
+// in-flight busy time before the usage row exists.
 type FlightSource interface {
 	Snapshot(userID int64) map[string]int
+	BusySince(userID int64) map[string][]time.Time
 }
 
 // healthStatus returns the lazily created shared health cache (the probe
@@ -125,11 +128,28 @@ func (s *Server) Live(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Model < rows[j].Model })
 
 	// Utilization: busy ms per minute as % of the minute (parallel streams
-	// stack, so >100 % means multiple concurrent generations). The model's
-	// concurrency_limit lets the frontend scale the axis to the slots.
+	// stack, so >100 % means multiple concurrent generations). Streams
+	// still running are folded in from their start time — their usage row
+	// only exists at completion, and without this a long request would
+	// show as a dip while running and a retroactive peak after. The
+	// model's concurrency_limit lets the frontend scale the axis to the
+	// slots.
 	limits := map[string]int64{}
 	for _, m := range models {
 		limits[m.Name] = m.ConcurrencyLimit
+	}
+	windowStart := now.UTC().Truncate(time.Minute).Add(time.Duration(-minutes+1) * time.Minute)
+	series := map[string][]int64{}
+	for _, mb := range busy {
+		series[mb.Model] = mb.Values
+	}
+	for model, since := range s.activeSince(f.UserID) {
+		vals, ok := series[model]
+		if !ok {
+			vals = make([]int64, minutes)
+			series[model] = vals
+		}
+		proxy.FoldBusyWindows(vals, windowStart, since, now)
 	}
 	type utilRow struct {
 		Model            string    `json:"model"`
@@ -137,13 +157,14 @@ func (s *Server) Live(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
 		ConcurrencyLimit int64     `json:"concurrency_limit"`
 	}
 	util := []utilRow{}
-	for _, mb := range busy {
-		vals := make([]float64, len(mb.Values))
-		for i, ms := range mb.Values {
-			vals[i] = math.Round(float64(ms)/60) / 10 // ms → % of 60 s, 1 decimal
+	for model, vals := range series {
+		pct := make([]float64, len(vals))
+		for i, ms := range vals {
+			pct[i] = math.Round(float64(ms)/60) / 10 // ms → % of 60 s, 1 decimal
 		}
-		util = append(util, utilRow{Model: mb.Model, Values: vals, ConcurrencyLimit: limits[mb.Model]})
+		util = append(util, utilRow{Model: model, Values: pct, ConcurrencyLimit: limits[model]})
 	}
+	sort.Slice(util, func(i, j int) bool { return util[i].Model < util[j].Model })
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"buckets": buckets,
@@ -158,4 +179,13 @@ func (s *Server) activeByModel(userID int64) map[string]int {
 		return map[string]int{}
 	}
 	return s.Flight.Snapshot(userID)
+}
+
+// activeSince mirrors activeByModel for stream start times (in-flight busy
+// credit before the usage row exists).
+func (s *Server) activeSince(userID int64) map[string][]time.Time {
+	if s.Flight == nil {
+		return map[string][]time.Time{}
+	}
+	return s.Flight.BusySince(userID)
 }

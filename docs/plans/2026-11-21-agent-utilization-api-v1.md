@@ -101,6 +101,12 @@ small JSON endpoint with its existing `sk-` key and gets per-model
 
 ## Changelog
 
+- 2026-11-21 — in-flight busy credit: the utilization graph and
+  `utilization_pct` now fold streams still running (tracker keeps per-stream
+  start times; `FoldBusyWindows` adds [start, now] to the minute buckets).
+  Fixes the dip-while-running / retroactive-peak-at-completion pattern of
+  long requests (usage rows only exist at completion) and stops a
+  long-request model reading `free` until the request lands.
 - 2026-11-21 — OCR scan triage & hardening (16+3 findings, 13 fixed):
   live `user_id` drill-down now requires the admin **role**, not just the
   `/api/admin/` path prefix (matches `usageScope`); utilization % now

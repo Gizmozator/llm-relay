@@ -62,13 +62,28 @@ func (h *Handler) Utilization(ctx context.Context) (map[string]any, error) {
 	}
 	start := now.UTC().Truncate(time.Minute).Add(-time.Duration(utilWindowMinutes-1) * time.Minute)
 	elapsedMS := math.Max(float64(now.Sub(start).Milliseconds()), 1)
-	busyPct := map[string]float64{}
+	// Credit streams still running: their usage row only exists once they
+	// complete, so without this a long request reads as idle until the
+	// moment it finishes (dip-then-retroactive-peak in the graph).
+	series := map[string][]int64{}
 	for _, mb := range busy {
+		series[mb.Model] = mb.Values
+	}
+	for model, since := range h.Flight.BusySince(0) {
+		vals, ok := series[model]
+		if !ok {
+			vals = make([]int64, utilWindowMinutes)
+			series[model] = vals
+		}
+		FoldBusyWindows(vals, start, since, now)
+	}
+	busyPct := map[string]float64{}
+	for model, vals := range series {
 		var total int64
-		for _, ms := range mb.Values {
+		for _, ms := range vals {
 			total += ms
 		}
-		busyPct[mb.Model] = float64(total) / elapsedMS * 100
+		busyPct[model] = float64(total) / elapsedMS * 100
 	}
 
 	status := h.Health.Status(ctx, backends)

@@ -51,7 +51,7 @@ Response:
 | `online` | the backend answers its health endpoint |
 | `active` | streams currently generating on this model (server-wide) |
 | `concurrency_limit` | engine slots for this model (0 = unset) |
-| `utilization_pct` | mean busy % of the last 5 minutes; >100 = parallel streams |
+| `utilization_pct` | mean busy % of the last 5 minutes, including streams still running; >100 = parallel streams |
 | `status` | derived verdict: `free`, `busy` or `offline` |
 
 `status` rules: `offline` = backend unreachable; `busy` = `active` reached

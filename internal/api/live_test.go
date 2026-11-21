@@ -20,7 +20,10 @@ import (
 
 // fakeFlight serves per-user in-flight counts like proxy.InFlight.Snapshot:
 // userID 0 aggregates all users, anything else filters to that caller.
-type fakeFlight struct{ byUser map[int64]map[string]int }
+type fakeFlight struct {
+	byUser map[int64]map[string]int
+	since  map[int64]map[string][]time.Time
+}
 
 func (f fakeFlight) Snapshot(userID int64) map[string]int {
 	out := map[string]int{}
@@ -30,6 +33,19 @@ func (f fakeFlight) Snapshot(userID int64) map[string]int {
 		}
 		for m, n := range counts {
 			out[m] += n
+		}
+	}
+	return out
+}
+
+func (f fakeFlight) BusySince(userID int64) map[string][]time.Time {
+	out := map[string][]time.Time{}
+	for uid, perModel := range f.since {
+		if userID != 0 && uid != userID {
+			continue
+		}
+		for m, ts := range perModel {
+			out[m] = append(out[m], ts...)
 		}
 	}
 	return out
@@ -300,6 +316,44 @@ func TestLiveUtilization(t *testing.T) {
 	}
 	if diff := total - 150.0; diff > 0.5 || diff < -0.5 {
 		t.Errorf("total busy = %.1f%%, want ~150%%", total)
+	}
+}
+
+// A stream running for 90 s with no usage row yet (rows are written at
+// completion) must already count as busy — that is the dip-then-peak fix:
+// total busy = 90 s = 150 % of a minute across the buckets it covers, and
+// the bucket before the current one is always fully covered (≥30 s).
+func TestLiveUtilizationInFlight(t *testing.T) {
+	fl := fakeFlight{
+		byUser: map[int64]map[string]int{1: {"test-model": 1}},
+		since:  map[int64]map[string][]time.Time{},
+	}
+	e := newLiveEnv(t, fl)
+	tok := liveLogin(t, e, "friend", "userpass1")
+	// Pin the start right before the request: the server folds busy time
+	// up to ITS now, so any setup time (bcrypt, HTTP) would inflate it.
+	fl.since[1] = map[string][]time.Time{"test-model": {time.Now().Add(-90 * time.Second)}}
+	resp := liveGet(t, e, "/api/live", tok)
+	var r liveResp
+	json.NewDecoder(resp.Body).Decode(&r)
+	resp.Body.Close()
+
+	if len(r.Util) != 1 {
+		t.Fatalf("util = %+v, want one model (in-flight only, no usage rows)", r.Util)
+	}
+	u := r.Util[0]
+	if len(u.Values) != 60 {
+		t.Fatalf("util values = %d, want 60", len(u.Values))
+	}
+	var total float64
+	for _, v := range u.Values {
+		total += v
+	}
+	if diff := total - 150.0; diff > 0.5 || diff < -0.5 {
+		t.Errorf("total busy = %.1f%%, want ~150%% from the running stream", total)
+	}
+	if u.Values[58] < 49.9 {
+		t.Errorf("bucket -2 = %.1f%%, want ≥50%% (always ≥30 s covered)", u.Values[58])
 	}
 }
 
