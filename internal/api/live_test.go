@@ -115,9 +115,8 @@ func liveGet(t *testing.T, e *liveEnv, path, token string) *http.Response {
 }
 
 type liveResp struct {
-	Currency string             `json:"currency"`
-	Buckets  []store.LiveBucket `json:"buckets"`
-	Active   []struct {
+	Buckets []store.LiveBucket `json:"buckets"`
+	Active  []struct {
 		Model string `json:"model"`
 		Count int    `json:"count"`
 	} `json:"active"`
@@ -129,10 +128,9 @@ type liveResp struct {
 	} `json:"util"`
 }
 
-func (r liveResp) sum() (requests, cost int64) {
+func (r liveResp) sum() (requests int64) {
 	for _, b := range r.Buckets {
 		requests += b.Requests
-		cost += b.CostMicro
 	}
 	return
 }
@@ -158,7 +156,7 @@ func seedUsage(t *testing.T, d *sql.DB, userID int64, ts time.Time, prompt, comp
 	}
 }
 
-func TestLiveBucketsAndScoping(t *testing.T) {
+func TestLiveServerWideBuckets(t *testing.T) {
 	e := newLiveEnv(t, nil)
 	admID := userID(t, e.db, "admin")
 	friID := userID(t, e.db, "friend")
@@ -181,35 +179,45 @@ func TestLiveBucketsAndScoping(t *testing.T) {
 	if len(all.Buckets) != 60 {
 		t.Fatalf("buckets = %d, want 60", len(all.Buckets))
 	}
-	reqs, cost := all.sum()
-	if reqs != 2 || cost != 3000 {
-		t.Errorf("admin totals = %d reqs, %d cost; want 2, 3000", reqs, cost)
+	reqs := all.sum()
+	if reqs != 2 {
+		t.Errorf("admin totals = %d reqs, want 2", reqs)
 	}
 
-	// Personal route as admin: own rows only (endpoint property, not role).
+	// Personal routes are server-wide too: the live view answers "is the
+	// server free" for every user (owner decision), so both callers see
+	// all traffic.
 	resp = liveGet(t, e, "/api/live", admTok)
 	var own liveResp
 	json.NewDecoder(resp.Body).Decode(&own)
 	resp.Body.Close()
-	if reqs, cost := own.sum(); reqs != 1 || cost != 1000 {
-		t.Errorf("admin personal totals = %d reqs, %d cost; want 1, 1000", reqs, cost)
+	if reqs := own.sum(); reqs != 2 {
+		t.Errorf("admin personal totals = %d reqs, want 2", reqs)
 	}
 
-	// Personal route as user: only own rows.
+	// Personal route as user: also all users' rows.
 	resp = liveGet(t, e, "/api/live", friTok)
 	var fri liveResp
 	json.NewDecoder(resp.Body).Decode(&fri)
 	resp.Body.Close()
-	if reqs, cost := fri.sum(); reqs != 1 || cost != 2000 {
-		t.Errorf("friend totals = %d reqs, %d cost; want 1, 2000", reqs, cost)
+	if reqs := fri.sum(); reqs != 2 {
+		t.Errorf("friend totals = %d reqs, want 2", reqs)
+	}
+	// user_id is ignored on the personal route (admin-only drill-down).
+	resp = liveGet(t, e, fmt.Sprintf("/api/live?user_id=%d", admID), friTok)
+	var spoof liveResp
+	json.NewDecoder(resp.Body).Decode(&spoof)
+	resp.Body.Close()
+	if reqs := spoof.sum(); reqs != 2 {
+		t.Errorf("personal route with user_id = %d reqs, want 2 (filter ignored)", reqs)
 	}
 
-	// user_id filter on the admin route.
+	// user_id filter on the admin route narrows to one user.
 	resp = liveGet(t, e, fmt.Sprintf("/api/admin/live?user_id=%d", friID), admTok)
 	var filtered liveResp
 	json.NewDecoder(resp.Body).Decode(&filtered)
 	resp.Body.Close()
-	if reqs, _ := filtered.sum(); reqs != 1 {
+	if reqs := filtered.sum(); reqs != 1 {
 		t.Errorf("user_id filter: %d reqs, want 1", reqs)
 	}
 
@@ -295,7 +303,7 @@ func TestLiveUtilization(t *testing.T) {
 	}
 }
 
-func TestLiveActiveScopingAndModels(t *testing.T) {
+func TestLiveActiveServerWideAndModels(t *testing.T) {
 	flights := map[int64]map[string]int{}
 	e := newLiveEnv(t, fakeFlight{byUser: flights})
 	admID := userID(t, e.db, "admin")
@@ -306,32 +314,33 @@ func TestLiveActiveScopingAndModels(t *testing.T) {
 	admTok := liveLogin(t, e, "admin", "adminpass1")
 	friTok := liveLogin(t, e, "friend", "userpass1")
 
-	// Personal route as admin: own streams only, model row shows them too.
+	// Personal route: server-wide streams (a user must see that a model
+	// is saturated even when someone else is using it), model row too.
 	resp := liveGet(t, e, "/api/live", admTok)
 	var r liveResp
 	json.NewDecoder(resp.Body).Decode(&r)
 	resp.Body.Close()
-	if len(r.Active) != 1 || r.Active[0].Model != "test-model" || r.Active[0].Count != 2 {
-		t.Errorf("admin personal active = %+v, want [{test-model 2}]", r.Active)
+	if len(r.Active) != 1 || r.Active[0].Model != "test-model" || r.Active[0].Count != 7 {
+		t.Errorf("admin personal active = %+v, want [{test-model 7}]", r.Active)
 	}
 	if len(r.Models) != 1 {
 		t.Fatalf("models = %+v, want one entry", r.Models)
 	}
 	m := r.Models[0]
-	if m.Name != "test-model" || m.Backend != "eng" || !m.Online || m.Active != 2 {
-		t.Errorf("model = %+v, want test-model/eng online active=2", m)
+	if m.Name != "test-model" || m.Backend != "eng" || !m.Online || m.Active != 7 {
+		t.Errorf("model = %+v, want test-model/eng online active=7", m)
 	}
 
-	// Personal route as friend: only the friend's streams.
+	// Personal route as friend: same server-wide counts.
 	resp = liveGet(t, e, "/api/live", friTok)
 	var fri liveResp
 	json.NewDecoder(resp.Body).Decode(&fri)
 	resp.Body.Close()
-	if len(fri.Active) != 1 || fri.Active[0].Count != 5 {
-		t.Errorf("friend active = %+v, want [{test-model 5}]", fri.Active)
+	if len(fri.Active) != 1 || fri.Active[0].Count != 7 {
+		t.Errorf("friend active = %+v, want [{test-model 7}]", fri.Active)
 	}
 
-	// Admin route: all users combined; user_id filter narrows again.
+	// Admin route: same global view; user_id filter narrows active too.
 	resp = liveGet(t, e, "/api/admin/live", admTok)
 	var all liveResp
 	json.NewDecoder(resp.Body).Decode(&all)

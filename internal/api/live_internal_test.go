@@ -33,24 +33,24 @@ func TestHealthCacheStatus(t *testing.T) {
 	s := &Server{DB: d}
 	ctx := context.Background()
 
-	st := s.healthStatus().status(ctx, []store.Backend{*b})
-	if !st[b.ID].online {
+	st := s.healthStatus().Status(ctx, []store.Backend{*b})
+	if !st[b.ID].Online {
 		t.Fatalf("backend should be online: %+v", st[b.ID])
 	}
 
 	// Backend dies, but the cached result stands until the TTL expires.
 	up.Close()
-	st = s.healthStatus().status(ctx, []store.Backend{*b})
-	if !st[b.ID].online {
+	st = s.healthStatus().Status(ctx, []store.Backend{*b})
+	if !st[b.ID].Online {
 		t.Fatal("cached result should still say online")
 	}
 
 	// TTL expiry forces a re-probe, which now fails.
-	old := healthTTL
-	healthTTL = 0
-	defer func() { healthTTL = old }()
-	st = s.healthStatus().status(ctx, []store.Backend{*b})
-	if st[b.ID].online {
+	old := proxy.HealthTTL
+	proxy.HealthTTL = 0
+	defer func() { proxy.HealthTTL = old }()
+	st = s.healthStatus().Status(ctx, []store.Backend{*b})
+	if st[b.ID].Online {
 		t.Fatal("stale entry should have been re-probed to offline")
 	}
 
@@ -60,8 +60,8 @@ func TestHealthCacheStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	b.Enabled = false
-	st = s.healthStatus().status(ctx, []store.Backend{*b})
-	if st[b.ID].online || st[b.ID].err != "backend disabled" {
+	st = s.healthStatus().Status(ctx, []store.Backend{*b})
+	if st[b.ID].Online || st[b.ID].Err != "backend disabled" {
 		t.Fatalf("disabled backend: %+v", st[b.ID])
 	}
 }
@@ -91,8 +91,8 @@ func TestHealthProbeSurvivesViewerCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	s := &Server{DB: d}
-	st := s.healthStatus().status(ctx, []store.Backend{*b})
-	if !st[b.ID].online {
+	st := s.healthStatus().Status(ctx, []store.Backend{*b})
+	if !st[b.ID].Online {
 		t.Fatalf("probe must not inherit the viewer's canceled context: %+v", st[b.ID])
 	}
 }

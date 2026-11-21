@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"llm-relay/internal/auth"
+	"llm-relay/internal/proxy"
 	"llm-relay/internal/store"
 )
 
@@ -27,7 +28,7 @@ type Server struct {
 
 	loginLimit *loginLimiter
 	limitOnce  sync.Once
-	health     *healthCache
+	health     *proxy.HealthCache
 	healthOnce sync.Once
 }
 

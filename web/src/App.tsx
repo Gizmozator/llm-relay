@@ -6,6 +6,7 @@ import LoginPage from './pages/Login';
 import DashboardPage from './pages/Dashboard';
 import UsagePage from './pages/Usage';
 import KeysPage from './pages/Keys';
+import AgentGuidePage from './pages/AgentGuide';
 import BackendsPage from './pages/Backends';
 import ModelsPage from './pages/Models';
 import AdminModelsPage from './pages/AdminModels';
@@ -28,6 +29,7 @@ export default function App() {
             <Route index element={<DashboardPage />} />
             <Route path="usage" element={<UsagePage admin={false} />} />
             <Route path="keys" element={<KeysPage />} />
+            <Route path="agents" element={<AgentGuidePage />} />
             <Route path="models" element={<ModelsPage />} />
             <Route
               path="admin/backends"

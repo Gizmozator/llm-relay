@@ -169,7 +169,6 @@ export interface LiveBucket {
   completion_tokens: number;
   cached_tokens: number;
   cache_write_tokens: number;
-  cost_micro: number;
 }
 
 export interface LiveModel {
@@ -188,7 +187,6 @@ export interface LiveUtil {
 }
 
 export interface LiveResponse {
-  currency: string;
   buckets: LiveBucket[];
   active: { model: string; count: number }[];
   models: LiveModel[];

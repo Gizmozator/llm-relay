@@ -50,6 +50,7 @@ func main() {
 		RelayURL: cfg.PublicRelayURL, DashboardURL: cfg.PublicDashboardURL}
 	ph := proxy.New(d, rec, cfg.TrustProxyHeaders)
 	apiSrv.Flight = ph.Flight
+	ph.RelayURL = cfg.PublicRelayURL
 
 	healthz := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -66,6 +67,9 @@ func main() {
 	relayMux.HandleFunc("POST /v1/messages", ph.Messages)
 	relayMux.HandleFunc("POST /v1/embeddings", ph.Embeddings)
 	relayMux.HandleFunc("GET /v1/models", ph.Models)
+	relayMux.HandleFunc("GET /v1/agent-guide", ph.AgentGuide)
+	relayMux.HandleFunc("GET /v1/utilization", ph.UtilizationREST)
+	relayMux.HandleFunc("POST /mcp", ph.MCP)
 
 	// Dashboard port: JWT API + embedded SPA. This is the port to put
 	// behind the reverse proxy.

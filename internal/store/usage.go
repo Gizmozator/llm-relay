@@ -181,7 +181,9 @@ func SummarizeUsage(db *sql.DB, f *UsageFilter, groupBy string) (UsageGroup, []U
 	return totals, groups, rows.Err()
 }
 
-// LiveBucket is one minute of the live dashboard window.
+// LiveBucket is one minute of the live dashboard window. Cost is
+// deliberately absent: the dashboard answers "is the server busy", not
+// "who spent what" (owner decision — per-user cost lives on the Usage page).
 type LiveBucket struct {
 	Minute     string `json:"minute"`
 	Requests   int64  `json:"requests"`
@@ -189,7 +191,6 @@ type LiveBucket struct {
 	Completion int64  `json:"completion_tokens"`
 	Cached     int64  `json:"cached_tokens"`
 	CacheWrite int64  `json:"cache_write_tokens"`
-	CostMicro  int64  `json:"cost_micro"`
 }
 
 // LiveBuckets aggregates the last `minutes` minutes into one bucket per
@@ -203,8 +204,7 @@ func LiveBuckets(db *sql.DB, f *UsageFilter, now time.Time, minutes int) ([]Live
 
 	rows, err := db.Query(`SELECT substr(u.ts,1,16) AS minute, COUNT(*),
 			COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0),
-			COALESCE(SUM(cached_tokens),0), COALESCE(SUM(cache_write_tokens),0),
-			COALESCE(SUM(cost_total),0)
+			COALESCE(SUM(cached_tokens),0), COALESCE(SUM(cache_write_tokens),0)
 		FROM usage_log u`+where+` GROUP BY minute ORDER BY minute`, args...)
 	if err != nil {
 		return nil, err
@@ -214,7 +214,7 @@ func LiveBuckets(db *sql.DB, f *UsageFilter, now time.Time, minutes int) ([]Live
 	for rows.Next() {
 		var b LiveBucket
 		if err := rows.Scan(&b.Minute, &b.Requests, &b.Prompt, &b.Completion,
-			&b.Cached, &b.CacheWrite, &b.CostMicro); err != nil {
+			&b.Cached, &b.CacheWrite); err != nil {
 			return nil, err
 		}
 		byMinute[b.Minute] = b

@@ -36,6 +36,12 @@ type Handler struct {
 	TrustProxyHeaders bool
 	Client            *http.Client
 	Flight            *InFlight
+	// Health caches backend reachability for the agent endpoints; the
+	// dashboard API keeps its own instance (same rules, same TTL).
+	Health *HealthCache
+	// RelayURL is the public relay base URL (PUBLIC_RELAY_URL), used to
+	// render the agent guide. Empty renders the placeholder as-is.
+	RelayURL string
 }
 
 func New(db *sql.DB, rec *usage.Recorder, trustProxyHeaders bool) *Handler {
@@ -44,6 +50,7 @@ func New(db *sql.DB, rec *usage.Recorder, trustProxyHeaders bool) *Handler {
 		Rec:               rec,
 		TrustProxyHeaders: trustProxyHeaders,
 		Flight:            NewInFlight(),
+		Health:            NewHealthCache(),
 		// No overall client timeout: generations may run for many minutes
 		// (OCR sends 10+ min non-streaming requests). Bounded at the
 		// transport level instead: dial and TLS handshake only.
@@ -68,6 +75,9 @@ func (h *Handler) Mux() http.Handler {
 	mux.HandleFunc("POST /v1/messages", h.Messages)
 	mux.HandleFunc("POST /v1/embeddings", h.Embeddings)
 	mux.HandleFunc("GET /v1/models", h.Models)
+	mux.HandleFunc("GET /v1/agent-guide", h.AgentGuide)
+	mux.HandleFunc("GET /v1/utilization", h.UtilizationREST)
+	mux.HandleFunc("POST /mcp", h.MCP)
 	return mux
 }
 

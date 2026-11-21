@@ -2,19 +2,18 @@ import { useEffect, useMemo, useState } from 'react';
 import { api, errMsg } from '../api';
 import type { LiveResponse } from '../api';
 import { useAuth } from '../auth';
-import { fmtInt, fmtMoney } from '../format';
+import { fmtInt } from '../format';
 import { Banner, Empty, Loading } from '../components/ui';
 import LineChart from '../components/LineChart';
 
 const POLL_MS = 5000;
 const WINDOW_MIN = 60;
 
-type Metric = 'requests' | 'tokens' | 'cost';
+type Metric = 'requests' | 'tokens';
 
 const METRIC_OPTIONS: { value: Metric; label: string }[] = [
   { value: 'requests', label: 'Requests / min' },
   { value: 'tokens', label: 'Tokens / min' },
-  { value: 'cost', label: 'Cost / min' },
 ];
 
 /**
@@ -58,7 +57,6 @@ export default function DashboardPage() {
     };
   }, [admin]);
 
-  const currency = data?.currency ?? '';
   const buckets = data?.buckets ?? [];
 
   const activeTotal = useMemo(
@@ -67,25 +65,17 @@ export default function DashboardPage() {
   );
   const onlineCount = (data?.models ?? []).filter((m) => m.online).length;
   const hourRequests = buckets.reduce((s, b) => s + b.requests, 0);
-  const hourCost = buckets.reduce((s, b) => s + b.cost_micro, 0);
 
   const chart = useMemo(() => {
     return {
       labels: buckets.map((b) => b.minute.slice(11, 16)),
       values: buckets.map((b) =>
-        metric === 'requests'
-          ? b.requests
-          : metric === 'tokens'
-            ? b.prompt_tokens + b.completion_tokens
-            : b.cost_micro / 1e6,
+        metric === 'requests' ? b.requests : b.prompt_tokens + b.completion_tokens,
       ),
     };
   }, [buckets, metric]);
 
-  const fmtValue =
-    metric === 'cost'
-      ? (v: number) => fmtMoney(v * 1e6, currency)
-      : (v: number) => fmtInt(v);
+  const fmtValue = (v: number) => fmtInt(v);
 
   // Utilization graph: one line per model with traffic in the window. The
   // axis tops out at the widest concurrency_limit × 100 % (4 slots → 400 %),
@@ -125,7 +115,6 @@ export default function DashboardPage() {
           value={`${fmtInt(onlineCount)} / ${fmtInt(data?.models.length ?? 0)}`}
         />
         <Card label="Requests (hour)" value={fmtInt(hourRequests)} />
-        <Card label={`Cost (hour)${currency ? ` (${currency})` : ''}`} value={fmtMoney(hourCost, currency)} accent />
       </div>
 
       <section className="panel">

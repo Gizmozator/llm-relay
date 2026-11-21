@@ -55,15 +55,15 @@ func TestLiveBucketsFixedClock(t *testing.T) {
 		}
 	}
 	first := buckets[0]
-	if first.Requests != 2 || first.Prompt != 11 || first.Completion != 6 || first.CostMicro != 110 {
-		t.Errorf("first bucket = %+v, want 2 reqs / 11 prompt / 6 completion / 110 cost", first)
+	if first.Requests != 2 || first.Prompt != 11 || first.Completion != 6 {
+		t.Errorf("first bucket = %+v, want 2 reqs / 11 prompt / 6 completion", first)
 	}
 	last := buckets[4]
-	if last.Requests != 1 || last.CostMicro != 50 {
-		t.Errorf("last bucket = %+v, want 1 req / 50 cost", last)
+	if last.Requests != 1 {
+		t.Errorf("last bucket = %+v, want 1 req", last)
 	}
 	for _, b := range buckets[1:4] {
-		if b.Requests != 0 || b.CostMicro != 0 {
+		if b.Requests != 0 {
 			t.Errorf("middle bucket should be zero-filled: %+v", b)
 		}
 	}

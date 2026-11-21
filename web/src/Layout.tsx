@@ -47,6 +47,9 @@ export default function Layout() {
           <NavLink to="/keys" className={navClass}>
             My keys
           </NavLink>
+          <NavLink to="/agents" className={navClass}>
+            Agent API
+          </NavLink>
           <NavLink to="/models" className={navClass}>
             Models
           </NavLink>

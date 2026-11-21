@@ -13,11 +13,19 @@ priced. Admins manage backends, the model catalog and prices; users see their ow
 
 ## Dashboard
 
-After login every user lands on the **Dashboard**: a live view of the last hour —
-a per-minute traffic graph (requests / tokens / cost), how many streams are
+After login every user lands on the **Dashboard**: a live server-wide view of
+the last hour — a per-minute traffic graph (requests / tokens), a per-model
+**utilization graph** (busy time per minute; the axis scales to the model's
+concurrency limit, so 4 parallel slots read as 0–400 %), how many streams are
 decoding right now per model, and which catalog models are online (backend
-health is re-probed at most once a minute). The **Usage** page keeps the
-date-range analysis.
+health is re-probed at most once a minute). Cost stays off this view — it is
+per-user and lives on the **Usage** pages.
+
+The **Agent API** page explains how to point an AI agent at the relay: hand
+your agent the public guide link (`{relay}/v1/agent-guide`), or wire the MCP
+endpoint (`{relay}/mcp`, one `check_utilization` tool) so it can check
+whether a model is `free` / `busy` / `offline` before taking delegated work.
+Agents authenticate with the same `sk-` keys from **My keys**.
 
 ![llm-relay usage dashboard — per-key token metering and cost breakdown](docs/screenshots/usage.png)
 

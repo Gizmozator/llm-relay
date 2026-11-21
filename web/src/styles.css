@@ -442,6 +442,29 @@ td.money {
   font-size: 12.5px;
 }
 
+/* Copyable code snippet block (agent guide page). */
+.code-block {
+  position: relative;
+  margin: 8px 0;
+}
+
+.code-block pre {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.code-block .btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+}
+
 .nowrap {
   white-space: nowrap;
 }
@@ -494,6 +517,12 @@ td.money {
   color: var(--red);
   border-color: rgba(244, 63, 94, 0.45);
   background: rgba(244, 63, 94, 0.1);
+}
+
+.badge.warn {
+  color: var(--amber);
+  border-color: rgba(245, 158, 11, 0.45);
+  background: rgba(245, 158, 11, 0.1);
 }
 
 .badge.new {
