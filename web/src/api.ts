@@ -98,6 +98,7 @@ export interface Backend {
   base_url: string;
   has_key: boolean;
   enabled: boolean;
+  draining: boolean;
   last_probe_at: string | null;
   last_probe_error: string | null;
   server_version: string | null;
@@ -175,6 +176,7 @@ export interface LiveModel {
   name: string;
   backend: string;
   online: boolean;
+  draining: boolean;
   active: number;
 }
 
@@ -389,7 +391,7 @@ export const api = {
     }),
   patchBackend: (
     id: number,
-    patch: { name?: string; base_url?: string; api_key?: string; enabled?: boolean },
+    patch: { name?: string; base_url?: string; api_key?: string; enabled?: boolean; draining?: boolean },
   ) => request<Backend>('PATCH', `/api/admin/backends/${id}`, { body: patch }),
   deleteBackend: (id: number) => request<void>('DELETE', `/api/admin/backends/${id}`),
   probeBackend: (id: number) => request<ProbeResult>('POST', `/api/admin/backends/${id}/probe`),

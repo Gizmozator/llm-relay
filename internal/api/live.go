@@ -35,10 +35,11 @@ func (s *Server) healthStatus() *proxy.HealthCache {
 
 // LiveModel is one catalog model with its live status.
 type LiveModel struct {
-	Name    string `json:"name"`
-	Backend string `json:"backend"`
-	Online  bool   `json:"online"`
-	Active  int    `json:"active"`
+	Name     string `json:"name"`
+	Backend  string `json:"backend"`
+	Online   bool   `json:"online"`
+	Draining bool   `json:"draining"`
+	Active   int    `json:"active"`
 }
 
 // Live serves /api/live and /api/admin/live.
@@ -105,11 +106,16 @@ func (s *Server) Live(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
 	active := s.activeByModel(f.UserID)
 
 	liveModels := []LiveModel{}
+	draining := map[int64]bool{}
+	for _, b := range backends {
+		draining[b.ID] = b.Draining
+	}
 	for _, m := range models {
 		if !m.Enabled {
 			continue
 		}
-		lm := LiveModel{Name: m.Name, Backend: m.BackendName, Active: active[m.Name]}
+		lm := LiveModel{Name: m.Name, Backend: m.BackendName, Active: active[m.Name],
+			Draining: draining[m.BackendID]}
 		if e, ok := status[m.BackendID]; ok {
 			lm.Online = e.Online
 		}

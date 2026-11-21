@@ -16,7 +16,7 @@ export default function BackendsPage() {
   const [editTarget, setEditTarget] = useState<Backend | null>(null);
   const [syncTarget, setSyncTarget] = useState<Backend | null>(null);
 
-  const patch = async (id: number, p: { enabled?: boolean }) => {
+  const patch = async (id: number, p: { enabled?: boolean; draining?: boolean }) => {
     try {
       await api.patchBackend(id, p);
       backends.reload();
@@ -64,6 +64,7 @@ export default function BackendsPage() {
                     <th>Name</th>
                     <th>Base URL</th>
                     <th>Enabled</th>
+                    <th>Draining</th>
                     <th>Status</th>
                     <th>Server version</th>
                     <th>Last probe</th>
@@ -78,6 +79,11 @@ export default function BackendsPage() {
                       <td className="mono">{b.base_url}</td>
                       <td>
                         <Toggle checked={b.enabled} onChange={(v) => patch(b.id, { enabled: v })} />
+                      </td>
+                      <td>
+                        <span title="Drain: refuse new sessions, let running conversations finish (graceful shutdown)">
+                          <Toggle checked={b.draining} onChange={(v) => patch(b.id, { draining: v })} />
+                        </span>
                       </td>
                       <td>
                         {b.last_probe_error ? (

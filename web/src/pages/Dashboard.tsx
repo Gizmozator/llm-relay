@@ -196,6 +196,11 @@ export default function DashboardPage() {
                       ) : (
                         <span className="badge err">offline</span>
                       )}
+                      {m.online && m.draining && (
+                        <span className="badge warn" title="No new sessions; running conversations finish">
+                          draining
+                        </span>
+                      )}
                     </td>
                     <td className="num">{fmtInt(m.active)}</td>
                   </tr>

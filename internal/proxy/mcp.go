@@ -102,9 +102,10 @@ func (h *Handler) MCP(w http.ResponseWriter, r *http.Request) {
 				"name": "check_utilization",
 				"description": "Check whether models on this LLM relay are free " +
 					"before delegating a task. Returns per model: online, " +
-					"active streams, concurrency_limit, utilization_pct (mean " +
-					"busy % over the last 5 minutes, including streams still " +
-					"running) and a derived status: free, busy or offline.",
+					"draining, active streams, concurrency_limit, utilization_pct " +
+					"(mean busy % over the last 5 minutes, including streams still " +
+					"running) and a derived status: free, busy, draining or " +
+					"offline.",
 				"inputSchema": map[string]any{
 					"type": "object",
 					"properties": map[string]any{

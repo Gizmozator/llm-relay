@@ -49,14 +49,17 @@ Response:
 | field | meaning |
 |---|---|
 | `online` | the backend answers its health endpoint |
+| `draining` | admin is shutting this backend down: existing sessions may finish, new ones are refused |
 | `active` | streams currently generating on this model (server-wide) |
 | `concurrency_limit` | engine slots for this model (0 = unset) |
 | `utilization_pct` | mean busy % of the last 5 minutes, including streams still running; >100 = parallel streams |
-| `status` | derived verdict: `free`, `busy` or `offline` |
+| `status` | derived verdict: `free`, `busy`, `draining` or `offline` |
 
-`status` rules: `offline` = backend unreachable; `busy` = `active` reached
-`concurrency_limit` (when set) **or** `utilization_pct >= 80`; otherwise
-`free`.
+`status` rules: `offline` = backend unreachable; `draining` = backend is
+being taken down for maintenance — a request starting a **new** session gets
+`503` (`Retry-After: 60`), while sessions active within the last 15 minutes
+keep working; `busy` = `active` reached `concurrency_limit` (when set) **or**
+`utilization_pct >= 80`; otherwise `free`.
 
 ### MCP (preferred for MCP-capable agents)
 
@@ -83,6 +86,9 @@ optional `model` argument filters to one model name).
 - `status == "free"` → go ahead, delegate here.
 - `status == "busy"` → wait and re-check (e.g. every 30–60 s), or pick
   another model / server.
+- `status == "draining"` → do not start new sessions here (they get `503`);
+  if you are continuing an existing conversation on it, you may finish.
+  Pick another model/server for anything new.
 - `status == "offline"` → skip this server entirely.
 
 The check is advisory: there is no reservation, so another client can take

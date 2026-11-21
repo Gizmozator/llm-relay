@@ -3,6 +3,7 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -385,4 +386,23 @@ func UsageDetail(db *sql.DB, f *UsageFilter, page, pageSize int) (int64, []Usage
 		out = append(out, r)
 	}
 	return total, out, rows.Err()
+}
+
+// SessionRecent reports whether a row for the session completed after
+// since. Drain mode consults it as the fallback when the in-memory session
+// tracker starts empty after a relay restart.
+func SessionRecent(db *sql.DB, session string, since time.Time) (bool, error) {
+	if session == "" {
+		return false, nil
+	}
+	var one int
+	err := db.QueryRow(`SELECT 1 FROM usage_log WHERE session_id=? AND ts>? LIMIT 1`,
+		session, since.UTC().Format(time.RFC3339)).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }

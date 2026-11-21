@@ -208,10 +208,11 @@ func (s *Server) AdminUpdateBackend(w http.ResponseWriter, r *http.Request, c *a
 		return
 	}
 	var in struct {
-		Name    *string `json:"name"`
-		BaseURL *string `json:"base_url"`
-		APIKey  *string `json:"api_key"`
-		Enabled *bool   `json:"enabled"`
+		Name     *string `json:"name"`
+		BaseURL  *string `json:"base_url"`
+		APIKey   *string `json:"api_key"`
+		Enabled  *bool   `json:"enabled"`
+		Draining *bool   `json:"draining"`
 	}
 	if err := decode(r, &in); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON")
@@ -229,7 +230,7 @@ func (s *Server) AdminUpdateBackend(w http.ResponseWriter, r *http.Request, c *a
 		}
 		in.Name = &trimmed
 	}
-	b, err := store.UpdateBackend(s.DB, id, in.Name, in.BaseURL, in.APIKey, in.Enabled)
+	b, err := store.UpdateBackend(s.DB, id, in.Name, in.BaseURL, in.APIKey, in.Enabled, in.Draining)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		writeErr(w, http.StatusNotFound, "backend not found")

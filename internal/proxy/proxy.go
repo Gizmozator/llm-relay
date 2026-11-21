@@ -36,6 +36,9 @@ type Handler struct {
 	TrustProxyHeaders bool
 	Client            *http.Client
 	Flight            *InFlight
+	// Sessions tracks recent session activity for drain mode (which
+	// sessions count as "currently running").
+	Sessions *SessionTracker
 	// Health caches backend reachability for the agent endpoints; the
 	// dashboard API keeps its own instance (same rules, same TTL).
 	Health *HealthCache
@@ -54,6 +57,7 @@ func New(db *sql.DB, rec *usage.Recorder, trustProxyHeaders bool) *Handler {
 		Rec:               rec,
 		TrustProxyHeaders: trustProxyHeaders,
 		Flight:            NewInFlight(),
+		Sessions:          NewSessionTracker(),
 		Health:            NewHealthCache(),
 		// No overall client timeout: generations may run for many minutes
 		// (OCR sends 10+ min non-streaming requests). Bounded at the
@@ -170,6 +174,26 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request, endpoint string
 	if session == "" {
 		session = DeriveSession(endpoint, body, key.ID, model.Name)
 	}
+
+	// Drain gate: a draining backend refuses NEW sessions so the engine's
+	// server can be shut down gracefully, but sessions that are currently
+	// running (active within drainSessionWindow) may finish their
+	// conversation. Memory first; usage_log covers a relay restart while
+	// draining. An empty session id (not conversation-shaped) is a new
+	// session by definition.
+	if backend.Draining && !h.Sessions.Recent(session) {
+		old, dbErr := store.SessionRecent(h.DB, session, time.Now().Add(-drainSessionWindow))
+		if dbErr != nil {
+			log.Printf("relay: drain session lookup failed: %v", dbErr)
+		}
+		if !old {
+			w.Header().Set("Retry-After", "60")
+			writeError(w, http.StatusServiceUnavailable,
+				fmt.Sprintf("backend %q is draining: no new sessions; existing sessions may continue", backend.Name))
+			return
+		}
+	}
+	h.Sessions.Mark(session)
 
 	fwdBody := rewriteBody(body, model.UpstreamModel, endpoint, peek.Stream)
 	url := strings.TrimRight(backend.BaseURL, "/") + r.URL.Path

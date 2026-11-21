@@ -316,7 +316,7 @@ func TestPublicModelsCatalog(t *testing.T) {
 	if _, err := store.CreateModel(e.db, 2, "up-c", "Model C"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.UpdateBackend(e.db, 2, nil, nil, nil, ptrB(false)); err != nil {
+	if _, err := store.UpdateBackend(e.db, 2, nil, nil, nil, ptrB(false), nil); err != nil {
 		t.Fatal(err)
 	}
 

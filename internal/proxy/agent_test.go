@@ -91,7 +91,7 @@ func TestUtilizationREST(t *testing.T) {
 
 	// Disabled backend → offline (beats the busy verdict).
 	off := false
-	if _, err := store.UpdateBackend(h.db, 1, nil, nil, nil, &off); err != nil {
+	if _, err := store.UpdateBackend(h.db, 1, nil, nil, nil, &off, nil); err != nil {
 		t.Fatal(err)
 	}
 	resp = agentGet(t, h.server.URL+"/v1/utilization", h.key)

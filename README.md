@@ -31,6 +31,12 @@ Agents authenticate with the same `sk-` keys from **My keys**.
 
 ![llm-relay admin backends — upstream LLM servers, health probe and model sync](docs/screenshots/backends.png)
 
+Each backend has a **Draining** switch for graceful shutdown: flip it on
+before powering the engine's server off and the relay refuses *new* sessions
+on that backend (`503` + `Retry-After`), while conversations that are
+currently running (active within 15 min) finish their remaining turns.
+Agent endpoints report it as `status: "draining"`.
+
 ## Supported upstream dialects
 
 | Route | Dialect | Metered |

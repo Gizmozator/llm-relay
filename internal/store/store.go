@@ -272,6 +272,7 @@ type Backend struct {
 	BaseURL        string  `json:"base_url"`
 	HasKey         bool    `json:"has_key"`
 	Enabled        bool    `json:"enabled"`
+	Draining       bool    `json:"draining"`
 	LastProbeAt    *string `json:"last_probe_at"`
 	LastProbeError *string `json:"last_probe_error"`
 	ServerVersion  *string `json:"server_version"`
@@ -280,18 +281,19 @@ type Backend struct {
 	APIKey         string  `json:"-"`
 }
 
-const backendCols = `id, name, base_url, COALESCE(api_key,''), enabled, last_probe_at, last_probe_error, server_version, created_at`
+const backendCols = `id, name, base_url, COALESCE(api_key,''), enabled, draining, last_probe_at, last_probe_error, server_version, created_at`
 
 func scanBackend(row interface{ Scan(...any) error }) (*Backend, error) {
 	b := &Backend{}
 	var key string
-	var en int
-	if err := row.Scan(&b.ID, &b.Name, &b.BaseURL, &key, &en, &b.LastProbeAt, &b.LastProbeError, &b.ServerVersion, &b.CreatedAt); err != nil {
+	var en, dr int
+	if err := row.Scan(&b.ID, &b.Name, &b.BaseURL, &key, &en, &dr, &b.LastProbeAt, &b.LastProbeError, &b.ServerVersion, &b.CreatedAt); err != nil {
 		return nil, err
 	}
 	b.HasKey = key != ""
 	b.APIKey = key
 	b.Enabled = en != 0
+	b.Draining = dr != 0
 	return b, nil
 }
 
@@ -331,20 +333,21 @@ func ListBackends(db *sql.DB) ([]Backend, error) {
 	for rows.Next() {
 		b := &Backend{}
 		var key string
-		var en int
-		if err := rows.Scan(&b.ID, &b.Name, &b.BaseURL, &key, &en, &b.LastProbeAt, &b.LastProbeError,
+		var en, dr int
+		if err := rows.Scan(&b.ID, &b.Name, &b.BaseURL, &key, &en, &dr, &b.LastProbeAt, &b.LastProbeError,
 			&b.ServerVersion, &b.CreatedAt, &b.ModelCount); err != nil {
 			return nil, err
 		}
 		b.HasKey = key != ""
 		b.APIKey = key
 		b.Enabled = en != 0
+		b.Draining = dr != 0
 		out = append(out, *b)
 	}
 	return out, rows.Err()
 }
 
-func UpdateBackend(db *sql.DB, id int64, name, baseURL *string, apiKey *string, enabled *bool) (*Backend, error) {
+func UpdateBackend(db *sql.DB, id int64, name, baseURL *string, apiKey *string, enabled, draining *bool) (*Backend, error) {
 	tx, err := db.Begin()
 	if err != nil {
 		return nil, err
@@ -374,6 +377,15 @@ func UpdateBackend(db *sql.DB, id int64, name, baseURL *string, apiKey *string, 
 			v = 1
 		}
 		if _, err := tx.Exec(`UPDATE backends SET enabled=? WHERE id=?`, v, id); err != nil {
+			return nil, err
+		}
+	}
+	if draining != nil {
+		v := 0
+		if *draining {
+			v = 1
+		}
+		if _, err := tx.Exec(`UPDATE backends SET draining=? WHERE id=?`, v, id); err != nil {
 			return nil, err
 		}
 	}

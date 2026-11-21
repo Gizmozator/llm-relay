@@ -28,11 +28,14 @@ const busyPctThreshold = 80.0
 type ModelStatus struct {
 	Name             string  `json:"name"`
 	Online           bool    `json:"online"`
+	Draining         bool    `json:"draining"`
 	Active           int     `json:"active"`
 	ConcurrencyLimit int64   `json:"concurrency_limit"`
 	UtilizationPct   float64 `json:"utilization_pct"`
 	// Status is the derived verdict: "offline" (backend unreachable),
-	// "busy" (all slots in use or mean busy >= 80 %), else "free".
+	// "draining" (admin is shutting the backend down: finish existing
+	// sessions, start none), "busy" (all slots in use or mean busy
+	// >= 80 %), else "free".
 	Status string `json:"status"`
 }
 
@@ -87,6 +90,10 @@ func (h *Handler) Utilization(ctx context.Context) (map[string]any, error) {
 	}
 
 	status := h.Health.Status(ctx, backends)
+	draining := map[int64]bool{}
+	for _, b := range backends {
+		draining[b.ID] = b.Draining
+	}
 	active := h.Flight.Snapshot(0)
 
 	out := []ModelStatus{}
@@ -101,9 +108,12 @@ func (h *Handler) Utilization(ctx context.Context) (map[string]any, error) {
 			UtilizationPct:   math.Round(busyPct[m.Name]*10) / 10,
 		}
 		ms.Online = status[m.BackendID].Online
+		ms.Draining = draining[m.BackendID]
 		switch {
 		case !ms.Online:
 			ms.Status = "offline"
+		case ms.Draining:
+			ms.Status = "draining"
 		case m.ConcurrencyLimit > 0 && int64(ms.Active) >= m.ConcurrencyLimit:
 			ms.Status = "busy"
 		case ms.UtilizationPct >= busyPctThreshold:

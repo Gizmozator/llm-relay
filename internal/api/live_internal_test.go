@@ -56,7 +56,7 @@ func TestHealthCacheStatus(t *testing.T) {
 
 	// Disabled backends are offline without a probe.
 	disabled := false
-	if _, err := store.UpdateBackend(d, b.ID, nil, nil, nil, &disabled); err != nil {
+	if _, err := store.UpdateBackend(d, b.ID, nil, nil, nil, &disabled, nil); err != nil {
 		t.Fatal(err)
 	}
 	b.Enabled = false
