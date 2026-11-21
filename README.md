@@ -19,13 +19,16 @@ the last hour — a per-minute traffic graph (requests / tokens), a per-model
 concurrency limit, so 4 parallel slots read as 0–400 %), how many streams are
 decoding right now per model, and which catalog models are online (backend
 health is re-probed at most once a minute). Cost stays off this view — it is
-per-user and lives on the **Usage** pages.
+per-user and lives on the **Usage** pages. Admins additionally see **Active
+connections** — who is on which model right now (user, key, endpoint, session,
+IP, running time) — and a per-user **Last used** list, both as relative times
+("1 min ago") refreshed with the same 5 s poll.
 
 The **Agent API** page explains how to point an AI agent at the relay: hand
 your agent the public guide link (`{relay}/v1/agent-guide`), or wire the MCP
 endpoint (`{relay}/mcp`, one `check_utilization` tool) so it can check
-whether a model is `free` / `busy` / `offline` before taking delegated work.
-Agents authenticate with the same `sk-` keys from **My keys**.
+whether a model is `free` / `busy` / `draining` / `offline` before taking
+delegated work. Agents authenticate with the same `sk-` keys from **My keys**.
 
 ![llm-relay usage dashboard — per-key token metering and cost breakdown](docs/screenshots/usage.png)
 

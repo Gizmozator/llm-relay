@@ -8,10 +8,10 @@ import (
 
 func TestInFlightTracker(t *testing.T) {
 	f := NewInFlight()
-	f.Enter(1, "a")
-	f.Enter(1, "a")
-	f.Enter(2, "a")
-	f.Leave(1, "a")
+	id1 := f.Enter(Stream{UserID: 1, Model: "a"})
+	f.Enter(Stream{UserID: 1, Model: "a"})
+	f.Enter(Stream{UserID: 2, Model: "a"})
+	f.Leave(id1)
 	if got := f.Snapshot(0)["a"]; got != 2 {
 		t.Fatalf("global count = %d, want 2", got)
 	}
@@ -25,16 +25,16 @@ func TestInFlightTracker(t *testing.T) {
 	if got := f.Snapshot(3); len(got) != 0 {
 		t.Fatalf("user 3 snapshot = %v, want empty", got)
 	}
-	// Stray leaves must not go negative or leave zero entries behind.
-	f.Leave(1, "a")
-	f.Leave(1, "a")
-	if got := f.Snapshot(0); len(got) != 1 || got["a"] != 1 {
-		t.Fatalf("snapshot = %v, want only a:1", got)
+	// Unknown/zero ids are no-ops.
+	f.Leave(0)
+	f.Leave(9999)
+	if got := f.Snapshot(0); len(got) != 1 || got["a"] != 2 {
+		t.Fatalf("snapshot = %v, want only a:2", got)
 	}
 	// Nil receiver is a no-op (handlers built without a tracker).
 	var nilF *InFlight
-	nilF.Enter(1, "x")
-	nilF.Leave(1, "x")
+	nilF.Enter(Stream{Model: "x"})
+	nilF.Leave(1)
 	if nilF.Snapshot(0) == nil {
 		t.Fatal("nil Snapshot must return an empty map, not nil")
 	}
@@ -44,13 +44,13 @@ func TestInFlightBusySince(t *testing.T) {
 	f := NewInFlight()
 	t0 := time.Now().Add(-2 * time.Minute)
 	t1 := time.Now().Add(-time.Minute)
-	f.EnterAt(1, "a", t0)
-	f.EnterAt(1, "a", t1)
-	f.Enter(2, "a")
+	id0 := f.EnterAt(Stream{UserID: 1, Model: "a"}, t0)
+	f.EnterAt(Stream{UserID: 1, Model: "a"}, t1)
+	f.Enter(Stream{UserID: 2, Model: "a"})
 
 	bs := f.BusySince(1)
-	if len(bs["a"]) != 2 || !bs["a"][0].Equal(t0) || !bs["a"][1].Equal(t1) {
-		t.Fatalf("user 1 starts = %v, want [t0 t1]", bs["a"])
+	if len(bs["a"]) != 2 {
+		t.Fatalf("user 1 starts = %v, want 2 entries", bs["a"])
 	}
 	if len(f.BusySince(0)["a"]) != 3 {
 		t.Fatal("global BusySince must count all users")
@@ -58,17 +58,47 @@ func TestInFlightBusySince(t *testing.T) {
 	if len(f.BusySince(3)) != 0 {
 		t.Fatal("unknown user must see no streams")
 	}
-	// Leave releases the oldest start; the copy stays valid afterwards.
-	f.Leave(1, "a")
+	// Leave removes exactly that stream; the copy stays valid afterwards.
+	f.Leave(id0)
 	if len(bs["a"]) != 2 {
 		t.Error("returned slice must be a copy")
 	}
 	if rest := f.BusySince(1)["a"]; len(rest) != 1 || !rest[0].Equal(t1) {
-		t.Errorf("after Leave = %v, want [t1] (oldest released)", rest)
+		t.Errorf("after Leave = %v, want [%v] (exact id removed)", rest, t1)
 	}
 	var nilF *InFlight
 	if nilF.BusySince(0) == nil {
 		t.Fatal("nil BusySince must return an empty map, not nil")
+	}
+}
+
+func TestInFlightList(t *testing.T) {
+	f := NewInFlight()
+	now := time.Now()
+	// Enter out of start order: List must sort oldest first.
+	late := f.EnterAt(Stream{UserID: 2, Model: "b", User: "u2"}, now.Add(-time.Minute))
+	f.EnterAt(Stream{UserID: 1, Model: "a", User: "u1", Key: "k1"}, now.Add(-3*time.Minute))
+
+	all := f.List(0)
+	if len(all) != 2 || all[0].Model != "a" || all[1].Model != "b" {
+		t.Fatalf("List(0) = %+v, want [a b] oldest first", all)
+	}
+	if all[0].User != "u1" || all[0].Key != "k1" || all[0].Start.Equal(now) {
+		t.Errorf("record fields lost: %+v", all[0])
+	}
+	if mine := f.List(1); len(mine) != 1 || mine[0].Model != "a" {
+		t.Errorf("List(1) = %+v, want only a", mine)
+	}
+	// Copies: mutating the result must not touch the tracker, and Leave
+	// removes exactly one entry by id.
+	all[0].Model = "tampered"
+	f.Leave(late)
+	if got := f.List(0); len(got) != 1 || got[0].Model != "a" {
+		t.Fatalf("after Leave = %+v, want only a (untampered)", got)
+	}
+	var nilF *InFlight
+	if nilF.List(0) == nil {
+		t.Fatal("nil List must return an empty slice, not nil")
 	}
 }
 
@@ -107,9 +137,9 @@ func TestInFlightConcurrent(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			f.Enter(1, "m")
+			id := f.Enter(Stream{UserID: 1, Model: "m"})
 			f.Snapshot(0)
-			f.Leave(1, "m")
+			f.Leave(id)
 		}()
 	}
 	wg.Wait()

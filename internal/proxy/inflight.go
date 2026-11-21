@@ -4,64 +4,71 @@
 package proxy
 
 import (
+	"sort"
 	"sync"
 	"time"
 )
 
-type inflightKey struct {
-	userID int64
-	model  string
+// Stream is one active proxied request, recorded at routing time.
+type Stream struct {
+	ID        int64     `json:"-"`
+	UserID    int64     `json:"-"`
+	User      string    `json:"user"`
+	Key       string    `json:"key"`
+	Model     string    `json:"model"`
+	Endpoint  string    `json:"endpoint"`
+	Session   string    `json:"session,omitempty"`
+	IP        string    `json:"ip,omitempty"`
+	Streaming bool      `json:"streaming"`
+	Start     time.Time `json:"-"`
 }
 
-// InFlight tracks active proxied requests per (user, model) pair, keeping
-// each stream's start time so the live view can both scope counts to the
-// caller and fold still-running busy time into the minute buckets (usage
-// rows only exist once a request completes).
+// InFlight tracks active proxied requests by opaque id so the live view
+// can count them per model, scope them per user, fold their busy time and
+// (for admins) list who is on what right now.
 type InFlight struct {
-	mu     sync.Mutex
-	starts map[inflightKey][]time.Time
+	mu      sync.Mutex
+	next    int64
+	streams map[int64]*Stream
 }
 
 func NewInFlight() *InFlight {
-	return &InFlight{starts: map[inflightKey][]time.Time{}}
+	return &InFlight{streams: map[int64]*Stream{}}
 }
 
-// Enter records one request starting now on the model for the user.
-func (f *InFlight) Enter(userID int64, model string) {
-	f.EnterAt(userID, model, time.Now())
+// Enter records a stream starting now and returns its release id.
+func (f *InFlight) Enter(s Stream) int64 {
+	return f.EnterAt(s, time.Now())
 }
 
-// EnterAt records a stream with an explicit start time (tests; Enter is the
-// production path). Nil receiver is a no-op so handlers built without a
-// tracker stay safe, and the map is lazily created so a zero-value
+// EnterAt records a stream with an explicit start time (tests; Enter is
+// the production path). Nil receiver is a no-op so handlers built without
+// a tracker stay safe, and the map is lazily created so a zero-value
 // &InFlight{} works too (a nil-map write would panic on the hot path).
-func (f *InFlight) EnterAt(userID int64, model string, start time.Time) {
+func (f *InFlight) EnterAt(s Stream, start time.Time) int64 {
 	if f == nil {
-		return
+		return 0
 	}
 	f.mu.Lock()
-	if f.starts == nil {
-		f.starts = map[inflightKey][]time.Time{}
+	if f.streams == nil {
+		f.streams = map[int64]*Stream{}
 	}
-	k := inflightKey{userID, model}
-	f.starts[k] = append(f.starts[k], start)
+	f.next++
+	s.ID = f.next
+	s.Start = start
+	f.streams[s.ID] = &s
+	id := s.ID
 	f.mu.Unlock()
+	return id
 }
 
-// Leave records one request finishing; it never drives a count negative,
-// so a stray Leave cannot corrupt the gauge. The oldest stream's start is
-// released — streams on one model are interchangeable for utilization.
-func (f *InFlight) Leave(userID int64, model string) {
-	if f == nil {
+// Leave releases the stream with the given id (0 / unknown is a no-op).
+func (f *InFlight) Leave(id int64) {
+	if f == nil || id == 0 {
 		return
 	}
 	f.mu.Lock()
-	k := inflightKey{userID, model}
-	if st := f.starts[k]; len(st) > 1 {
-		f.starts[k] = st[1:]
-	} else {
-		delete(f.starts, k)
-	}
+	delete(f.streams, id)
 	f.mu.Unlock()
 }
 
@@ -73,11 +80,11 @@ func (f *InFlight) Snapshot(userID int64) map[string]int {
 	}
 	f.mu.Lock()
 	out := map[string]int{}
-	for k, st := range f.starts {
-		if userID != 0 && k.userID != userID {
+	for _, s := range f.streams {
+		if userID != 0 && s.UserID != userID {
 			continue
 		}
-		out[k.model] += len(st)
+		out[s.Model]++
 	}
 	f.mu.Unlock()
 	return out
@@ -94,13 +101,32 @@ func (f *InFlight) BusySince(userID int64) map[string][]time.Time {
 	}
 	f.mu.Lock()
 	out := map[string][]time.Time{}
-	for k, st := range f.starts {
-		if userID != 0 && k.userID != userID {
+	for _, s := range f.streams {
+		if userID != 0 && s.UserID != userID {
 			continue
 		}
-		out[k.model] = append(out[k.model], st...)
+		out[s.Model] = append(out[s.Model], s.Start)
 	}
 	f.mu.Unlock()
+	return out
+}
+
+// List returns copies of the active streams, oldest first. userID 0 means
+// "all users".
+func (f *InFlight) List(userID int64) []Stream {
+	if f == nil {
+		return []Stream{}
+	}
+	f.mu.Lock()
+	out := []Stream{}
+	for _, s := range f.streams {
+		if userID != 0 && s.UserID != userID {
+			continue
+		}
+		out = append(out, *s)
+	}
+	f.mu.Unlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].Start.Before(out[j].Start) })
 	return out
 }
 

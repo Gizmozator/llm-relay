@@ -45,6 +45,13 @@ func TestProxyInFlightHook(t *testing.T) {
 	if n := h.ph.Flight.Snapshot(0)["pub-model"]; n != 1 {
 		t.Fatalf("in-flight during upstream = %d, want 1", n)
 	}
+	// The admin connections view reads the same tracker: the record must
+	// carry who (user + key), what (model + endpoint) and the session.
+	list := h.ph.Flight.List(0)
+	if len(list) != 1 || list[0].Model != "pub-model" || list[0].Endpoint != "chat" ||
+		list[0].User == "" || list[0].Key == "" || list[0].Session == "" {
+		t.Fatalf("connection record = %+v, want user/key/model/endpoint/session set", list)
+	}
 
 	close(release)
 	resp := <-done
@@ -54,5 +61,8 @@ func TestProxyInFlightHook(t *testing.T) {
 	resp.Body.Close()
 	if n := h.ph.Flight.Snapshot(0)["pub-model"]; n != 0 {
 		t.Fatalf("in-flight after completion = %d, want 0", n)
+	}
+	if n := len(h.ph.Flight.List(0)); n != 0 {
+		t.Fatalf("connections after completion = %d, want 0", n)
 	}
 }

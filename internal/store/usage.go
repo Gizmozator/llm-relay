@@ -406,3 +406,33 @@ func SessionRecent(db *sql.DB, session string, since time.Time) (bool, error) {
 	}
 	return true, nil
 }
+
+// UserLastUsed is one user's most recent completed request.
+type UserLastUsed struct {
+	User     string `json:"user"`
+	LastUsed string `json:"last_used"`
+}
+
+// LastUsedByUser returns each user's most recent usage row after since,
+// newest first (admin live panel: who used the relay recently). Covered by
+// idx_usage_user_ts.
+func LastUsedByUser(db *sql.DB, since time.Time) ([]UserLastUsed, error) {
+	rows, err := db.Query(`SELECT u.username, MAX(l.ts) FROM usage_log l
+		JOIN users u ON u.id = l.user_id
+		WHERE l.ts > ? AND l.user_id IS NOT NULL
+		GROUP BY l.user_id, u.username ORDER BY MAX(l.ts) DESC`,
+		since.UTC().Format(time.RFC3339))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []UserLastUsed{}
+	for rows.Next() {
+		var u UserLastUsed
+		if err := rows.Scan(&u.User, &u.LastUsed); err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}

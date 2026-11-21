@@ -109,12 +109,13 @@ func TestUtilizationConcurrencyBusy(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Fill all 4 slots in the tracker (as the proxy hook would).
+	var ids []int64
 	for i := 0; i < 4; i++ {
-		h.ph.Flight.Enter(1, "pub-model")
+		ids = append(ids, h.ph.Flight.Enter(proxy.Stream{UserID: 1, Model: "pub-model"}))
 	}
 	defer func() {
-		for i := 0; i < 4; i++ {
-			h.ph.Flight.Leave(1, "pub-model")
+		for _, id := range ids {
+			h.ph.Flight.Leave(id)
 		}
 	}()
 
@@ -134,8 +135,8 @@ func TestUtilizationInFlightBusy(t *testing.T) {
 	// written at completion) must already count as busy: busy = 120 s
 	// over an elapsed window of 4–5 min → 40–50 %. Before the in-flight
 	// overlay this read 0 % ("free") until the request finished.
-	h.ph.Flight.EnterAt(1, "pub-model", time.Now().Add(-2*time.Minute))
-	defer h.ph.Flight.Leave(1, "pub-model")
+	id := h.ph.Flight.EnterAt(proxy.Stream{UserID: 1, Model: "pub-model"}, time.Now().Add(-2*time.Minute))
+	defer h.ph.Flight.Leave(id)
 
 	resp := agentGet(t, h.server.URL+"/v1/utilization", h.key)
 	var r utilResp

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { api, errMsg } from '../api';
 import type { LiveResponse } from '../api';
 import { useAuth } from '../auth';
-import { fmtInt } from '../format';
+import { fmtAgo, fmtDateTime, fmtDurationSec, fmtInt } from '../format';
 import { Banner, Empty, Loading } from '../components/ui';
 import LineChart from '../components/LineChart';
 
@@ -169,6 +169,87 @@ export default function DashboardPage() {
           />
         )}
       </section>
+
+      {admin && (
+        <section className="panel">
+          <div className="panel-head">
+            <h3>Active connections</h3>
+            <span className="dim">who is on which model right now</span>
+          </div>
+          {!data || (data.connections ?? []).length === 0 ? (
+            <Empty label="No active requests." />
+          ) : (
+            <div className="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>User</th>
+                    <th>Key</th>
+                    <th>Model</th>
+                    <th>Endpoint</th>
+                    <th>Session</th>
+                    <th>IP</th>
+                    <th className="num">Running</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(data.connections ?? []).map((c, i) => (
+                    <tr key={`${c.user}/${c.model}/${c.started_at}/${i}`}>
+                      <td>{c.user}</td>
+                      <td>{c.key}</td>
+                      <td className="mono">
+                        {c.model}
+                        {c.streaming && (
+                          <span className="badge ok" title="streaming response">
+                            stream
+                          </span>
+                        )}
+                      </td>
+                      <td>{c.endpoint}</td>
+                      <td className="mono" title={c.session}>
+                        {c.session ? c.session.slice(0, 8) : '—'}
+                      </td>
+                      <td className="mono">{c.ip || '—'}</td>
+                      <td className="num">{fmtDurationSec(c.seconds)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      )}
+
+      {admin && (
+        <section className="panel">
+          <div className="panel-head">
+            <h3>Last used</h3>
+            <span className="dim">most recent request per user (24 h)</span>
+          </div>
+          {!data || (data.last_used ?? []).length === 0 ? (
+            <Empty label="No usage in the last 24 hours." />
+          ) : (
+            <div className="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>User</th>
+                    <th>Last used</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(data.last_used ?? []).map((u) => (
+                    <tr key={u.user}>
+                      <td>{u.user}</td>
+                      <td title={fmtDateTime(u.last_used)}>{fmtAgo(u.last_used)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      )}
 
       <section className="panel">
         <h3>Models</h3>

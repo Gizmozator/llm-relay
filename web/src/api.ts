@@ -188,11 +188,34 @@ export interface LiveUtil {
   concurrency_limit: number;
 }
 
+/** One active proxied request (admin route only). */
+export interface LiveConnection {
+  user: string;
+  key: string;
+  model: string;
+  endpoint: string;
+  session?: string;
+  ip?: string;
+  streaming: boolean;
+  started_at: string;
+  seconds: number;
+}
+
+/** One user's most recent completed request within 24 h (admin route only). */
+export interface LiveLastUsed {
+  user: string;
+  last_used: string;
+}
+
 export interface LiveResponse {
   buckets: LiveBucket[];
   active: { model: string; count: number }[];
   models: LiveModel[];
   util: LiveUtil[];
+  /** Admin route only: who is on which model right now. */
+  connections?: LiveConnection[];
+  /** Admin route only: per-user most recent usage within 24 h. */
+  last_used?: LiveLastUsed[];
 }
 
 export interface Info {

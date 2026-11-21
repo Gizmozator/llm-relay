@@ -15,14 +15,16 @@ import (
 	"llm-relay/internal/api"
 	"llm-relay/internal/auth"
 	"llm-relay/internal/db"
+	"llm-relay/internal/proxy"
 	"llm-relay/internal/store"
 )
 
 // fakeFlight serves per-user in-flight counts like proxy.InFlight.Snapshot:
 // userID 0 aggregates all users, anything else filters to that caller.
 type fakeFlight struct {
-	byUser map[int64]map[string]int
-	since  map[int64]map[string][]time.Time
+	byUser  map[int64]map[string]int
+	since   map[int64]map[string][]time.Time
+	streams map[int64][]proxy.Stream
 }
 
 func (f fakeFlight) Snapshot(userID int64) map[string]int {
@@ -47,6 +49,17 @@ func (f fakeFlight) BusySince(userID int64) map[string][]time.Time {
 		for m, ts := range perModel {
 			out[m] = append(out[m], ts...)
 		}
+	}
+	return out
+}
+
+func (f fakeFlight) List(userID int64) []proxy.Stream {
+	out := []proxy.Stream{}
+	for uid, streams := range f.streams {
+		if userID != 0 && uid != userID {
+			continue
+		}
+		out = append(out, streams...)
 	}
 	return out
 }
@@ -408,5 +421,69 @@ func TestLiveActiveServerWideAndModels(t *testing.T) {
 	resp.Body.Close()
 	if len(filtered.Active) != 1 || filtered.Active[0].Count != 5 {
 		t.Errorf("user_id-filtered active = %+v, want [{test-model 5}]", filtered.Active)
+	}
+}
+
+func TestLiveConnectionsAdminOnly(t *testing.T) {
+	fl := fakeFlight{streams: map[int64][]proxy.Stream{
+		1: {{UserID: 1, User: "admin", Key: "cli", Model: "test-model", Endpoint: "chat",
+			Session: "sess-abc123", IP: "10.0.0.5", Streaming: true,
+			Start: time.Now().Add(-90 * time.Second)}},
+		2: {{UserID: 2, User: "friend", Key: "laptop", Model: "test-model", Endpoint: "chat",
+			Start: time.Now().Add(-10 * time.Second)}},
+	}}
+	e := newLiveEnv(t, fl)
+	seedUsage(t, e.db, userID(t, e.db, "friend"), time.Now().Add(-5*time.Minute), 10, 5, 100)
+
+	admTok := liveLogin(t, e, "admin", "adminpass1")
+	resp := liveGet(t, e, "/api/admin/live", admTok)
+	var r struct {
+		Connections []struct {
+			User      string `json:"user"`
+			Key       string `json:"key"`
+			Model     string `json:"model"`
+			Session   string `json:"session"`
+			Streaming bool   `json:"streaming"`
+			Seconds   int64  `json:"seconds"`
+		} `json:"connections"`
+		LastUsed []struct {
+			User     string `json:"user"`
+			LastUsed string `json:"last_used"`
+		} `json:"last_used"`
+	}
+	json.NewDecoder(resp.Body).Decode(&r)
+	resp.Body.Close()
+
+	if len(r.Connections) != 2 {
+		t.Fatalf("connections = %+v, want 2 rows", r.Connections)
+	}
+	byUser := map[string]int64{}
+	for _, c := range r.Connections {
+		byUser[c.User] = c.Seconds
+		if c.Model != "test-model" || c.Key == "" {
+			t.Errorf("connection row = %+v, want model + key set", c)
+		}
+	}
+	if s, ok := byUser["admin"]; !ok || s < 85 || s > 95 {
+		t.Errorf("admin seconds = %d, want ~90", byUser["admin"])
+	}
+	if s, ok := byUser["friend"]; !ok || s < 5 || s > 15 {
+		t.Errorf("friend seconds = %d, want ~10", byUser["friend"])
+	}
+	if len(r.LastUsed) != 1 || r.LastUsed[0].User != "friend" {
+		t.Errorf("last_used = %+v, want [friend]", r.LastUsed)
+	}
+
+	// Personal route must not leak other users' connection rows.
+	friTok := liveLogin(t, e, "friend", "userpass1")
+	resp = liveGet(t, e, "/api/live", friTok)
+	var raw map[string]json.RawMessage
+	json.NewDecoder(resp.Body).Decode(&raw)
+	resp.Body.Close()
+	if _, ok := raw["connections"]; ok {
+		t.Error("personal live leaked connections")
+	}
+	if _, ok := raw["last_used"]; ok {
+		t.Error("personal live leaked last_used")
 	}
 }

@@ -41,6 +41,28 @@ export function fmtDateTime(iso: string | null | undefined): string {
   return `${d.toLocaleDateString('en-GB')} ${d.toLocaleTimeString('en-GB', { hour12: false })}`;
 }
 
+/** Compact elapsed time from seconds: "45s", "1m 23s", "2h 05m", "3d 4h". */
+export function fmtDurationSec(s: number): string {
+  s = Math.max(0, Math.floor(s));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}m`;
+  return `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`;
+}
+
+/** Coarse "time ago" from an ISO timestamp: "just now", "45s ago", "3 min ago", "2 h ago", "5 d ago". */
+export function fmtAgo(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const t = new Date(iso).getTime();
+  if (isNaN(t)) return iso;
+  const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  if (s < 10) return 'just now';
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
+  return `${Math.floor(s / 86400)} d ago`;
+}
+
 /** Local YYYY-MM-DD for date inputs. */
 export function isoDate(d: Date): string {
   const y = d.getFullYear();

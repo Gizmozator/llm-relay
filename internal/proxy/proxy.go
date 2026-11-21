@@ -164,12 +164,6 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request, endpoint string
 		writeError(w, http.StatusNotFound, fmt.Sprintf("model %q not found", peek.Model))
 		return
 	}
-	// Counted in-flight from successful routing until the handler returns:
-	// the stream is fully copied (or the body read) before this deferred
-	// Leave runs. Keyed by user so the live view can scope active streams.
-	h.Flight.Enter(user.ID, model.Name)
-	defer h.Flight.Leave(user.ID, model.Name)
-
 	session := r.Header.Get("X-Session-Id")
 	if session == "" {
 		session = DeriveSession(endpoint, body, key.ID, model.Name)
@@ -194,6 +188,22 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request, endpoint string
 		}
 	}
 	h.Sessions.Mark(session)
+
+	// Counted in-flight from the drain gate until the handler returns: the
+	// stream is fully copied (or the body read) before this deferred Leave
+	// runs. The record carries who/what/where so the admin live view can
+	// list active connections; refused (drain) requests never enter it.
+	streamID := h.Flight.Enter(Stream{
+		UserID:    user.ID,
+		User:      user.Username,
+		Key:       key.Name,
+		Model:     model.Name,
+		Endpoint:  endpoint,
+		Session:   session,
+		IP:        h.clientIP(r),
+		Streaming: peek.Stream,
+	})
+	defer h.Flight.Leave(streamID)
 
 	fwdBody := rewriteBody(body, model.UpstreamModel, endpoint, peek.Stream)
 	url := strings.TrimRight(backend.BaseURL, "/") + r.URL.Path
