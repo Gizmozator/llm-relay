@@ -1259,3 +1259,104 @@ func TestIneligibleGroupEditsPassOverPublicName(t *testing.T) {
 		t.Errorf("gaining first eligible member over public name: err = %v, want ErrExists", err)
 	}
 }
+
+// The manual visibility editor (admin API, task 3): valid values apply, bad
+// input is ErrInvalid, unknown ids ErrNotFound. A hand-set public on a member
+// is allowed but the next membership write re-asserts the membership rule.
+func TestUpdateModelVisibility(t *testing.T) {
+	d := migratedDB(t)
+	b, err := store.CreateBackend(d, "eng", "http://127.0.0.1:1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := store.CreateModel(d, b.ID, "vis", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := store.UpdateModelVisibility(d, m.ID, "internal"); err != nil || got.Visibility != "internal" {
+		t.Fatalf("set internal: %v %+v", err, got)
+	}
+	if got, err := store.UpdateModelVisibility(d, m.ID, "public"); err != nil || got.Visibility != "public" {
+		t.Fatalf("set public: %v %+v", err, got)
+	}
+	if _, err := store.UpdateModelVisibility(d, m.ID, "secret"); !errors.Is(err, store.ErrInvalid) {
+		t.Errorf("bad visibility = %v, want ErrInvalid", err)
+	}
+	if _, err := store.UpdateModelVisibility(d, 9999, "public"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("unknown model = %v, want ErrNotFound", err)
+	}
+
+	g, err := store.CreateGroup(d, "vis-pool")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateGroup(d, g.ID, nil, nil, []store.GroupMemberInput{{ModelID: m.ID}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateModelVisibility(d, m.ID, "public"); err != nil {
+		t.Fatalf("re-expose member: %v", err)
+	}
+	// The next membership write flips it back to internal.
+	if _, err := store.UpdateGroup(d, g.ID, nil, nil, []store.GroupMemberInput{{ModelID: m.ID}}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.ModelByID(d, m.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Visibility != "internal" {
+		t.Errorf("after membership rewrite visibility = %q, want internal", got.Visibility)
+	}
+}
+
+func TestEnablePastReexposedMemberName(t *testing.T) {
+	d := migratedDB(t)
+	b1, err := store.CreateBackend(d, "node-a", "http://127.0.0.1:1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b2, err := store.CreateBackend(d, "node-b", "http://127.0.0.1:2", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := store.CreateGroup(d, "gname")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Empty group reserves nothing, so the member can carry the name.
+	m, err := store.CreateModel(d, b1.ID, "u", "gname")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateGroup(d, g.ID, nil, nil,
+		[]store.GroupMemberInput{{ModelID: m.ID, Weight: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	// The admin visibility editor re-exposes the member (plan: "admin may
+	// re-expose"). The row is the group's own, not an external claim.
+	if _, err := store.UpdateModelVisibility(d, m.ID, "public"); err != nil {
+		t.Fatal(err)
+	}
+	// Enabling must succeed: the member is exempt from the ownership check.
+	if _, err := store.UpdateGroup(d, g.ID, nil, ptr(true), nil); err != nil {
+		t.Fatalf("enable over re-exposed own member: %v", err)
+	}
+	// The group wins the name while serving (shadow state).
+	tgt, err := store.ResolveTarget(d, "gname")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tgt.Kind != store.TargetGroup {
+		t.Errorf("kind = %v, want the group to win its own name", tgt.Kind)
+	}
+	// An EXTERNAL public same-name row still blocks the enable transition.
+	if _, _, err := store.AddModels(d, b2.ID, []string{"gname"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateGroup(d, g.ID, nil, ptr(false), nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateGroup(d, g.ID, nil, ptr(true), nil); !errors.Is(err, store.ErrExists) {
+		t.Errorf("re-enable over external public row: err = %v, want ErrExists", err)
+	}
+}
