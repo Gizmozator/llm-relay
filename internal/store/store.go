@@ -18,6 +18,10 @@ var (
 	// row still referenced). Handlers map it to 409 without string matching.
 	ErrConflict = errors.New("conflict")
 	ErrExists   = errors.New("already exists")
+	// ErrInvalid marks client input-validation failures (blank name, bad
+	// shape) — the caller's request was malformed, nothing clashed.
+	// Handlers map it to 400.
+	ErrInvalid = errors.New("invalid input")
 )
 
 func now() string { return time.Now().UTC().Format(time.RFC3339) }
@@ -285,16 +289,33 @@ const backendCols = `id, name, base_url, COALESCE(api_key,''), enabled, draining
 
 func scanBackend(row interface{ Scan(...any) error }) (*Backend, error) {
 	b := &Backend{}
-	var key string
-	var en, dr int
-	if err := row.Scan(&b.ID, &b.Name, &b.BaseURL, &key, &en, &dr, &b.LastProbeAt, &b.LastProbeError, &b.ServerVersion, &b.CreatedAt); err != nil {
+	targets, finalize := backendScanTargets(b)
+	if err := row.Scan(targets...); err != nil {
 		return nil, err
 	}
-	b.HasKey = key != ""
-	b.APIKey = key
-	b.Enabled = en != 0
-	b.Draining = dr != 0
+	finalize()
 	return b, nil
+}
+
+// backendScanTargets is the single source of truth for the backendCols /
+// backendJoinCols scan order: scanBackend and modelBackendScanTargets share
+// it, so a reorder or same-width swap can never mis-bind one scan and not
+// the other. finalize applies the int→bool conversions after a successful
+// Scan.
+func backendScanTargets(b *Backend) (targets []any, finalize func()) {
+	var key string
+	var en, dr int
+	targets = []any{
+		&b.ID, &b.Name, &b.BaseURL, &key, &en, &dr, &b.LastProbeAt, &b.LastProbeError,
+		&b.ServerVersion, &b.CreatedAt,
+	}
+	finalize = func() {
+		b.HasKey = key != ""
+		b.APIKey = key
+		b.Enabled = en != 0
+		b.Draining = dr != 0
+	}
+	return targets, finalize
 }
 
 func CreateBackend(db *sql.DB, name, baseURL, apiKey string) (*Backend, error) {
@@ -332,16 +353,12 @@ func ListBackends(db *sql.DB) ([]Backend, error) {
 	out := []Backend{}
 	for rows.Next() {
 		b := &Backend{}
-		var key string
-		var en, dr int
-		if err := rows.Scan(&b.ID, &b.Name, &b.BaseURL, &key, &en, &dr, &b.LastProbeAt, &b.LastProbeError,
-			&b.ServerVersion, &b.CreatedAt, &b.ModelCount); err != nil {
+		targets, finalize := backendScanTargets(b)
+		// backendCols plus the trailing ModelCount subquery.
+		if err := rows.Scan(append(targets, &b.ModelCount)...); err != nil {
 			return nil, err
 		}
-		b.HasKey = key != ""
-		b.APIKey = key
-		b.Enabled = en != 0
-		b.Draining = dr != 0
+		finalize()
 		out = append(out, *b)
 	}
 	return out, rows.Err()
@@ -436,6 +453,7 @@ type Model struct {
 	BackendName      string  `json:"backend_name"`
 	Name             string  `json:"name"`
 	UpstreamModel    string  `json:"upstream_model"`
+	Visibility       string  `json:"visibility"`
 	Enabled          bool    `json:"enabled"`
 	PriceIn          int64   `json:"price_in"`
 	PriceOut         int64   `json:"price_out"`
@@ -449,34 +467,93 @@ type Model struct {
 	BenchAt          string  `json:"bench_at"`
 }
 
-const modelCols = `m.id, m.backend_id, b.name, m.name, m.upstream_model, m.enabled,
+const modelCols = `m.id, m.backend_id, b.name, m.name, m.upstream_model, m.visibility, m.enabled,
 	m.price_in, m.price_out, m.price_cache_read, m.price_cache_write,
 	m.context_length, m.concurrency_limit, m.busy_threshold_pct, m.bench_tok_per_s,
 	m.bench_pp_tok_per_s, COALESCE(m.bench_at,'')`
 
+// backendJoinCols is backendCols qualified for joins where backends is b.
+const backendJoinCols = `b.id, b.name, b.base_url, COALESCE(b.api_key,''), b.enabled, b.draining,
+	b.last_probe_at, b.last_probe_error, b.server_version, b.created_at`
+
 func scanModel(row interface{ Scan(...any) error }) (*Model, error) {
 	m := &Model{}
-	var en int
-	if err := row.Scan(&m.ID, &m.BackendID, &m.BackendName, &m.Name, &m.UpstreamModel, &en,
-		&m.PriceIn, &m.PriceOut, &m.PriceCacheRead, &m.PriceCacheWrite,
-		&m.ContextLength, &m.ConcurrencyLimit, &m.BusyThresholdPct, &m.BenchTokPerS,
-		&m.BenchPPTokPerS, &m.BenchAt); err != nil {
+	targets, finalize := modelScanTargets(m)
+	if err := row.Scan(targets...); err != nil {
 		return nil, err
 	}
-	m.Enabled = en != 0
+	finalize()
 	return m, nil
+}
+
+// modelScanTargets is the single source of truth for the modelCols scan
+// order: scanModel and modelBackendScanTargets share it, so a reorder or
+// same-width swap inside modelCols can never mis-bind one scan and not the
+// other. finalize applies the int→bool conversions after a successful Scan.
+func modelScanTargets(m *Model) (targets []any, finalize func()) {
+	var en int
+	targets = []any{
+		&m.ID, &m.BackendID, &m.BackendName, &m.Name, &m.UpstreamModel, &m.Visibility, &en,
+		&m.PriceIn, &m.PriceOut, &m.PriceCacheRead, &m.PriceCacheWrite,
+		&m.ContextLength, &m.ConcurrencyLimit, &m.BusyThresholdPct, &m.BenchTokPerS,
+		&m.BenchPPTokPerS, &m.BenchAt,
+	}
+	finalize = func() { m.Enabled = en != 0 }
+	return targets, finalize
+}
+
+// modelBackendScanTargets returns the scan targets for modelCols +
+// backendJoinCols in exact projection order — shared by scanModelAndBackend
+// and scanGroupMember (which prepends its own membership targets), so no
+// scan hand-copies the projection.
+func modelBackendScanTargets(m *Model, b *Backend) (targets []any, finalize func()) {
+	mt, mfin := modelScanTargets(m)
+	bt, bfin := backendScanTargets(b)
+	targets = append(mt, bt...)
+	finalize = func() {
+		mfin()
+		bfin()
+	}
+	return targets, finalize
+}
+
+// scanModelAndBackend reads modelCols + backendJoinCols from one row: the
+// joined shape group members and name resolution share. Backend.ModelCount
+// stays zero — the join does not count.
+func scanModelAndBackend(row interface{ Scan(...any) error }) (*Model, *Backend, error) {
+	m := &Model{}
+	b := &Backend{}
+	targets, finalize := modelBackendScanTargets(m, b)
+	if err := row.Scan(targets...); err != nil {
+		return nil, nil, err
+	}
+	finalize()
+	return m, b, nil
 }
 
 func CreateModel(db *sql.DB, backendID int64, upstreamModel, name string) (*Model, error) {
 	if name == "" {
 		name = upstreamModel
 	}
-	res, err := db.Exec(`INSERT INTO models(backend_id, upstream_model, name, busy_threshold_pct) VALUES(?,?,?,80)`,
+	// Guard and insert in one tx (see CreateGroup): the group-name check and
+	// the write must not interleave with a concurrent CreateGroup.
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if err := assertNoGroupName(tx, name); err != nil {
+		return nil, err
+	}
+	res, err := tx.Exec(`INSERT INTO models(backend_id, upstream_model, name, busy_threshold_pct) VALUES(?,?,?,80)`,
 		backendID, upstreamModel, name)
 	if err != nil {
 		if isUniqueErr(err) {
 			return nil, ErrExists
 		}
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
@@ -491,22 +568,21 @@ func ModelByID(db *sql.DB, id int64) (*Model, error) {
 	return m, err
 }
 
-// ModelByName resolves an enabled catalog model together with its enabled backend.
+// ModelByName resolves an enabled catalog model together with its enabled
+// backend. Names are unique per backend since 0010, so several rows can share
+// one name: public visibility wins, then the lowest id. Internal members stay
+// directly resolvable (pin/debug). Group-aware resolution is ResolveTarget in
+// groups.go — this function is the model-only path.
 func ModelByName(db *sql.DB, name string) (*Model, *Backend, error) {
-	m, err := scanModel(db.QueryRow(`SELECT `+modelCols+`
+	m, b, err := scanModelAndBackend(db.QueryRow(`SELECT `+modelCols+`, `+backendJoinCols+`
 		FROM models m JOIN backends b ON b.id=m.backend_id
-		WHERE m.name=? AND m.enabled=1 AND b.enabled=1`, name))
+		WHERE m.name=? AND m.enabled=1 AND b.enabled=1
+		ORDER BY CASE WHEN m.visibility='public' THEN 0 ELSE 1 END, m.id
+		LIMIT 1`, name))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil, ErrNotFound
 	}
-	if err != nil {
-		return nil, nil, err
-	}
-	b, err := BackendByID(db, m.BackendID)
-	if err != nil {
-		return nil, nil, err
-	}
-	return m, b, nil
+	return m, b, err
 }
 
 func ListModels(db *sql.DB) ([]Model, error) {
@@ -527,22 +603,35 @@ func ListModels(db *sql.DB) ([]Model, error) {
 	return out, rows.Err()
 }
 
-// ListPublicModels returns only models usable right now: enabled model on an
-// enabled backend — the set the relay will actually serve.
+// ListPublicModels returns only models visible and usable right now: enabled,
+// visibility=public, on an enabled backend — the set the relay lists and
+// serves directly. Internal members are hidden but stay requestable by name.
+// Ordered by name then id so a shared name appears in ModelByName's
+// tie-break order (ListPublicCatalog keeps the first, i.e. lowest id).
+// For the /v1/models listing that also shows groups use ListPublicCatalog.
 func ListPublicModels(db *sql.DB) ([]Model, error) {
 	rows, err := db.Query(`SELECT ` + modelCols + `
 		FROM models m JOIN backends b ON b.id=m.backend_id
-		WHERE m.enabled=1 AND b.enabled=1 ORDER BY m.name`)
+		WHERE m.enabled=1 AND b.enabled=1 AND m.visibility='public' ORDER BY m.name, m.id`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := []Model{}
+	seen := map[string]bool{}
 	for rows.Next() {
 		m, err := scanModel(rows)
 		if err != nil {
 			return nil, err
 		}
+		// Since 0010 two backends may carry the same name; the public
+		// catalog is keyed by name (both callers emit one entry per row),
+		// so keep the first row per name — ordered by (name, id), so the
+		// lowest id wins, matching ModelByName's tie-break.
+		if seen[m.Name] {
+			continue
+		}
+		seen[m.Name] = true
 		out = append(out, *m)
 	}
 	return out, rows.Err()
@@ -599,8 +688,14 @@ func UpdateModelBench(db *sql.DB, id int64, tokPerS float64, ppTokPerS *float64,
 }
 
 // AddModels bulk-inserts discovered upstream ids for one backend in a single
-// transaction. A name already taken anywhere in the catalog (names are
-// globally unique) is skipped and reported, never silently swallowed.
+// transaction. A name already taken on this backend is skipped and reported,
+// never silently swallowed. The same name on a different backend is a normal
+// insert since 0010 (UNIQUE(backend_id, name)): two machines may each serve
+// qwen3-coder; grouping them is a later, human decision. A name owned by a
+// group is deliberately NOT skipped: a freshly added replica syncing its
+// catalog is exactly the row meant to join that group, so the row is created
+// and sits shadowed by the group (resolution and the public catalog prefer
+// the group) until an admin claims it as a member.
 func AddModels(db *sql.DB, backendID int64, upstreamIDs []string) ([]Model, []string, error) {
 	tx, err := db.Begin()
 	if err != nil {
@@ -664,11 +759,27 @@ func UpdateModel(db *sql.DB, id int64, name *string, enabled *bool, prices [4]*i
 	}
 	defer tx.Rollback()
 	if name != nil {
-		if _, err := tx.Exec(`UPDATE models SET name=? WHERE id=?`, *name, id); err != nil {
-			if isUniqueErr(err) {
-				return nil, fmt.Errorf("%w: model name taken", ErrConflict)
+		// No-op rename (the UI PUT echoes the current name) must not trip
+		// the group guard: a member model legitimately carries the group's
+		// name, and rejecting its own name back to the caller would make
+		// such rows uneditable.
+		var cur string
+		if err := tx.QueryRow(`SELECT name FROM models WHERE id=?`, id).Scan(&cur); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil, ErrNotFound
 			}
 			return nil, err
+		}
+		if *name != cur {
+			if err := assertNoGroupName(tx, *name); err != nil {
+				return nil, err
+			}
+			if _, err := tx.Exec(`UPDATE models SET name=? WHERE id=?`, *name, id); err != nil {
+				if isUniqueErr(err) {
+					return nil, fmt.Errorf("%w: model name taken", ErrConflict)
+				}
+				return nil, err
+			}
 		}
 	}
 	if enabled != nil {
@@ -696,14 +807,25 @@ func UpdateModel(db *sql.DB, id int64, name *string, enabled *bool, prices [4]*i
 }
 
 func DeleteModel(db *sql.DB, id int64) error {
-	res, err := db.Exec(`DELETE FROM models WHERE id=?`, id)
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// Membership rows first: model_group_members references models(id) and
+	// the FK has no cascade — without this the delete aborts with an opaque
+	// constraint error for grouped models.
+	if _, err := tx.Exec(`DELETE FROM model_group_members WHERE model_id=?`, id); err != nil {
+		return err
+	}
+	res, err := tx.Exec(`DELETE FROM models WHERE id=?`, id)
 	if err != nil {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrNotFound
 	}
-	return nil
+	return tx.Commit()
 }
 
 // ---------------------------------------------------------------- settings

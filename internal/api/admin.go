@@ -459,6 +459,10 @@ func (s *Server) AdminUpdateModel(w http.ResponseWriter, r *http.Request, c *aut
 		writeErr(w, http.StatusNotFound, "model not found")
 	case errors.Is(err, store.ErrConflict):
 		writeErr(w, http.StatusConflict, "model name taken")
+	case errors.Is(err, store.ErrExists):
+		// Rename onto a group-owned name (assertNoGroupName). Fixed
+		// string: the store error text is an internal detail.
+		writeErr(w, http.StatusConflict, "model name already in use")
 	case err != nil:
 		writeErr(w, http.StatusInternalServerError, "model update failed")
 	default:

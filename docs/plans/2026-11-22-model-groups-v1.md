@@ -112,6 +112,14 @@ are visible in the dashboard.
 
 - None blocking. (Live-view member display already works: in-flight `Stream.Model`
   is the resolved member name.)
+- Live page keys active counts and `concurrency_limit` by model **name**
+  (`internal/api/live.go`): same-name duplicates across backends aggregate into
+  one entry (consistent with name-based metering; benign pre-grouping window),
+  but per-row limit divergence picks one row's limit for the utilization axis.
+  Display nuance — task 4's pool aggregation revisits this.
+- Admin model list (`store.ListModels`) deliberately returns **every** row
+  (replicas are per-backend admin state; dedupe would hide them) — the web UI
+  must key model rows by id, not name.
 
 ## Changelog
 

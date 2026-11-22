@@ -928,7 +928,8 @@ func TestBulkAddReportsSkipped(t *testing.T) {
 	if _, err := store.CreateModel(e.db, 1, "gpt-4o", ""); err != nil {
 		t.Fatal(err)
 	}
-	// gpt-4o is taken globally (backend A); new-m must be created on B.
+	// Names are unique per backend since 0010: backend B may take gpt-4o too
+	// (the import-collision fix), so both ids are created, nothing skipped.
 	resp := e.do(t, "POST", "/api/admin/backends/2/models", `{"model_ids":["gpt-4o","new-m"]}`, admin)
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("bulk add: %d", resp.StatusCode)
@@ -939,11 +940,24 @@ func TestBulkAddReportsSkipped(t *testing.T) {
 	}
 	json.NewDecoder(resp.Body).Decode(&out)
 	resp.Body.Close()
-	if len(out.Created) != 1 || out.Created[0].Name != "new-m" {
-		t.Errorf("created = %+v, want [new-m]", out.Created)
+	if len(out.Created) != 2 || out.Created[0].Name != "gpt-4o" || out.Created[1].Name != "new-m" {
+		t.Errorf("created = %+v, want [gpt-4o new-m]", out.Created)
 	}
-	if len(out.Skipped) != 1 || out.Skipped[0] != "gpt-4o" {
-		t.Errorf("skipped = %v, want [gpt-4o]", out.Skipped)
+	if len(out.Skipped) != 0 {
+		t.Errorf("skipped = %v, want []", out.Skipped)
+	}
+	// Re-adding on the same backend is still reported as skipped, never
+	// silently swallowed.
+	resp = e.do(t, "POST", "/api/admin/backends/2/models", `{"model_ids":["new-m"]}`, admin)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("re-bulk add: %d", resp.StatusCode)
+	}
+	out.Created = nil
+	out.Skipped = nil
+	json.NewDecoder(resp.Body).Decode(&out)
+	resp.Body.Close()
+	if len(out.Created) != 0 || len(out.Skipped) != 1 || out.Skipped[0] != "new-m" {
+		t.Errorf("re-add: created = %+v skipped = %v, want []/[new-m]", out.Created, out.Skipped)
 	}
 	// Batch cap.
 	big := `{"model_ids":[`
