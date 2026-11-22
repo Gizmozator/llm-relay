@@ -304,9 +304,10 @@ func UpdateGroup(db *sql.DB, id int64, name *string, enabled *bool, members []Gr
 	if members != nil {
 		// Membership determines visibility: a member row is hidden from
 		// /v1/models (the group owns the public name) but stays directly
-		// requestable; leaving a group restores public. v1 has no manual
-		// visibility editor, so "internal and memberless" only ever means
-		// "just removed".
+		// requestable; leaving a group restores public. The admin API also
+		// has a manual editor (UpdateModelVisibility), so "internal and
+		// memberless" can now also mean "admin hid it by hand"; either way
+		// the next membership write re-asserts the rule above.
 		rows, err := tx.Query(`SELECT model_id FROM model_group_members WHERE group_id=?`, id)
 		if err != nil {
 			return nil, err
@@ -366,6 +367,35 @@ func UpdateGroup(db *sql.DB, id int64, name *string, enabled *bool, members []Gr
 			}
 		}
 	}
+	// Exemption set for both ownership checks below: departing members
+	// (was) PLUS current members. A current member's row belongs to the
+	// group — membership keeps it internal, but the admin visibility editor
+	// may re-expose it (the plan's "admin may re-expose"); that row is not
+	// an external claim on the group's name, and counting it would wedge
+	// the enable path over the group's own member (409 "group name taken"
+	// for a row the group legitimately owns). External public same-name
+	// rows — e.g. an AddModels import — still block.
+	except := map[int64]bool{}
+	for mid := range was {
+		except[mid] = true
+	}
+	mrows, err := tx.Query(`SELECT model_id FROM model_group_members WHERE group_id=?`, id)
+	if err != nil {
+		return nil, err
+	}
+	for mrows.Next() {
+		var mid int64
+		if err := mrows.Scan(&mid); err != nil {
+			mrows.Close()
+			return nil, err
+		}
+		except[mid] = true
+	}
+	if err := mrows.Err(); err != nil {
+		mrows.Close()
+		return nil, err
+	}
+	mrows.Close()
 	// The rename ownership check runs after the membership flip: a call
 	// that renames onto a public model's name AND claims that model as a
 	// member in the same call must pass (the member is internal by then);
@@ -377,7 +407,7 @@ func UpdateGroup(db *sql.DB, id int64, name *string, enabled *bool, members []Gr
 	// current name) is not a transition and must pass even when the group
 	// already shadows a public same-name import row.
 	if name != nil && strings.TrimSpace(*name) != prevName {
-		if err := assertNoPublicModelNameExcept(tx, strings.TrimSpace(*name), was); err != nil {
+		if err := assertNoPublicModelNameExcept(tx, strings.TrimSpace(*name), except); err != nil {
 			return nil, err
 		}
 	}
@@ -408,10 +438,10 @@ func UpdateGroup(db *sql.DB, id int64, name *string, enabled *bool, members []Gr
 	// Only then does a public same-name model go from resolvable to
 	// silently shadowed; a group that stays unable to serve shadows
 	// nothing (ResolveTarget's fall-through keeps the model resolvable),
-	// so edits on it must pass. Members that left in this same call (was)
-	// are exempt: their public visibility is the call's own doing, and the
-	// fall-through handles the resulting shadow deterministically (group
-	// wins while it has an eligible member, the model while it does not).
+	// so edits on it must pass. Departing and current members (except) are
+	// exempt: their rows are the group's own, and the fall-through handles
+	// the resulting shadow deterministically (group wins while it has an
+	// eligible member, the model while it does not).
 	var finalName string
 	var finalEnabled int
 	if err := tx.QueryRow(`SELECT name, enabled FROM model_groups WHERE id=?`, id).Scan(&finalName, &finalEnabled); err != nil {
@@ -423,7 +453,7 @@ func UpdateGroup(db *sql.DB, id int64, name *string, enabled *bool, members []Gr
 		return nil, err
 	}
 	if finalEnabled == 1 && (prevEnabled == 0 || (prevEligible == 0 && finalEligible > 0)) {
-		if err := assertNoPublicModelNameExcept(tx, finalName, was); err != nil {
+		if err := assertNoPublicModelNameExcept(tx, finalName, except); err != nil {
 			return nil, err
 		}
 	}

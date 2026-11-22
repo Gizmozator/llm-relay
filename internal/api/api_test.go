@@ -67,6 +67,11 @@ func newTestEnv(t *testing.T, upstream http.Handler) *testEnv {
 	mux.Handle("PATCH /api/admin/backends/{id}", s.Admin(s.AdminUpdateBackend))
 	mux.Handle("POST /api/admin/backends/{id}/probe", s.Admin(s.AdminProbeBackend))
 	mux.Handle("POST /api/admin/backends/{id}/models", s.Admin(s.AdminAddBackendModels))
+	mux.Handle("GET /api/admin/groups", s.Admin(s.AdminListGroups))
+	mux.Handle("POST /api/admin/groups", s.Admin(s.AdminCreateGroup))
+	mux.Handle("GET /api/admin/groups/{id}", s.Admin(s.AdminGetGroup))
+	mux.Handle("PATCH /api/admin/groups/{id}", s.Admin(s.AdminUpdateGroup))
+	mux.Handle("DELETE /api/admin/groups/{id}", s.Admin(s.AdminDeleteGroup))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return &testEnv{db: d, srv: srv}

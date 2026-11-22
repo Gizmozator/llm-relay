@@ -65,7 +65,7 @@ are visible in the dashboard.
   requests only).
 - **`/v1/models`**: enabled groups + enabled `public` models; `internal`
   members hidden but requestable.
-- **Admin API**: `GET/POST /api/admin/groups`, `GET/PUT /api/admin/groups/{id}`
+- **Admin API**: `GET/POST /api/admin/groups`, `GET/PATCH /api/admin/groups/{id}`
   (members: model_id, weight, position; weight seeded from `bench_tok_per_s`),
   `DELETE /api/admin/groups/{id}`, `PATCH /api/admin/models/{id}` gains
   `visibility`. Adding a model to a group sets it `internal` (admin may re-expose).
@@ -124,3 +124,6 @@ are visible in the dashboard.
 ## Changelog
 
 - 2026-11-22 — plan created from Gitea #1 design.
+- 2026-11-22 — task 3: group update endpoint is `PATCH /api/admin/groups/{id}`
+  (partial merge), not `PUT` — repo convention reserves `PUT` for full
+  replacement (settings); every sibling partial-update admin route uses PATCH.

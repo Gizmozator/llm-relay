@@ -806,6 +806,27 @@ func UpdateModel(db *sql.DB, id int64, name *string, enabled *bool, prices [4]*i
 	return ModelByID(db, id)
 }
 
+// UpdateModelVisibility is the manual visibility editor (admin API): it
+// applies 'public' or 'internal' verbatim, ErrInvalid for anything else and
+// ErrNotFound for an unknown id. Membership still overrides it: joining a
+// group forces internal and leaving restores public (UpdateGroup), so a
+// hand-set value on a member survives only until the next membership edit.
+// Re-exposing a serving group's member as public is allowed on purpose —
+// ResolveTarget keeps the group in front while it can serve.
+func UpdateModelVisibility(db *sql.DB, id int64, visibility string) (*Model, error) {
+	if visibility != "public" && visibility != "internal" {
+		return nil, fmt.Errorf("%w: visibility must be public or internal", ErrInvalid)
+	}
+	res, err := db.Exec(`UPDATE models SET visibility=? WHERE id=?`, visibility, id)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, ErrNotFound
+	}
+	return ModelByID(db, id)
+}
+
 func DeleteModel(db *sql.DB, id int64) error {
 	tx, err := db.Begin()
 	if err != nil {

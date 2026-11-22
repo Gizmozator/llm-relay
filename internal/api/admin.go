@@ -397,6 +397,7 @@ func (s *Server) AdminUpdateModel(w http.ResponseWriter, r *http.Request, c *aut
 	var in struct {
 		Name             *string  `json:"name"`
 		Enabled          *bool    `json:"enabled"`
+		Visibility       *string  `json:"visibility"`
 		PriceIn          *int64   `json:"price_in"`
 		PriceOut         *int64   `json:"price_out"`
 		PriceCacheRead   *int64   `json:"price_cache_read"`
@@ -445,8 +446,18 @@ func (s *Server) AdminUpdateModel(w http.ResponseWriter, r *http.Request, c *aut
 		writeErr(w, http.StatusBadRequest, "bench_pp_tok_per_s cannot be negative")
 		return
 	}
+	if in.Visibility != nil && *in.Visibility != "public" && *in.Visibility != "internal" {
+		writeErr(w, http.StatusBadRequest, "visibility must be public or internal")
+		return
+	}
 	m, err := store.UpdateModel(s.DB, id, in.Name, in.Enabled,
 		[4]*int64{in.PriceIn, in.PriceOut, in.PriceCacheRead, in.PriceCacheWrite})
+	if err == nil && in.Visibility != nil {
+		// Manual visibility edit (group members included: re-exposing a
+		// member is allowed, the resolution layer keeps the group in front
+		// while it serves).
+		m, err = store.UpdateModelVisibility(s.DB, id, *in.Visibility)
+	}
 	if err == nil && (in.ContextLength != nil || in.ConcurrencyLimit != nil ||
 		in.BusyThresholdPct != nil || in.BenchTokPerS != nil || in.BenchPPTokPerS != nil) {
 		if err = store.UpdateModelMeta(s.DB, id, in.ContextLength, in.ConcurrencyLimit,
@@ -729,6 +740,256 @@ func (s *Server) AdminDeleteModel(w http.ResponseWriter, r *http.Request, c *aut
 		return
 	} else if err != nil {
 		writeErr(w, http.StatusInternalServerError, "model delete failed")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---------------------------------------------------------------- groups
+
+// groupMemberView is one member row for the admin group views: the
+// membership fields plus the identity and state the editor shows next to
+// them (names are only unique per backend, so the triple goes along).
+type groupMemberView struct {
+	ModelID        int64   `json:"model_id"`
+	Weight         float64 `json:"weight"`
+	Position       int     `json:"position"`
+	ModelName      string  `json:"model_name"`
+	BackendName    string  `json:"backend_name"`
+	UpstreamModel  string  `json:"upstream_model"`
+	Visibility     string  `json:"visibility"`
+	ModelEnabled   bool    `json:"model_enabled"`
+	BackendEnabled bool    `json:"backend_enabled"`
+	Draining       bool    `json:"backend_draining"`
+}
+
+// groupView is a store.Group flattened with its members, the shape every
+// group endpoint returns.
+type groupView struct {
+	store.Group
+	Members []groupMemberView `json:"members"`
+}
+
+func groupViewOf(g *store.Group, members []store.GroupMember) groupView {
+	v := groupView{Group: *g, Members: make([]groupMemberView, 0, len(members))}
+	for _, m := range members {
+		mv := groupMemberView{ModelID: m.ModelID, Weight: m.Weight, Position: m.Position}
+		if m.Model != nil {
+			mv.ModelName = m.Model.Name
+			mv.UpstreamModel = m.Model.UpstreamModel
+			mv.Visibility = m.Model.Visibility
+			mv.ModelEnabled = m.Model.Enabled
+		}
+		if m.Backend != nil {
+			mv.BackendName = m.Backend.Name
+			mv.BackendEnabled = m.Backend.Enabled
+			mv.Draining = m.Backend.Draining
+		}
+		v.Members = append(v.Members, mv)
+	}
+	return v
+}
+
+// writeGroupErr maps store group errors to the uniform taxonomy:
+// ErrInvalid→400, ErrExists/ErrConflict→409, ErrNotFound→404, everything
+// else 500 with fallback. Client-facing strings are fixed — raw store
+// error text is an internal detail and never echoed.
+func writeGroupErr(w http.ResponseWriter, err error, fallback string) {
+	switch {
+	case errors.Is(err, store.ErrInvalid):
+		writeErr(w, http.StatusBadRequest, "invalid group name")
+	case errors.Is(err, store.ErrExists):
+		writeErr(w, http.StatusConflict, "group name taken")
+	case errors.Is(err, store.ErrConflict):
+		writeErr(w, http.StatusConflict, "model already belongs to a group")
+	case errors.Is(err, store.ErrNotFound):
+		writeErr(w, http.StatusNotFound, "group not found")
+	default:
+		writeErr(w, http.StatusInternalServerError, fallback)
+	}
+}
+
+func (s *Server) AdminListGroups(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
+	groups, err := store.ListGroups(s.DB)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	out := make([]groupView, 0, len(groups))
+	for i := range groups {
+		g, members, err := store.GetGroup(s.DB, groups[i].ID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				// Deleted between ListGroups and this fetch: it simply
+				// drops off the list; failing the whole listing over one
+				// vanished row would punish unrelated groups.
+				continue
+			}
+			writeErr(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		out = append(out, groupViewOf(g, members))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"groups": out})
+}
+
+func (s *Server) AdminCreateGroup(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
+	var in struct {
+		Name string `json:"name"`
+	}
+	if err := decode(r, &in); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	g, err := store.CreateGroup(s.DB, in.Name)
+	if err != nil {
+		writeGroupErr(w, err, "group create failed")
+		return
+	}
+	// CreateGroup already re-reads the row; a born-empty group provably has
+	// no members, so no second fetch (GetGroup would add a query + join
+	// that can only return empty).
+	writeJSON(w, http.StatusCreated, groupViewOf(g, nil))
+}
+
+func (s *Server) AdminGetGroup(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	g, members, err := store.GetGroup(s.DB, id)
+	if err != nil {
+		writeGroupErr(w, err, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, groupViewOf(g, members))
+}
+
+// AdminUpdateGroup applies {name?, enabled?, members?}; nil fields stay
+// unchanged. members is a full replacement when present — an empty array
+// clears the group — so it decodes as a pointer to tell omitted from empty.
+// A member weight of 0/omitted seeds from that model's bench_tok_per_s
+// (the best available proxy for relative capacity), falling back to 1.
+func (s *Server) AdminUpdateGroup(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	var in struct {
+		Name    *string `json:"name"`
+		Enabled *bool   `json:"enabled"`
+		Members *[]struct {
+			ModelID  int64   `json:"model_id"`
+			Weight   float64 `json:"weight"`
+			Position int     `json:"position"`
+		} `json:"members"`
+	}
+	if err := decode(r, &in); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if in.Name != nil {
+		trimmed := strings.TrimSpace(*in.Name)
+		if trimmed == "" {
+			writeErr(w, http.StatusBadRequest, "name cannot be empty")
+			return
+		}
+		in.Name = &trimmed
+	}
+	// The current row is needed for the enable-transition pre-check below
+	// (and gives an early 404 for an unknown id).
+	cur, err := store.GroupByID(s.DB, id)
+	if err != nil {
+		writeGroupErr(w, err, "internal error")
+		return
+	}
+	var members []store.GroupMemberInput
+	if in.Members != nil {
+		// Bound the replace-set: the 1 MiB body cap still admits tens of
+		// thousands of entries, each costing a ModelByID round-trip here
+		// and a placeholder in the store's NOT IN exclusion (SQLite's
+		// variable limit is 32766 — an oversized payload would surface as
+		// a 500 deep inside a write tx). A group pools the replicas of one
+		// model; 256 is generous by orders of magnitude.
+		const maxGroupMembers = 256
+		if len(*in.Members) > maxGroupMembers {
+			writeErr(w, http.StatusBadRequest, "too many members")
+			return
+		}
+		seen := map[int64]bool{}
+		members = make([]store.GroupMemberInput, 0, len(*in.Members))
+		for _, m := range *in.Members {
+			if m.ModelID <= 0 {
+				writeErr(w, http.StatusBadRequest, "member model_id required")
+				return
+			}
+			if seen[m.ModelID] {
+				writeErr(w, http.StatusConflict, "model listed twice in members")
+				return
+			}
+			seen[m.ModelID] = true
+			mm, err := store.ModelByID(s.DB, m.ModelID)
+			if errors.Is(err, store.ErrNotFound) {
+				writeErr(w, http.StatusNotFound, "model not found")
+				return
+			}
+			if err != nil {
+				writeErr(w, http.StatusInternalServerError, "internal error")
+				return
+			}
+			weight := m.Weight
+			if weight <= 0 {
+				weight = mm.BenchTokPerS
+				if weight <= 0 {
+					weight = 1
+				}
+			}
+			members = append(members, store.GroupMemberInput{
+				ModelID: m.ModelID, Weight: weight, Position: m.Position,
+			})
+		}
+	}
+	// Mirror the store's enable rule (writing enabled=1 requires ≥1 member,
+	// regardless of the previous state) so the rejection carries its own
+	// fixed string instead of the generic conflict one. Checking only the
+	// transition would let an already-enabled empty group echo
+	// {"enabled":true} through to the store and surface the wrong message.
+	if in.Enabled != nil && *in.Enabled {
+		n := cur.MemberCount
+		if in.Members != nil {
+			n = len(members)
+		}
+		if n == 0 {
+			writeErr(w, http.StatusConflict, "cannot enable a group with no members")
+			return
+		}
+	}
+	if _, err := store.UpdateGroup(s.DB, id, in.Name, in.Enabled, members); err != nil {
+		writeGroupErr(w, err, "group update failed")
+		return
+	}
+	g, members2, err := store.GetGroup(s.DB, id)
+	if err != nil {
+		// The mutation already committed: a read-back failure must not be
+		// reported as "update failed" (a concurrent DELETE is ErrNotFound →
+		// 404, not a 500 the client would retry). The fallback says what
+		// actually happened: the write is durable, only the echo failed.
+		writeGroupErr(w, err, "group updated; read-back failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, groupViewOf(g, members2))
+}
+
+func (s *Server) AdminDeleteGroup(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	if err := store.DeleteGroup(s.DB, id); err != nil {
+		writeGroupErr(w, err, "group delete failed")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
