@@ -52,7 +52,9 @@ are visible in the dashboard.
   shared name). Group names must not collide with any public model name or
   another group (checked in store).
 - **Member pick** (`internal/proxy`, new `groups.go`): rendezvous (HRW) hash —
-  `u = fnv/xxh(session+"\x1f"+backend_id) normalized to (0,1]`,
+  `u = fnv/xxh(session+"\x1f"+member_model_id) normalized to (0,1]` (keyed on
+  the member row, not `backend_id`: two members sharing a backend would get
+  byte-identical `u` and the lower-weight one would starve at 0%),
   `score = weight / -ln(u)`; walk the ranked list, skipping hard exclusions:
   disabled member/backend, backend draining, backend failing `HealthCache`.
   Empty session id → least-loaded member by `InFlight` count. All members
@@ -120,6 +122,17 @@ are visible in the dashboard.
 - Admin model list (`store.ListModels`) deliberately returns **every** row
   (replicas are per-backend admin state; dedupe would hide them) — the web UI
   must key model rows by id, not name.
+- Group drain semantics are stricter than the single-model gate: a draining
+  member is a hard exclusion even for a recently-active session, while the
+  model-path drain gate lets such sessions finish. A session pinned to a
+  member that starts draining migrates (cold cache) instead of finishing
+  there. Follows the plan's hard-exclusion wording; owner may want
+  session-rescue parity for groups.
+- Health probes sit on the group routing path: a request whose members'
+  cache entries are all TTL-stale serializes up to N probes (2 s each,
+  process-wide mutex) before any bytes flow — worst case N×2 s once per
+  60 s TTL window when the whole cluster is down. Accepted for v1 (retry
+  loop covers transient gaps); revisit if it ever bites real traffic.
 
 ## Changelog
 

@@ -13,6 +13,7 @@ import (
 type Stream struct {
 	ID        int64     `json:"-"`
 	UserID    int64     `json:"-"`
+	ModelID   int64     `json:"-"` // physical model row; group picks count load per member
 	User      string    `json:"user"`
 	Key       string    `json:"key"`
 	Model     string    `json:"model"`
@@ -126,6 +127,51 @@ func (f *InFlight) Snapshot(userID int64) map[string]int {
 	}
 	f.mu.Unlock()
 	return out
+}
+
+// CountModels returns active-stream counts for the given model rows in ONE
+// lock acquisition and one scan — group ranking reads it once before
+// sorting, never per comparison. Missing ids count zero; a nil tracker
+// counts nothing. excludeStreamID (0 = none) drops the caller's own stream:
+// the request doing the ranking must not count its own provisional entry
+// (phantom self-count), while sibling requests' provisional/final entries
+// still count — that is what de-herds a session-less burst.
+func (f *InFlight) CountModels(modelIDs []int64, excludeStreamID int64) map[int64]int {
+	out := make(map[int64]int, len(modelIDs))
+	if f == nil {
+		return out
+	}
+	want := make(map[int64]bool, len(modelIDs))
+	for _, id := range modelIDs {
+		want[id] = true
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for sid, s := range f.streams {
+		if sid == excludeStreamID {
+			continue
+		}
+		if want[s.ModelID] {
+			out[s.ModelID]++
+		}
+	}
+	return out
+}
+
+// SetModel re-points an active stream at a different physical model row:
+// a group retry moved the request to another member, or the session-less
+// pick replaced the provisional identity. Unknown id / nil tracker is a
+// no-op.
+func (f *InFlight) SetModel(id int64, modelID int64, name string) {
+	if f == nil || id == 0 {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if s, ok := f.streams[id]; ok {
+		s.ModelID = modelID
+		s.Model = name
+	}
 }
 
 // BusySince returns, per model, the start times of streams still running

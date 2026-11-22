@@ -111,22 +111,22 @@ func (h *Handler) Embeddings(w http.ResponseWriter, r *http.Request) {
 	h.handle(w, r, EpEmbeddings, true)
 }
 
-// Models lists the enabled catalog under the OpenAI /v1/models shape.
+// Models lists the public catalog under the OpenAI /v1/models shape:
+// enabled groups plus enabled public models — internal members hidden,
+// name shadowing and dedupe resolved store-side (ListPublicCatalog).
 func (h *Handler) Models(w http.ResponseWriter, r *http.Request) {
 	if _, _, err := h.authKey(r); err != nil {
 		writeError(w, http.StatusUnauthorized, "invalid API key")
 		return
 	}
-	models, err := store.ListPublicModels(h.DB)
+	entries, err := store.ListPublicCatalog(h.DB)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	data := []map[string]string{}
-	for _, m := range models {
-		if m.Enabled {
-			data = append(data, map[string]string{"id": m.Name, "object": "model", "owned_by": "llm-relay"})
-		}
+	for _, e := range entries {
+		data = append(data, map[string]string{"id": e.Name, "object": "model", "owned_by": "llm-relay"})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
 }
@@ -159,15 +159,75 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request, endpoint string
 		return
 	}
 
-	model, backend, err := store.ModelByName(h.DB, peek.Model)
+	tgt, err := store.ResolveTarget(h.DB, peek.Model)
 	if err != nil {
-		writeError(w, http.StatusNotFound, fmt.Sprintf("model %q not found", peek.Model))
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, fmt.Sprintf("model %q not found", peek.Model))
+			return
+		}
+		// A DB failure is not a typo: a transient SQLITE_BUSY must not
+		// masquerade as "model not found" with no trace (ResolveTarget
+		// propagates query errors alongside the ErrNotFound sentinel).
+		log.Printf("resolve target %q: %v", peek.Model, err)
+		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	// The session key uses the REQUESTED name: for a group that is the group
+	// name, so affinity (and metering) stays stable across membership edits.
 	session := r.Header.Get("X-Session-Id")
 	if session == "" {
-		session = DeriveSession(endpoint, body, key.ID, model.Name)
+		session = DeriveSession(endpoint, body, key.ID, peek.Model)
 	}
+
+	// Group requests fan out over the group's members: hard exclusions
+	// dropped, then ranked by the session hash (least-loaded when there is
+	// no session); the ranked list feeds the pre-first-byte retry below.
+	// A plain model is a one-member list with today's exact behavior. Note
+	// that a group with no eligible members already fell through to the
+	// model path inside ResolveTarget — a group name legitimately lands
+	// here as TargetModel.
+	var candidates []store.GroupMember
+	streamID := int64(0)
+	streamFor := func(mem store.GroupMember) Stream {
+		return Stream{
+			UserID:    user.ID,
+			User:      user.Username,
+			Key:       key.Name,
+			ModelID:   mem.Model.ID,
+			Model:     mem.Model.Name,
+			Endpoint:  endpoint,
+			Session:   session,
+			IP:        h.clientIP(r),
+			Streaming: peek.Stream,
+		}
+	}
+	if tgt.Kind == store.TargetGroup {
+		eligible := h.eligibleMembers(r.Context(), tgt.Members)
+		if len(eligible) == 0 {
+			w.Header().Set("Retry-After", "60")
+			writeError(w, http.StatusServiceUnavailable,
+				fmt.Sprintf("group %q has no available member: every member is disabled, draining, or unhealthy", tgt.Group.Name))
+			return
+		}
+		// Enter BEFORE ranking: the session-less ranking reads the InFlight
+		// counts, and a burst of siblings must each see the others' streams
+		// or they all read identical counts and herd onto one member. The
+		// caller's own provisional entry is excluded from its own ranking
+		// (no phantom self-count). Provisional identity = first eligible
+		// member, corrected right after ranking (and again if a retry moves
+		// the request). The deferred Leave covers every exit path from here
+		// on; the 503 above stays before Enter so refused requests never
+		// enter.
+		streamID = h.Flight.Enter(streamFor(eligible[0]))
+		defer h.Flight.Leave(streamID)
+		candidates = rankMembers(eligible, session, h.Flight, streamID)
+		if candidates[0].ModelID != eligible[0].ModelID {
+			h.Flight.SetModel(streamID, candidates[0].Model.ID, candidates[0].Model.Name)
+		}
+	} else {
+		candidates = []store.GroupMember{{ModelID: tgt.Model.ID, Model: tgt.Model, Backend: tgt.Backend}}
+	}
+	model, backend := candidates[0].Model, candidates[0].Backend
 
 	// Drain gate: a draining backend refuses NEW sessions so the engine's
 	// server can be shut down gracefully, but sessions that are currently
@@ -189,46 +249,73 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request, endpoint string
 	}
 	h.Sessions.Mark(session)
 
-	// Counted in-flight from the drain gate until the handler returns: the
-	// stream is fully copied (or the body read) before this deferred Leave
-	// runs. The record carries who/what/where so the admin live view can
-	// list active connections; refused (drain) requests never enter it.
-	streamID := h.Flight.Enter(Stream{
-		UserID:    user.ID,
-		User:      user.Username,
-		Key:       key.Name,
-		Model:     model.Name,
-		Endpoint:  endpoint,
-		Session:   session,
-		IP:        h.clientIP(r),
-		Streaming: peek.Stream,
-	})
-	defer h.Flight.Leave(streamID)
-
-	fwdBody := rewriteBody(body, model.UpstreamModel, endpoint, peek.Stream)
-	url := strings.TrimRight(backend.BaseURL, "/") + r.URL.Path
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, url, bytes.NewReader(fwdBody))
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal error")
-		return
+	// Counted in-flight until the handler returns: the stream is fully
+	// copied (or the body read) before this deferred Leave runs. The record
+	// carries who/what/where so the admin live view can list active
+	// connections; refused (drain) requests never enter it. Group requests
+	// already entered above (before ranking, so siblings see this stream in
+	// the load counts); the model path enters here, after the drain gate.
+	if tgt.Kind != store.TargetGroup {
+		streamID = h.Flight.Enter(streamFor(candidates[0]))
+		defer h.Flight.Leave(streamID)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	if backend.APIKey != "" {
-		if endpoint == EpMessages {
-			req.Header.Set("x-api-key", backend.APIKey)
-		} else {
-			req.Header.Set("Authorization", "Bearer "+backend.APIKey)
+
+	// Forward. Group requests may retry the NEXT ranked member, but only
+	// pre-first-byte: Client.Do returns an error only when no response byte
+	// arrived, so a retry can never duplicate spent tokens (plan Decision 5).
+	// Request-build failures (an admin-edited BaseURL that no longer parses)
+	// fan out the same way: one broken member must not abort the rest or
+	// skip metering. A plain model has one candidate: today's single-shot
+	// behavior.
+	var resp *http.Response
+	for i, cand := range candidates {
+		if cerr := r.Context().Err(); cerr != nil {
+			// Client is gone: stop the walk WITHOUT metering — no upstream
+			// call completed and nothing was spent, so there is no cost to
+			// record (mid-stream disconnects are the ones that earn a row).
+			log.Printf("relay: client gone before upstream attempt: %v", cerr)
+			return
 		}
-	}
-
-	resp, err := h.Client.Do(req)
-	if err != nil {
+		fwdBody := rewriteBody(body, cand.Model.UpstreamModel, endpoint, peek.Stream)
+		url := strings.TrimRight(cand.Backend.BaseURL, "/") + r.URL.Path
+		var derr error
+		req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, url, bytes.NewReader(fwdBody))
+		if err != nil {
+			derr = err // build failure fans out like a dial failure
+		} else {
+			req.Header.Set("Content-Type", "application/json")
+			if cand.Backend.APIKey != "" {
+				if endpoint == EpMessages {
+					req.Header.Set("x-api-key", cand.Backend.APIKey)
+				} else {
+					req.Header.Set("Authorization", "Bearer "+cand.Backend.APIKey)
+				}
+			}
+			resp, derr = h.Client.Do(req)
+		}
+		if derr == nil {
+			if cand.Model.ID != model.ID {
+				// The request moved to another member: metering and the
+				// live in-flight entry follow it.
+				model = cand.Model
+				h.Flight.SetModel(streamID, model.ID, model.Name)
+			}
+			break
+		}
 		// Full error (dial targets, internals) goes to the server log only.
-		log.Printf("relay: upstream %s failed: %v", url, err)
-		h.record(record, start, user, key, r, endpoint, session, model, peek.Model,
-			pricing.Tokens{}, pricing.Costs{}, false, false, http.StatusBadGateway, "upstream request failed")
-		writeError(w, http.StatusBadGateway, "upstream unavailable")
-		return
+		log.Printf("relay: upstream %s failed: %v", url, derr)
+		if r.Context().Err() != nil {
+			// The failure was the client hanging up: same rule as the
+			// loop-top guard — no completed call, nothing spent, no row.
+			log.Printf("relay: client gone, abandoning group walk")
+			return
+		}
+		if i == len(candidates)-1 {
+			h.record(record, start, user, key, r, endpoint, session, model, peek.Model,
+				pricing.Tokens{}, pricing.Costs{}, false, false, http.StatusBadGateway, "upstream request failed")
+			writeError(w, http.StatusBadGateway, "upstream unavailable")
+			return
+		}
 	}
 	defer resp.Body.Close()
 
