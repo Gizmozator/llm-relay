@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"llm-relay/internal/api"
 	"llm-relay/internal/auth"
 	"llm-relay/internal/db"
+	"llm-relay/internal/fed"
 	"llm-relay/internal/store"
 )
 
@@ -83,6 +85,12 @@ func newTestEnv(t *testing.T, upstream http.Handler) *testEnv {
 	mux.Handle("GET /api/admin/federation", s.Admin(s.AdminGetFederation))
 	mux.Handle("PUT /api/admin/federation", s.Admin(s.AdminPutFederation))
 	mux.Handle("GET /federation/v1/ping", s.PeerAuth(s.FederationPing))
+	// Federation channel: the real Manager (production defaults) behind
+	// the same PeerAuth + role-gate wiring main.go uses.
+	fedMgr := fed.NewManager(d, &fed.Options{Log: log.New(io.Discard, "", 0)})
+	t.Cleanup(fedMgr.Close)
+	s.Fed = fedMgr
+	mux.Handle("GET /federation/v1/connect", s.PeerAuth(s.FederationConnect))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return &testEnv{db: d, srv: srv}

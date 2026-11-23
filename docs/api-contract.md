@@ -89,16 +89,16 @@ structural: `sk-` keys authenticate `/v1/*` only, `fed-` tokens the
 Self-service (JWT, any user — the **My Keys** surface):
 - `GET /api/peers` → `{"peers":[{"id":1,"name":"home-server","owner_user_id":2,"owner_name":"alice","enabled":true,"last_seen":"","version":"","created_at":"...","shared_models":3}]}` (own peers only)
 - `POST /api/peers` — `{"name"}` → `201 {"peer":{…},"token":"fed-…"}` — the raw token appears exactly here
-- `POST /api/peers/{id}/rotate` (own only, else `404`) → `{"token":"fed-…"}`; the old token dies immediately
-- `DELETE /api/peers/{id}` (own only, else `404`) → `204`
+- `POST /api/peers/{id}/rotate` (own only, else `404`) → `{"token":"fed-…"}`; the old token dies immediately, and so does any live federation channel riding it (close `1008 "rotated"`)
+- `DELETE /api/peers/{id}` (own only, else `404`) → `204`; a live channel is dropped too (`1008 "deleted"`)
 
 Admin (JWT, admin — the **Servers** page):
 - `GET /api/admin/peers` → all peers, same shape (owner name + `shared_models` = models visible to that peer: every `fed_visibility:"all"` model + its allowlist rows)
-- `POST /api/admin/peers/{id}/rotate` → `{"token":"fed-…"}` · `PATCH /api/admin/peers/{id}` — `{"enabled":true|false}` → peer object (disable is the incident lever) · `DELETE /api/admin/peers/{id}` → `204` — all `404` on unknown id
+- `POST /api/admin/peers/{id}/rotate` → `{"token":"fed-…"}` · `PATCH /api/admin/peers/{id}` — `{"enabled":true|false}` → peer object (disable is the incident lever: it drops the peer's live channel at once, `1008 "disabled"`) · `DELETE /api/admin/peers/{id}` → `204` (live channel dropped too) — all `404` on unknown id
 
 Federation settings (JWT, admin):
 - `GET /api/admin/federation` → `{"role":"standalone","hub_url":"","hub_token":""}` — `role` is `standalone` (default) | `hub` | `spoke`; `hub_token` is echoed back (it is the hub's token the admin pasted, not a secret this server minted). Spoke config is plaintext-at-rest like other DB secrets here; the spoke must present it verbatim.
-- `PUT /api/admin/federation` — full replacement `{"role","hub_url","hub_token"}` → same shape. `400` when the role is not one of the three, or a spoke lacks an http(s) `hub_url` or the `hub_token`. Leaving spoke mode clears `hub_url`/`hub_token`. Live-safe handling of the change (connect/drop) is task 2.
+- `PUT /api/admin/federation` — full replacement `{"role","hub_url","hub_token"}` → same shape. `400` when the role is not one of the three, or a spoke lacks an http(s) `hub_url` or the `hub_token`. Leaving spoke mode clears `hub_url`/`hub_token`. Live-safe: the spoke dialer starts/stops with the role, and moving away from `hub` closes every live channel (`1008 "role changed"`) — no restart needed.
 
 Per-model sharing switch (rides the model object everywhere the admin API
 returns models): `PATCH /api/admin/models/{id}` gains `fed_visibility`
@@ -110,12 +110,42 @@ switching to `"off"`/`"all"` clears it (those modes share with
 nobody/everybody). The model row surfaces both as `fed_visibility` +
 `fed_peer_ids`.
 
-Federation channel (relay port, `fed-` tokens): `GET /federation/v1/ping`
-— task-1 placeholder behind the server-token middleware: `200
-{"pong":true,"peer_id":1,"peer_name":"home-server"}` · `401` missing/
-unknown token · `403` peer disabled. **Pending (task 2):**
-`GET /federation/v1/connect` — the WebSocket channel proper; the ping stub
-is replaced by it.
+Federation channel (relay port, `fed-` tokens):
+
+- `GET /federation/v1/ping` — token-path probe behind the server-token
+  middleware: `200 {"pong":true,"peer_id":1,"peer_name":"home-server"}` ·
+  `401` missing/unknown token · `403` peer disabled.
+- `GET /federation/v1/connect` — the WebSocket channel (plan
+  2026-11-22-relay-federation, task 2). The upgrade request carries the
+  `fed-` token as `Authorization: Bearer` (same `401`/`403` taxonomy as
+  ping). **Role gate:** unless this instance is `hub`, the endpoint
+  answers `404` (standalone/spoke accept nothing). After the upgrade the
+  spoke must send `hello {proto:1,name,version}` within **5 s**, else the
+  socket closes `1008 "hello required"`; a foreign `proto` is refused
+  with close `1002 "proto mismatch"`. The hub answers
+  `hello_ack {proto:1,name,version}` and records the spoke's version.
+  A second connect with the same token **replaces** the live channel
+  (old socket closed `1008 "replaced"`).
+- Frame envelope: JSON text frames `{"t":<type>,"id"?,"...payload"}`,
+  read limit 4 MiB/frame. Types: `hello`, `hello_ack`, `ping`, `pong`
+  (implemented now) and `catalog`, `status`, `req`, `res`, `res_body`,
+  `res_end` (codec defined, handlers land with task 3; unknown types are
+  ignored for forward-compat). Binary payloads (`req.body`,
+  `res_body.data`) ride base64 inside the JSON.
+- Liveness (both sides): `ping` every **20 s**; the channel must show any
+  inbound frame within **10 s** of it or it closes (`1008 "pong
+  timeout"`). The hub refreshes the peer's `last_seen` at most once per
+  **30 s**. A spoke that drops reconnects with jittered exponential
+  backoff 1 s→60 s (reset after 60 s stable). Role changes via
+  `PUT /api/admin/federation` take effect live (no restart).
+- Revocation: disable/rotate/delete on the peer endpoints drop the live
+  channel immediately. Changes that do not pass those endpoints (e.g. the
+  owner disabled via the admin users API) are caught by the hub's
+  revalidation sweep — the **30 s** touch slot also re-checks the peer
+  row; gone, disabled or owner-disabled closes the channel
+  (`1008 "revoked"`), so revocation lands within ~30 s either way. A
+  spoke reconnects only with a valid token: after a rotate, the old
+  channel stays dead until the spoke's config carries the new token.
 
 
 Admin usage = same summary/detail endpoints under `/api/admin/usage/...` with extra optional `user_id`, `key_id` params; detail rows always include `username`.

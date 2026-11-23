@@ -21,6 +21,7 @@ import (
 	"llm-relay/internal/auth"
 	"llm-relay/internal/config"
 	"llm-relay/internal/db"
+	"llm-relay/internal/fed"
 	"llm-relay/internal/proxy"
 	"llm-relay/internal/store"
 	"llm-relay/internal/usage"
@@ -46,8 +47,16 @@ func main() {
 	rec := usage.NewRecorder(d)
 	rec.Start()
 
+	// Federation channel singleton (plan 2026-11-22-relay-federation):
+	// owns the hub registry + spoke dialer; Reload applies the stored
+	// role at startup and after every settings PUT.
+	fedMgr := fed.NewManager(d, nil)
+	fedMgr.Reload()
+	defer fedMgr.Close()
+
 	apiSrv := &api.Server{DB: d, JWTSecret: cfg.JWTSecret, JWTTTL: 12 * time.Hour,
 		RelayURL: cfg.PublicRelayURL, DashboardURL: cfg.PublicDashboardURL}
+	apiSrv.Fed = fedMgr
 	ph := proxy.New(d, rec, cfg.TrustProxyHeaders)
 	apiSrv.Flight = ph.Flight
 	ph.RelayURL = cfg.PublicRelayURL
@@ -73,9 +82,11 @@ func main() {
 	// Federation channel (plan 2026-11-22-relay-federation): server-token
 	// (fed-) endpoints, machine-to-machine, on the public port beside the
 	// sk-key surface — the spoke admin points hub_url at the hub's relay
-	// URL. Task 1 ships only the auth-guarded ping stub; task 2 replaces it
-	// with the WS channel. Role gating (hub-only) is task 2's job.
+	// URL. connect is the WS channel (task 2): PeerAuth verifies the
+	// token on the upgrade request, the Manager role-gates (404 unless
+	// hub) and runs the handshake. ping stays as the token-path probe.
 	relayMux.Handle("GET /federation/v1/ping", apiSrv.PeerAuth(apiSrv.FederationPing))
+	relayMux.Handle("GET /federation/v1/connect", apiSrv.PeerAuth(apiSrv.FederationConnect))
 	relayMux.HandleFunc("POST /mcp", ph.MCP)
 
 	// Dashboard port: JWT API + embedded SPA. This is the port to put

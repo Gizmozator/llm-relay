@@ -42,9 +42,44 @@ func (s *Server) PeerAuth(next func(w http.ResponseWriter, r *http.Request, p *s
 	}
 }
 
-// FederationPing is the task-1 placeholder behind PeerAuth: it proves the
-// token path end to end (and gives spokes a liveness probe) until task 2
-// replaces the /federation/* surface with the WS channel.
+// FedController is the federation channel's control surface (implemented
+// by *fed.Manager). The API layer talks to it through this interface only,
+// so it stays free of the channel machinery.
+type FedController interface {
+	// Reload re-reads the federation settings and reconciles the spoke
+	// dialer (start/stop); called after every successful settings PUT.
+	Reload()
+	// ServeHub handles an authenticated connect request (role gate +
+	// WS handshake + registry).
+	ServeHub(w http.ResponseWriter, r *http.Request, p *store.Peer)
+	// KickPeer drops a peer's live channel now (disable/rotate/delete
+	// must not wait for the hub's revocation sweep).
+	KickPeer(peerID int64, reason string)
+}
+
+// kickPeer drops the peer's live federation channel if one exists
+// (nil-safe when the federation manager is not wired).
+func (s *Server) kickPeer(id int64, reason string) {
+	if s.Fed != nil {
+		s.Fed.KickPeer(id, reason)
+	}
+}
+
+// FederationConnect serves GET /federation/v1/connect (relay port) behind
+// PeerAuth: the fed- token is already verified here; the Manager applies
+// the role gate (404 unless role=hub) and runs the WS upgrade + hello
+// handshake (task 2).
+func (s *Server) FederationConnect(w http.ResponseWriter, r *http.Request, p *store.Peer) {
+	if s.Fed == nil {
+		writeErr(w, http.StatusNotFound, "not found")
+		return
+	}
+	s.Fed.ServeHub(w, r, p)
+}
+
+// FederationPing is the task-1 token-path probe, kept alongside the WS
+// channel: a cheap way to verify a fed- token works without opening a
+// channel (the connect endpoint cannot answer a plain GET).
 func (s *Server) FederationPing(w http.ResponseWriter, r *http.Request, p *store.Peer) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"pong": true, "peer_id": p.ID, "peer_name": p.Name,
@@ -129,6 +164,9 @@ func (s *Server) RotateMyPeer(w http.ResponseWriter, r *http.Request, c *auth.Cl
 		writeErr(w, http.StatusInternalServerError, "peer rotate failed")
 		return
 	}
+	// The old token is dead: the live channel rides it, so it dies too.
+	// A spoke reconnects with the new token once its config is updated.
+	s.kickPeer(id, "rotated")
 	writeJSON(w, http.StatusOK, map[string]any{"token": plain})
 }
 
@@ -151,6 +189,7 @@ func (s *Server) DeleteMyPeer(w http.ResponseWriter, r *http.Request, c *auth.Cl
 		writeErr(w, http.StatusInternalServerError, "peer delete failed")
 		return
 	}
+	s.kickPeer(id, "deleted")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -184,11 +223,13 @@ func (s *Server) AdminRotatePeer(w http.ResponseWriter, r *http.Request, c *auth
 		writeErr(w, http.StatusInternalServerError, "peer rotate failed")
 		return
 	}
+	s.kickPeer(id, "rotated")
 	writeJSON(w, http.StatusOK, map[string]any{"token": plain})
 }
 
 // AdminUpdatePeer serves PATCH /api/admin/peers/{id} {enabled}: disable is
-// the incident lever — task 2 drops the live channel on it.
+// the incident lever — it drops the peer's live federation channel at
+// once (kick), not at the next revocation sweep.
 func (s *Server) AdminUpdatePeer(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
 	id, err := pathID(r)
 	if err != nil {
@@ -210,6 +251,9 @@ func (s *Server) AdminUpdatePeer(w http.ResponseWriter, r *http.Request, c *auth
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "peer update failed")
 		return
+	}
+	if !*in.Enabled {
+		s.kickPeer(id, "disabled")
 	}
 	p, err := store.PeerByID(s.DB, id)
 	if err != nil {
@@ -235,6 +279,7 @@ func (s *Server) AdminDeletePeer(w http.ResponseWriter, r *http.Request, c *auth
 		writeErr(w, http.StatusInternalServerError, "peer delete failed")
 		return
 	}
+	s.kickPeer(id, "deleted")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -270,6 +315,13 @@ func (s *Server) AdminPutFederation(w http.ResponseWriter, r *http.Request, c *a
 		}
 		writeErr(w, http.StatusInternalServerError, "federation settings update failed")
 		return
+	}
+	// Live-safe role change: the Manager reconciles the spoke dialer
+	// with the stored config (spoke→standalone drops the channel,
+	// standalone→spoke starts it; hub acceptance is role-checked per
+	// request, so nothing else needs to happen).
+	if s.Fed != nil {
+		s.Fed.Reload()
 	}
 	f, err := store.GetFederationSettings(s.DB)
 	if err != nil {

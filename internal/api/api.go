@@ -25,6 +25,8 @@ type Server struct {
 	DashboardURL string
 	// Flight sees the proxy's in-flight request counts (nil = no live data).
 	Flight FlightSource
+	// Fed drives the federation channel (nil = federation endpoints 404).
+	Fed FedController
 
 	loginLimit *loginLimiter
 	limitOnce  sync.Once

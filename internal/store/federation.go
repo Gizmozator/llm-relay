@@ -283,6 +283,25 @@ func DeletePeer(db *sql.DB, id int64) error {
 	return nil
 }
 
+// PeerAuthState reports the live revocation facts for a peer id: whether
+// the row exists, is enabled, and whether its owner is disabled. The hub
+// sweep (plan 2026-11-22-relay-federation task 2 review) runs it on the
+// Touch throttle so revocations that did not pass through the peer
+// endpoints — e.g. a user disabled via the admin users API — still drop
+// the live channel within one sweep interval.
+func PeerAuthState(db *sql.DB, peerID int64) (exists, enabled, ownerDisabled bool, err error) {
+	var en, dis int
+	err = db.QueryRow(`SELECT p.enabled, u.disabled FROM peers p
+		JOIN users u ON u.id=p.owner_user_id WHERE p.id=?`, peerID).Scan(&en, &dis)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, false, false, nil
+	}
+	if err != nil {
+		return false, false, false, err
+	}
+	return true, en != 0, dis != 0, nil
+}
+
 // TouchPeer records liveness bookkeeping (WS channel, task 2).
 func TouchPeer(db *sql.DB, id int64, lastSeen, version string) error {
 	res, err := db.Exec(`UPDATE peers SET last_seen=?, version=? WHERE id=?`, lastSeen, version, id)
