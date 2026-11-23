@@ -45,6 +45,36 @@ on that backend (`503` + `Retry-After`), while conversations that are
 currently running (active within 15 min) finish their remaining turns.
 Agent endpoints report it as `status: "draining"`.
 
+## Model groups
+
+A **model group** is one public name (e.g. `qwen3-coder`) backed by several
+model rows on different machines: users request the group name, the relay
+picks a member per request. Admins manage groups on the **Models** page
+(**Groups** panel): create a group, add members with weights, enable it.
+Groups are born **disabled**, and a memberless group cannot be enabled. A
+blank member weight seeds from that machine's last benchmark speed, so faster
+machines take proportionally more sessions.
+
+**Routing** is a weighted rendezvous hash of the session id: one conversation
+is pinned to one member so each engine's prompt cache stays warm. Send a
+stable `X-Session-Id` header to keep that affinity; different sessions spread
+across members roughly proportional to their weights. Only *hard exclusions*
+reroute — a disabled, draining, or unhealthy member is skipped. A **saturated
+member does not reroute**: queueing at the engine beats cold caches for
+everyone. If a member dies before its first byte, the request retries on the
+next-ranked member; a stream that already started is never retried.
+
+**Visibility**: adding a model to a group makes it `internal` — hidden from
+`/v1/models` and the dashboard; the group name is what users request. Members
+stay directly requestable by name (pin/debug), and an admin can re-expose one.
+Users see a group badge on the **Models** page, one pooled row per group on
+the live dashboard, and usage billed under the requested group name.
+
+The agent endpoints (`GET /v1/utilization`, MCP `check_utilization`) mirror
+this split: non-admin keys get the advertised catalog — group rows (negative
+`id`) plus public standalones; admin keys get the physical per-machine rows
+(`docs/api-contract.md`).
+
 ## Supported upstream dialects
 
 | Route | Dialect | Metered |

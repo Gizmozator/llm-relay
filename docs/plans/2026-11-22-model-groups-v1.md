@@ -81,23 +81,23 @@ are visible in the dashboard.
 
 | # | task | blocked by | done |
 |---|---|---|---|
-| 1 | migration 0010 + store CRUD + resolution + unit tests | — | ☐ |
-| 2 | proxy HRW pick + exclusions + retry + tests | 1 | ☐ |
-| 3 | admin API (groups CRUD, visibility) + tests | 1 | ☐ |
-| 4 | web UI (groups editor, visibility, usage aggregation) | 3 | ☐ |
-| 5 | docs + plan update + live smoke | 2,4 | ☐ |
+| 1 | migration 0010 + store CRUD + resolution + unit tests | — | ☑ |
+| 2 | proxy HRW pick + exclusions + retry + tests | 1 | ☑ |
+| 3 | admin API (groups CRUD, visibility) + tests | 1 | ☑ |
+| 4 | web UI (groups editor, visibility, usage aggregation) | 3 | ☑ |
+| 5 | docs + plan update + live smoke | 2,4 | ☑ |
 
 ## Verification
 
-- [ ] `make ci` green at every commit
-- [ ] unit: two backends, same model name, import without collision; group
+- [x] `make ci` green at every commit
+- [x] unit: two backends, same model name, import without collision; group
       routes across both; same session → same member across N requests;
       different sessions spread ~proportional to weights
-- [ ] unit: draining/unhealthy/disabled member skipped; all-draining → 503
-- [ ] unit: `/v1/models` shows group, hides internal members; member name still
+- [x] unit: draining/unhealthy/disabled member skipped; all-draining → 503
+- [x] unit: `/v1/models` shows group, hides internal members; member name still
       resolves directly
-- [ ] unit: usage row has member `model_id` + group `model_requested`
-- [ ] live smoke: binary + two mock engines (httptest or `nc`), curl with
+- [x] unit: usage row has member `model_id` + group `model_requested`
+- [x] live smoke: binary + two mock engines (httptest or `nc`), curl with
       `X-Session-Id`, verify affinity + dashboard rows
 
 ## Decisions
@@ -159,3 +159,15 @@ are visible in the dashboard.
   detail rows now also surface `model_upstream`. Live page pool-aggregation
   decision recorded under Open questions (name-keyed pool views, id-keyed
   member rows, summed util limits).
+- 2026-11-23 — tasks 1–5 shipped on `feature/model-groups`: 2ff9a17 (schema +
+  store), 3c136d2 (proxy routing), 618ef49 (admin API), d7a10e0 (web UI +
+  utilization advertised catalog) + task 5 (docs + live smoke; transcript
+  `~/.cache/llm-relay/task5-smoke.log`). Shipped beyond plan: the
+  `/v1/utilization` + MCP `check_utilization` row list splits by key role —
+  non-admin keys get the **advertised catalog** (synthetic group rows with
+  negative ids, member busy folded into the pool, deduped public rows),
+  admin keys get the physical rows; the dashboard live view synthesizes one
+  pool row per enabled group (member series folded in, per-row counts keyed
+  by physical id); the review protocol gained an **OCR gate** section (one
+  `ocr` pass per diff after reviewer APPROVE, no per-task re-runs; whole-repo
+  scan once per epic).
