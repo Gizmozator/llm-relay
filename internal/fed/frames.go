@@ -140,14 +140,20 @@ type Status struct {
 // origin, and the hub's sharing gate checks against the derived origin.
 // Body is capped at MaxBody raw bytes.
 type Req struct {
-	T          string  `json:"t"`
-	ID         string  `json:"id"`
-	TargetPeer int64   `json:"target,omitempty"`
-	OriginPeer int64   `json:"origin,omitempty"`
-	Method     string  `json:"method"`
-	Path       string  `json:"path"`
-	Headers    Headers `json:"headers,omitempty"`
-	Body       []byte  `json:"body,omitempty"` // base64 on the wire
+	T          string `json:"t"`
+	ID         string `json:"id"`
+	TargetPeer int64  `json:"target,omitempty"`
+	OriginPeer int64  `json:"origin,omitempty"`
+	// FedUser is the hub-stamped hub-side identity on whose behalf the
+	// request rides: a hub-direct user's name, or the origin peer's owner
+	// name for spoke-originated traffic (the hub holds that identity; a
+	// spoke sends nothing — spoke-local usernames never leave the spoke).
+	// A serving spoke records it on its served usage row.
+	FedUser string  `json:"fed_user,omitempty"`
+	Method  string  `json:"method"`
+	Path    string  `json:"path"`
+	Headers Headers `json:"headers,omitempty"`
+	Body    []byte  `json:"body,omitempty"` // base64 on the wire
 }
 
 // Res is the response head of a tunneled request (task 3).

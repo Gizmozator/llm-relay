@@ -184,9 +184,10 @@ func PurgeSynthetic(db *sql.DB) error {
 	mods := `SELECT id FROM models WHERE backend_id IN
 		(SELECT id FROM backends WHERE ` + syntheticWhere + `)`
 	// Clear memberships of the doomed rows in ANY group (not just
-	// federated ones): a materialized model an admin group had adopted
-	// (possible before UpdateGroup grew the synthetic-member guard) would
-	// otherwise FK-block the model sweep below.
+	// federated ones): admin groups may adopt materialized models by
+	// design (a federated group is a group whose members live on other
+	// relays), so this sweep must run before the model delete or the FK
+	// blocks it.
 	if _, err := tx.Exec(`DELETE FROM model_group_members WHERE model_id IN (` + mods + `)`); err != nil {
 		return err
 	}
@@ -332,12 +333,6 @@ type FedGroupMember struct {
 	FedVisibility string
 }
 
-// ErrSyntheticMember rejects putting a materialized (federation-owned)
-// model into an admin group: the materializer prunes and re-creates those
-// rows without regard for the group, so such a membership can never be
-// stable.
-var ErrSyntheticMember = errors.New("federated model cannot join an admin group")
-
 // ResolveFedMember maps a group member name to a model row id: local
 // (non-synthetic) rows win over materialized ones (the spoke's local-first
 // rule — a spoke with its own copy of a model serves it itself), public
@@ -345,7 +340,11 @@ var ErrSyntheticMember = errors.New("federated model cannot join an admin group"
 // (one group per model) EXCEPT membership in the federated group named
 // groupName: re-applying that group's own frame must still resolve its
 // current members, or the second hub frame would degrade the group to
-// nothing. ok=false only when no row can serve the name; a non-nil err is
+// nothing. A synthetic row an ADMIN group has adopted is skipped here too
+// — the admin claim wins: federated-group materialization passes over that
+// name (correct precedence, and UpsertFedModel never touches visibility,
+// so the group's internal flip survives re-pushes). ok=false only when no
+// row can serve the name; a non-nil err is
 // a real DB failure the caller must NOT treat as "not resolvable" (a
 // transient SQLITE_BUSY must not permanently drop a member).
 func ResolveFedMember(db *sql.DB, name, groupName string) (int64, bool, error) {

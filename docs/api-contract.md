@@ -70,7 +70,7 @@ A group pools several catalog model rows (typically the same model on different 
 - `GET /api/admin/groups` → `{"groups":[{"id":1,"name":"qwen3-coder","enabled":true,"member_count":2,"members":[{"model_id":3,"weight":41.2,"position":0,"model_name":"qwen3-coder-a","backend_name":"gpu1","upstream_model":"qwen3-coder","visibility":"internal","model_enabled":true,"backend_enabled":true,"backend_draining":false}]}]}`
 - `POST /api/admin/groups` — `{"name"}` → `201` group object (empty `members`). New groups are born **disabled**; enabling requires ≥1 member. `400` blank/invalid name · `409` name taken.
 - `GET /api/admin/groups/{id}` → group object (same shape as list entries) · `404` unknown id
-- `PATCH /api/admin/groups/{id}` — partial merge of any of `{"name","enabled","members"}` → group object. `members` is a **full replacement** list of `{"model_id","weight","position"}` (≤256 entries, else `400`): `weight` 0/omitted seeds from the model's `bench_tok_per_s` (relative share of new sessions); `position` is the member order. `409` when the name would shadow a public model or another group, when a model already belongs to a different group, when the same model is listed twice in `members`, or when enabling a group with no members; `400` when a member is a federated (materialized) model — those rows belong to the federation materializer and cannot join an admin group.
+- `PATCH /api/admin/groups/{id}` — partial merge of any of `{"name","enabled","members"}` → group object. `members` is a **full replacement** list of `{"model_id","weight","position"}` (≤256 entries, else `400`): `weight` 0/omitted seeds from the model's `bench_tok_per_s` (relative share of new sessions); `position` is the member order. `409` when the name would shadow a public model or another group, when a model already belongs to a different group, when the same model is listed twice in `members`, or when enabling a group with no members. A member MAY be a federated (materialized, `peer://`) model — a federated group is exactly a group whose members live on other relays. Such a member is disabled (not removed) while its peer is offline, so the group keeps serving from its remaining members; when the peer stops advertising the model the materializer clears the membership before deleting the row, leaving the group intact.
 - `DELETE /api/admin/groups/{id}` → `204` (members are released, not deleted)
 
 ### Admin — settings
@@ -99,6 +99,34 @@ Admin (JWT, admin — the **Servers** page):
 Federation settings (JWT, admin):
 - `GET /api/admin/federation` → `{"role":"standalone","hub_url":"","hub_token":""}` — `role` is `standalone` (default) | `hub` | `spoke`; `hub_token` is echoed back (it is the hub's token the admin pasted, not a secret this server minted). Spoke config is plaintext-at-rest like other DB secrets here; the spoke must present it verbatim.
 - `PUT /api/admin/federation` — full replacement `{"role","hub_url","hub_token"}` → same shape. `400` when the role is not one of the three, or a spoke lacks an http(s) `hub_url` or the `hub_token`. Leaving spoke mode clears `hub_url`/`hub_token`. Live-safe: the spoke dialer starts/stops with the role, and moving away from `hub` closes every live channel (`1008 "role changed"`) — no restart needed.
+
+Federation stats (plan task 4; `?days=N`, default 30, `1..365` else `400`;
+the window is the last N days, `since` echoed in the response):
+
+- `GET /api/admin/federation/stats` (JWT, admin) — the federation ledger,
+  **role-dependent** payload:
+  - hub (the fairness ledger — every cross-peer flow wrote a `consumed`
+    row on the spender's account and a `served` row on the server's):
+    `{"role":"hub","since":"…","users":[{"user_id":4,"user":"alice",
+    "served":{…},"consumed":{…}}],"peers":[{"peer_id":3,"peer":"home-server",
+    "served":{…},"consumed":{…}}]}` — user entries are keyed by `user_id`
+    (deleted users share the `"(deleted user)"` label but stay distinct
+    entries); a peer's `served` sums the rows naming it as host, its
+    `consumed` is owner-level (every consumed row of the peer's owner —
+    an owner with several peers carries the same total under each).
+  - spoke: `{"role":"spoke","since":"…","served_by_source":[{"fed_user":
+    "hub-alice","counts":{…}}],"consumed":[{"user_id":4,"user":"alice",
+    "counts":{…}}]}` — what this box served to which hub-stamped
+    identity, and what local users spent on federated
+    (synthetic-backend) models.
+  - standalone: `{"role":"standalone"}`.
+  - Every `{…}` counts bucket is `{"requests","prompt_tokens",
+    "completion_tokens","cached_tokens","cache_write_tokens","cost_micro"}`.
+- `GET /api/federation/stats` (JWT, any user) — the caller's own totals,
+  always scoped to the caller (admins included): hub → `{"role":"hub",
+  "since":…,"totals":[one FedUserTotal]}`; spoke → `{"role":"spoke",
+  "since":…,"consumed":[caller's slice]}` (served rows belong to the box,
+  not to a session user); standalone → `{"role":"standalone"}`.
 
 Per-model sharing switch (rides the model object everywhere the admin API
 returns models): `PATCH /api/admin/models/{id}` gains `fed_visibility`
@@ -206,14 +234,19 @@ a role transition just purged.
 
 #### Request tunnel
 
-- `req {id,target?,origin?,method,path,headers,body}` — one tunneled
-  request; `target:0` (or absent) means "serve here", `target=<peer-id>`
-  means "transit to that spoke" (spoke→spoke via the hub; never routes a
-  frame back to its origin — loop guard). `origin` is **receiver-derived,
-  never sender-trusted**: each relay labels a request with the peer id of
-  the channel it arrived on (a spoke always arrives as `0` to its hub;
-  the hub stamps the requesting peer on transit), so a spoke cannot claim
-  another peer's id to inherit its sharing rights.
+- `req {id,target?,origin?,fed_user?,method,path,headers,body}` — one
+  tunneled request; `target:0` (or absent) means "serve here",
+  `target=<peer-id>` means "transit to that spoke" (spoke→spoke via the
+  hub; never routes a frame back to its origin — loop guard). `origin` is
+  **receiver-derived, never sender-trusted**: each relay labels a request
+  with the peer id of the channel it arrived on (a spoke always arrives as
+  `0` to its hub; the hub stamps the requesting peer on transit), so a
+  spoke cannot claim another peer's id to inherit its sharing rights.
+  `fed_user` is the **hub-stamped hub-side identity** on whose behalf the
+  request rides: a hub-direct consumer's own username, or the origin
+  peer's owner name on transit — a spoke sends nothing (spoke-local
+  usernames never leave the spoke), and a serving spoke records it on its
+  served usage row.
   `res {id,status,headers}` / `res_body {id,data}`
   / `res_end {id,error?}` stream the answer; `cancel {id}` aborts it.
   Bodies are capped at **3 MiB − 4 KiB** raw per frame (base64 stays
@@ -227,18 +260,69 @@ a role transition just purged.
   crosses the tunnel), and the model name on the wire stays the *catalog
   name* — the serving relay applies its own upstream mapping locally.
 - Serving side: the hub serves a spoke's request as the peer's **owner
-  user** with a synthetic `federation` key (`api_key_id=0`; attribution
-  columns land with task 4) and enforces the sharing rules — a model not
-  shared with the requesting peer answers `403 {"error":{"message":"model
-  \"x\" is not shared with this peer"}}`, and group members invisible to
-  the peer are dropped before ranking. A spoke serving the hub uses local
-  engines only (never re-forwards), applies its own stored backend keys,
-  and records no usage rows (task 3 scope) — and it enforces **its own**
-  sharing rules on the hub's requests too: a model with
-  `fed_visibility='off'` (or `allowlist` — a spoke shares nobody by name)
-  answers the same `403`, so a compromised hub cannot name a private
-  spoke model into serving. Only `/v1/*` paths are
+  user** with a synthetic `federation` key (`api_key_id=0`; the row is
+  stamped `consumed`, see Metering below) and enforces the sharing rules —
+  a model not shared with the requesting peer answers `403 {"error":
+  {"message":"model \"x\" is not shared with this peer"}}`, and group
+  members invisible to the peer are dropped before ranking. A spoke serving
+  the hub uses local engines only (never re-forwards), applies its own
+  stored backend keys, meters the request as a `served` row (see Metering
+  below), and enforces **its own** sharing rules on the hub's requests
+  too: a model with `fed_visibility='off'` (or `allowlist` — a spoke shares
+  nobody by name) answers the same `403`, so a compromised hub cannot name
+  a private spoke model into serving. Only `/v1/*` paths are
   served over the tunnel.
+
+#### Metering and attribution (task 4)
+
+`usage_log` carries three federation columns (migration 0013):
+`fed_direction` (`''` = plain local traffic | `served` = this relay's
+capacity went to a peer | `consumed` = this relay's account used a peer's
+capacity), `fed_peer_id` (**always the hosting peer** — the peer whose
+hardware served — `NULL` when hub hardware served or the row sits on a
+spoke with no local peer row), and `fed_user` (the hub-stamped hub-side
+identity a serving spoke sees — spoke-local usernames never travel). The
+hub's ledger is **fully double-entry**: every hub row whose resolved
+upstream member lives on a synthetic `peer://` backend is mirrored by a
+`served` row crediting that backend's owner user with the same token/cost
+counts and the same model row (synthetic federation key, `api_key_id=0`).
+Uniform rule: a `served` row credits the host (`fed_peer_id` = host); a
+`consumed` row identifies the consumer by its `user_id` and names the
+host it spent on (`NULL` when hub hardware served). Who stamps what, per
+flow:
+
+- **hub user → spoke-hosted model** (direct or via a group): the
+  client's ordinary row gains `consumed` + `fed_peer_id` = the hosting
+  peer (the resolved member decides — a group that fell over onto a local
+  member stays plain), and the hub mirrors a `served` row for the
+  hosting peer's owner (`fed_peer_id` = the same host, `fed_user` = the
+  consuming hub username); the spoke also records its own `served` row
+  (federation identity, `fed_user` = the hub client's username).
+- **spoke user → hub-local model**: the spoke meters its own user as plain
+  local traffic (the consumed slice is identified by the `hub://` backend
+  scheme, not by fed columns — no double-stamp); the hub writes `consumed`
+  only, on the peer's owner, `fed_peer_id` NULL (hub hardware served — no
+  peer to credit).
+- **spoke A → hub serving a model hosted on spoke B**: the hub's row is
+  `consumed` on A's owner with `fed_peer_id` = the **hosting** peer B,
+  plus the mirrored `served` row (B's owner, `fed_peer_id` = B,
+  `fed_user` = A's owner name); A meters its local user plainly and B
+  writes its own `served` row with the hub-stamped `fed_user`.
+- **spoke A → spoke B (transit)**: A meters its local user plainly (the
+  `peer://` row); the hub pumps the frames outside the pipeline and
+  writes the same pair manually — `consumed` on A's owner
+  (`fed_peer_id` = B) and `served` on B's owner (`fed_peer_id` = B,
+  `fed_user` = A's owner name), counts parsed from the response frames;
+  transit never enters the pipeline's metering path, so the two cannot
+  double-write. B also writes its own `served` row with the hub-stamped
+  `fed_user`.
+- **plain local traffic** keeps `fed_direction=''` — untouched rows.
+
+Costs on hub-side federation rows are computed from the model's own
+pricing (transit rows without a user multiplier — the ledger compares
+capacity, not billed money). The aggregation queries live in
+`internal/store/fedstats.go`; the HTTP shape is under “Federation stats”
+above.
 
 
 Admin usage = same summary/detail endpoints under `/api/admin/usage/...` with extra optional `user_id`, `key_id` params; detail rows always include `username`.

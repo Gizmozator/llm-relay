@@ -97,7 +97,7 @@ Usage tracking is fairness bookkeeping (served vs consumed per user), not billin
 | 1 | settings + peers store/migrations + token auth + admin/self-service API | #1 done | ☐ |
 | 2 | WS channel + protocol + liveness + version negotiation (hub+spoke) | 1 | ☐ |
 | 3 | catalog sync + materialization + RoundTripper tunnel + loop guard | 2 | ☐ |
-| 4 | metering/attribution + served-vs-consumed aggregation | 3 | ☐ |
+| 4 | metering/attribution + served-vs-consumed aggregation | 3 | ☑ |
 | 5 | UI: Federation control, Servers, My Keys, setup guide, spoke panel | 3,4 | ☐ |
 | 6 | e2e (two local instances + mock engine) + docs + plan update | 5 | ☐ |
 
@@ -134,3 +134,7 @@ Usage tracking is fairness bookkeeping (served vs consumed per user), not billin
 ## Changelog
 
 - 2026-11-22 — plan created from Gitea #2 design.
+- 2026-11-23 — task 4 ocr triage: `FedUserTotals`/`FedConsumedSlice` now key by `user_id` (deleted users shared the `(deleted user)` label and collapsed, overwriting buckets) and emit `user_id` in the payloads; `fed_peer_id` adopts a UNIFORM convention — always the HOSTING peer, NULL when hub hardware served: spoke→hub-local consumed rows stamp NULL (was origin), mirror and transit served rows stamp the host (was origin), and `FedPeerTotals` redefines consumed as owner-level (every consumed row of the peer's owner; multi-peer owners carry the same total under each peer).
+- 2026-11-23 — task 4 correction (C6 reversal): the task-3 guard rejecting synthetic members in admin groups (`assertNoSyntheticMembers`/`ErrSyntheticMember` → 400) contradicted the materialization design — a federated group IS a group whose members live on other relays — and is removed; admin groups accept `peer://` members. The FK hazard was already owned by the materializer (`DeleteFedModelsNotIn`/`PurgeSynthetic` clear memberships before deleting rows); a peer disconnect only disables the backend, so the group serves on from its remaining members. The spoke→synthetic-member double-entry now runs through a real admin group in the tests.
+- 2026-11-23 — task 4 follow-up ruling: full double-entry on the hub — every hub row whose resolved member lives on a synthetic `peer://` backend (not just transit) mirrors a `served` row crediting the backend's owner (same counts, synthetic key); the consumed row's `fed_peer_id` names the hosting peer (fix for spoke→synthetic-member serves), the mirror's names the origin peer (NULL for hub-direct consumers). Written in the normal metering path (`proxy.fedOf`/`record`); transit keeps its manual pair (different code path, cannot double-write).
+- 2026-11-23 — task 4 shipped: `usage_log` gains `fed_direction`/`fed_peer_id`/`fed_user` (migration 0013); hub stamps `consumed` on direct→synthetic and spoke→hub-local rows and writes the transit double-entry pair (counts parsed from the pumped frames); spokes meter `served` rows with the hub-stamped `fed_user` (the `req` frame gained the field; the hub is the only stamper). `internal/store/fedstats.go` adds the four rollups; `GET /api/admin/federation/stats` + `GET /api/federation/stats` serve them (role-dependent payload). Spoke-local consumption of federated models stays unstamped — the synthetic-backend scheme identifies that slice.

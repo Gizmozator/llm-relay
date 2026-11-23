@@ -34,6 +34,14 @@ type UsageEvent struct {
 	Status        int
 	LatencyMS     int64
 	Error         string
+	// Federation attribution (migration 0013): "" = plain local traffic;
+	// "served"/"consumed" from this relay's point of view. FedPeerID is the
+	// counterparty peer (nil = none: a spoke's served row has no local peer
+	// row for the hub). FedUser is the hub-stamped hub-side identity name a
+	// serving spoke records (spoke-local usernames never leave the spoke).
+	FedDirection string
+	FedPeerID    *int64
+	FedUser      string
 }
 
 func InsertUsage(db *sql.DB, e *UsageEvent) error {
@@ -41,13 +49,15 @@ func InsertUsage(db *sql.DB, e *UsageEvent) error {
 			model_id, model_requested, model_upstream,
 			prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens,
 			cost_in, cost_out, cost_cache, cost_write, cost_total,
-			streamed, usage_estimated, status_code, latency_ms, error)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			streamed, usage_estimated, status_code, latency_ms, error,
+			fed_direction, fed_peer_id, fed_user)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		e.TS, e.UserID, e.KeyID, e.ClientIP, nullable(e.SessionID), e.Endpoint,
 		e.ModelID, e.ModelRequ, e.ModelUpstream,
 		e.Prompt, e.Completion, e.Cached, e.CacheWrite,
 		e.CostIn, e.CostOut, e.CostCache, e.CostWrite, e.CostTotal,
-		b2i(e.Streamed), b2i(e.Estimated), e.Status, e.LatencyMS, nullable(e.Error))
+		b2i(e.Streamed), b2i(e.Estimated), e.Status, e.LatencyMS, nullable(e.Error),
+		e.FedDirection, e.FedPeerID, e.FedUser)
 	return err
 }
 

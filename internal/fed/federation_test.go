@@ -166,10 +166,18 @@ func (r *relay) becomeHub() {
 	r.mgr.Reload()
 }
 
-// enroll creates a peer (server token) on the hub.
+// enroll creates a peer (server token) on the hub, owned by the relay's
+// own user.
 func (r *relay) enroll(name string) (*store.Peer, string) {
 	r.t.Helper()
-	p, tok, err := store.CreatePeer(r.db, name, r.uid)
+	return r.enrollAs(name, r.uid)
+}
+
+// enrollAs creates a peer owned by a specific user (tests credit distinct
+// owners to different spokes).
+func (r *relay) enrollAs(name string, owner int64) (*store.Peer, string) {
+	r.t.Helper()
+	p, tok, err := store.CreatePeer(r.db, name, owner)
 	if err != nil {
 		r.t.Fatal(err)
 	}
@@ -410,8 +418,9 @@ func pollLog(t *testing.T, relays ...*relay) func(string, func() bool) {
 // ------------------------------------------------------------ tests
 
 // Advertise → materialize → visible in /v1/models → served through the
-// tunnel end-to-end, metered on the hub against the peer's owner, not at
-// all on the spoke (task 3 scope).
+// tunnel end-to-end, metered double-entry: the hub meters its own client
+// (consumed, counterparty = the hosting peer) and the spoke records what
+// it served (served, fed_user = the hub-stamped consumer name).
 func TestAdvertiseMaterializeServe(t *testing.T) {
 	hub, spoke, peer := federationUp(t)
 
@@ -425,17 +434,39 @@ func TestAdvertiseMaterializeServe(t *testing.T) {
 		t.Fatalf("tunneled chat = %d %s", resp.StatusCode, body)
 	}
 
-	poll(t, "hub usage row", func() bool {
-		return countRows(hub.db, `SELECT COUNT(*) FROM usage_log WHERE model_requested='alpha'`) == 1
+	poll(t, "hub usage pair", func() bool {
+		return countRows(hub.db, `SELECT COUNT(*) FROM usage_log WHERE model_requested='alpha'`) == 2
 	})
-	// The hub meters its OWN client normally (the client's key); the
+	// The hub meters its OWN client normally (the client's key) and stamps
+	// the row consumed: the hub's account spent the peer's capacity. The
 	// synthetic federation key appears when a SPOKE asks the hub (see
-	// TestNotSharedAbsentAndForbidden). The spoke serves without metering.
-	if n := countRows(hub.db, `SELECT COUNT(*) FROM usage_log WHERE api_key_id=1`); n != 1 {
-		t.Errorf("hub metered %d rows on the client key, want 1", n)
+	// TestNotSharedAbsentAndForbidden) — and on the hub's own mirrored
+	// served rows.
+	if n := countRows(hub.db, `SELECT COUNT(*) FROM usage_log WHERE api_key_id=1
+		AND fed_direction='consumed' AND fed_peer_id=?`, peer.ID); n != 1 {
+		t.Errorf("hub metered %d consumed rows on the client key, want 1", n)
 	}
-	if n := countRows(spoke.db, `SELECT COUNT(*) FROM usage_log`); n != 0 {
-		t.Errorf("spoke served side recorded %d usage rows, want 0 (task 3 scope)", n)
+	// The hub's double-entry mirror: the hosting peer's owner is credited
+	// with serving the same counts (uniform convention: the served row's
+	// fed_peer_id names the HOST it credits — the same peer the consumed
+	// row names; fed_user names the consuming hub user).
+	poll(t, "hub mirrored served row", func() bool {
+		return countRows(hub.db, `SELECT COUNT(*) FROM usage_log WHERE model_requested='alpha'
+			AND fed_direction='served' AND fed_user='hub' AND fed_peer_id=?
+			AND api_key_id=0 AND user_id=? AND prompt_tokens=10 AND completion_tokens=5`,
+			peer.ID, hub.uid) == 1
+	})
+	// The spoke serves with metering (task 4): a served row for the
+	// federation identity, the hub-stamped consumer name, real token
+	// counts from the engine's usage payload, and no local peer row
+	// (the hub has no peers entry on a spoke → fed_peer_id NULL).
+	poll(t, "spoke served row", func() bool {
+		return countRows(spoke.db, `SELECT COUNT(*) FROM usage_log WHERE fed_direction='served'
+			AND fed_user='hub' AND fed_peer_id IS NULL AND prompt_tokens=10
+			AND completion_tokens=5 AND model_requested='alpha'`) == 1
+	})
+	if n := countRows(spoke.db, `SELECT COUNT(*) FROM usage_log WHERE fed_direction=''`); n != 0 {
+		t.Errorf("spoke recorded %d unstamped rows, want 0", n)
 	}
 	_ = peer
 }
@@ -474,7 +505,9 @@ func TestNotSharedAbsentAndForbidden(t *testing.T) {
 
 	// The positive twin: a genuinely shared hub model materializes on the
 	// spoke over hub://, is served by the hub, and the hub meters it on
-	// the synthetic federation key against the peer's owner user.
+	// the synthetic federation key against the peer's owner user, stamped
+	// consumed with fed_peer_id NULL (hub hardware served — no peer to
+	// credit; the spender is the row's user).
 	hub.shareLocal("open", "hub")
 	pollLog(t, spoke, hub)("open materialized on spoke", func() bool {
 		return countRows(spoke.db, `SELECT COUNT(*) FROM models m JOIN backends b ON b.id=m.backend_id
@@ -486,7 +519,15 @@ func TestNotSharedAbsentAndForbidden(t *testing.T) {
 	}
 	poll(t, "hub metered the federation key", func() bool {
 		return countRows(hub.db, `SELECT COUNT(*) FROM usage_log
-			WHERE api_key_id=0 AND model_requested='open'`) == 1
+			WHERE api_key_id=0 AND model_requested='open'
+			AND fed_direction='consumed' AND fed_peer_id IS NULL`) == 1
+	})
+	// The spoke meters its own local user on the hub:// model as plain
+	// local traffic (the consumed-slice is identified by the backend
+	// scheme, not by fed columns — no double-stamping).
+	poll(t, "spoke metered its local user", func() bool {
+		return countRows(spoke.db, `SELECT COUNT(*) FROM usage_log WHERE model_requested='open'
+			AND fed_direction=''`) == 1
 	})
 }
 
@@ -573,8 +614,10 @@ func TestSpokeServingSharingGate(t *testing.T) {
 }
 
 // Spoke A reaches spoke B's model through the hub's transit path; the
-// engine marker proves B served it, and B's serving identity carries A as
-// the origin peer (the hub stamped it).
+// engine marker proves B served it, and the hub's fairness ledger carries
+// the double-entry pair (consumed on A's owner, served on B's owner with
+// A's owner as fed_user). B also meters its own served row with the
+// hub-stamped identity — spoke-local names never left A.
 func TestSpokeToSpokeTransit(t *testing.T) {
 	hub := newRelay(t, "hub")
 	hub.becomeHub()
@@ -602,6 +645,31 @@ func TestSpokeToSpokeTransit(t *testing.T) {
 	if n := spokeB.engineHits("gamma"); n != 1 {
 		t.Errorf("B engine hits = %d, want 1", n)
 	}
+	// Hub ledger: consumed (A's owner spent B's capacity)…
+	poll(t, "hub consumed row", func() bool {
+		return countRows(hub.db, `SELECT COUNT(*) FROM usage_log WHERE model_requested='gamma'
+			AND fed_direction='consumed' AND fed_peer_id=? AND prompt_tokens=10
+			AND completion_tokens=5`, pb.ID) == 1
+	})
+	// …and served (B's owner gave it — the served row credits the HOST B,
+	// attributed to A's owner by name).
+	poll(t, "hub served row", func() bool {
+		return countRows(hub.db, `SELECT COUNT(*) FROM usage_log WHERE model_requested='gamma'
+			AND fed_direction='served' AND fed_peer_id=? AND fed_user='hub'`, pb.ID) == 1
+	})
+	// B's own box: served row with the hub-stamped identity (A's owner
+	// name — never A's local username), no local peer row for the hub.
+	poll(t, "B served row", func() bool {
+		return countRows(spokeB.db, `SELECT COUNT(*) FROM usage_log WHERE model_requested='gamma'
+			AND fed_direction='served' AND fed_user='hub' AND fed_peer_id IS NULL
+			AND prompt_tokens=10 AND completion_tokens=5`) == 1
+	})
+	// A's own box: its local user's row stays plain (consumed-slice is
+	// identified by the peer:// backend scheme, not by fed columns).
+	poll(t, "A local row unstamped", func() bool {
+		return countRows(spokeA.db, `SELECT COUNT(*) FROM usage_log WHERE model_requested='gamma'
+			AND fed_direction=''`) == 1
+	})
 }
 
 func (r *relay) engineHits(model string) int {
@@ -612,6 +680,182 @@ func (r *relay) engineHits(model string) int {
 		return -1
 	}
 	return int(e.hits.Load())
+}
+
+// Spoke A asks the hub to SERVE-HERE a real hub ADMIN GROUP whose members
+// are a hub-local model and a synthetic peer://B row (the store guard that
+// used to reject synthetic members is gone by design): the hub's pipeline
+// resolves the group to the synthetic member and tunnels to B, so the
+// ledger carries the full pair — consumed on A's owner with the HOSTING
+// peer B as counterparty, and a mirrored served row crediting B's owner
+// (counterparty = A, fed_user = A's owner name). Distinct owners (hub vs
+// bob) prove the credit lands on the right account.
+func TestHubGroupServeDoubleEntry(t *testing.T) {
+	hub := newRelay(t, "hub")
+	hub.becomeHub()
+	hash, _ := auth.HashPassword("x")
+	bob, err := store.CreateUser(hub.db, "bob", "", hash, "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pa, tokA := hub.enroll("spoke-a") // owner: the hub's own user
+	pb, tokB := hub.enrollAs("spoke-b", bob.ID)
+	hub.serveConnect()
+
+	spokeB := newRelay(t, "spoke-b")
+	spokeB.shareLocal("gamma", "spoke-b")
+	spokeB.becomeSpoke(hub.srv.URL, tokB)
+	poll(t, "B online", func() bool { return hub.mgr.Online(pb.ID) })
+
+	// A real admin group: hub-local member + the synthetic peer://B member.
+	// The local member is then disabled so the walk deterministically
+	// lands on the synthetic one (the point of this test).
+	local := hub.shareLocal("hubone", "hub-eng")
+	gammaID := mustModelID(t, hub.db, "gamma")
+	g, err := store.CreateGroup(hub.db, "mix")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateGroup(hub.db, g.ID, nil, ptrBool(true),
+		[]store.GroupMemberInput{{ModelID: local.ID, Weight: 1}, {ModelID: gammaID, Weight: 1}}); err != nil {
+		t.Fatalf("admin group with synthetic member: %v", err)
+	}
+	if _, err := store.UpdateModel(hub.db, local.ID, nil, ptrBool(false), [4]*int64{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A (raw spoke client) asks the hub to serve-here the group name; the
+	// only eligible member is the synthetic peer://B row.
+	ws := rawSpoke(t, hub.srv.URL, tokA)
+	status, text := rawReq(t, ws, &fed.Req{T: fed.TReq, ID: "syn-1", Method: "POST",
+		Path: "/v1/chat/completions", Body: chatBody("mix")})
+	if status != 200 || !strings.Contains(text, "from-spoke-b") {
+		t.Fatalf("serve-here group = %d %s", status, text)
+	}
+	// consumed: A's owner spent, counterparty = the HOSTING peer B.
+	poll(t, "hub consumed row (host peer)", func() bool {
+		return countRows(hub.db, `SELECT COUNT(*) FROM usage_log WHERE model_requested='mix'
+			AND fed_direction='consumed' AND fed_peer_id=? AND user_id=?`, pb.ID, hub.uid) == 1
+	})
+	// mirrored served: B's owner credited, HOST B as counterparty (the
+	// uniform host stamp) and A's owner name as fed_user, same counts, the
+	// synthetic member row.
+	poll(t, "hub mirrored served row", func() bool {
+		return countRows(hub.db, `SELECT COUNT(*) FROM usage_log WHERE model_requested='mix'
+			AND fed_direction='served' AND fed_peer_id=? AND fed_user='hub' AND user_id=?
+			AND model_id=? AND prompt_tokens=10 AND completion_tokens=5`,
+			pb.ID, bob.ID, gammaID) == 1
+	})
+	// Exactly the pair — one request, one double-entry.
+	if n := countRows(hub.db, `SELECT COUNT(*) FROM usage_log WHERE model_requested='mix'`); n != 2 {
+		t.Errorf("hub ledger = %d rows, want exactly 2 (consumed + served)", n)
+	}
+	// B's own box meters its served row too (hub-stamped consumer identity).
+	poll(t, "B served row", func() bool {
+		return countRows(spokeB.db, `SELECT COUNT(*) FROM usage_log WHERE model_requested='gamma'
+			AND fed_direction='served' AND fed_user='hub'`) == 1
+	})
+	// The rollups reflect the pair.
+	since := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	totals, err := store.FedUserTotals(hub.db, since, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byUser := map[string]store.FedUserTotal{}
+	for _, e := range totals {
+		byUser[e.User] = e
+	}
+	if byUser["hub"].Consumed.Prompt != 10 || byUser["bob"].Served.Prompt != 10 {
+		t.Errorf("user totals = %+v", totals)
+	}
+	peers, err := store.FedPeerTotals(hub.db, since)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byPeer := map[int64]store.FedPeerTotal{}
+	for _, e := range peers {
+		byPeer[e.PeerID] = e
+	}
+	// Uniform buckets: B's served = the mirror crediting its hardware;
+	// A's consumed = owner-level (A's owner — the hub user — spent 10).
+	// The other two corners stay empty: A served nothing, and bob's
+	// account spent nothing.
+	if byPeer[pb.ID].Served.Prompt != 10 || byPeer[pa.ID].Consumed.Prompt != 10 ||
+		byPeer[pa.ID].Served.Prompt != 0 || byPeer[pb.ID].Consumed.Prompt != 0 {
+		t.Errorf("peer totals = %+v", peers)
+	}
+}
+
+// The synthetic-member lifecycle inside an admin group (the C6
+// correction): a peer disconnect only DISABLES the backend — the group
+// keeps serving from its local member — and a catalog prune of the
+// synthetic row clears the membership and leaves the group intact and
+// consistent in /v1/models.
+func TestAdminGroupSyntheticLifecycle(t *testing.T) {
+	hub, spoke, peer := federationUp(t) // spoke shares "alpha"
+	local := hub.shareLocal("localone", "hub-eng")
+	alphaID := mustModelID(t, hub.db, "alpha")
+	g, err := store.CreateGroup(hub.db, "mix")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateGroup(hub.db, g.ID, nil, ptrBool(true),
+		[]store.GroupMemberInput{{ModelID: local.ID, Weight: 1}, {ModelID: alphaID, Weight: 1}}); err != nil {
+		t.Fatalf("admin group with synthetic member: %v", err)
+	}
+	// Sanity: the group serves while both members are eligible.
+	if resp, body := hub.chat("mix", ""); resp.StatusCode != 200 {
+		t.Fatalf("group chat = %d %s", resp.StatusCode, body)
+	}
+	// (a) Peer disconnect: the synthetic backend goes disabled, the member
+	// is excluded — the group keeps serving from the local member.
+	before := spoke.engineHits("alpha")
+	if err := store.SetPeerEnabled(hub.db, peer.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	hub.mgr.KickPeer(peer.ID, "test disconnect")
+	poll(t, "alpha backend offline", func() bool {
+		var en int
+		err := hub.db.QueryRow(`SELECT enabled FROM backends WHERE base_url=?`,
+			store.PeerBackendURL(peer.ID)).Scan(&en)
+		return err == nil && en == 0
+	})
+	resp, body := hub.chat("mix", "")
+	if resp.StatusCode != 200 || !strings.Contains(string(body), "from-hub-eng") {
+		t.Fatalf("group chat while peer offline = %d %s, want local serve", resp.StatusCode, body)
+	}
+	if n := spoke.engineHits("alpha"); n != before {
+		t.Errorf("offline peer's engine took %d extra hits, want 0", n-before)
+	}
+	// (b) Back online, then the spoke un-shares alpha: the hub's next
+	// frame prunes the row — membership cleared before the delete, group
+	// intact with its remaining member, catalog consistent.
+	if err := store.SetPeerEnabled(hub.db, peer.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	poll(t, "peer back online", func() bool { return hub.mgr.Online(peer.ID) })
+	if err := store.SetModelFedVisibility(spoke.db, mustModelID(t, spoke.db, "alpha"),
+		store.FedVisOff, nil); err != nil {
+		t.Fatal(err)
+	}
+	spoke.mgr.CatalogChanged()
+	poll(t, "alpha pruned on hub", func() bool {
+		return countRows(hub.db, `SELECT COUNT(*) FROM models WHERE name='alpha'`) == 0
+	})
+	if n := countRows(hub.db, `SELECT COUNT(*) FROM model_group_members WHERE model_id=?`, alphaID); n != 0 {
+		t.Errorf("pruned synthetic member left %d membership rows behind", n)
+	}
+	if n := countRows(hub.db, `SELECT COUNT(*) FROM model_group_members WHERE group_id=?`, g.ID); n != 1 {
+		t.Errorf("group members after prune = %d, want 1 (local member intact)", n)
+	}
+	_, body = hub.get("/v1/models")
+	if !strings.Contains(modelsList(body), "mix") || strings.Contains(modelsList(body), "alpha") {
+		t.Errorf("/v1/models after prune = %s, want mix without alpha", body)
+	}
+	if resp, body := hub.chat("mix", ""); resp.StatusCode != 200 ||
+		!strings.Contains(string(body), "from-hub-eng") {
+		t.Fatalf("group chat after prune = %d %s", resp.StatusCode, body)
+	}
 }
 
 // The hub never routes a request back to its origin: a spoke whose catalog

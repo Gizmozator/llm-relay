@@ -878,8 +878,6 @@ func groupViewOf(g *store.Group, members []store.GroupMember) groupView {
 // error text is an internal detail and never echoed.
 func writeGroupErr(w http.ResponseWriter, err error, fallback string) {
 	switch {
-	case errors.Is(err, store.ErrSyntheticMember):
-		writeErr(w, http.StatusBadRequest, "federated models cannot join an admin group")
 	case errors.Is(err, store.ErrInvalid):
 		writeErr(w, http.StatusBadRequest, "invalid group name")
 	case errors.Is(err, store.ErrExists):

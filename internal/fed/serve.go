@@ -4,16 +4,22 @@
 // pipeline, with a proxy.FedServe identity injected:
 //
 //   - Hub, TargetPeer=0: serve as the requesting peer's OWNER user (the
-//     hub meters the traffic against its own account; attribution columns
-//     land with task 4). The sharing gate (403) and the loop-guard member
-//     exclusion run inside the pipeline off OriginPeer.
-//   - Hub, TargetPeer=A: transit — forward to A with OriginPeer set to the
-//     requester, never back to the origin, and pump A's answer frames on to
-//     the requester. A's channel slot is held open for the duration, so
-//     transit respects A's in-flight cap too.
+//     hub meters the traffic against its own account, stamped
+//     fed_direction='consumed' — counterparty = the hosting peer when
+//     the resolved member is synthetic, NULL when hub hardware served;
+//     the pipeline mirrors the served row for synthetic members). The
+//     sharing gate (403) and the loop-guard member exclusion run
+//     inside the pipeline off OriginPeer.
+//   - Hub, TargetPeer=A: transit — forward to A with the requester's
+//     hub-side identity stamped on FedUser, never back to the origin,
+//     and pump A's answer frames on to the requester. A's channel slot is
+//     held open for the duration, so transit respects A's in-flight cap
+//     too. The hub meters transit from the pumped frames (consumed +
+//     served pair, meterTransit).
 //   - Spoke: local http(s) members only (LocalOnly: never re-forward to the
 //     hub or another spoke), stored backend keys applied locally by the
-//     normal proxy path, no served-side metering (task 3 scope).
+//     normal proxy path, served rows stamped fed_direction='served' with
+//     the hub-stamped FedUser.
 //
 // CancelFrame aborts the served request's context on either side; the hub
 // forwards cancels along the transit path.
@@ -22,11 +28,14 @@ package fed
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
+	"llm-relay/internal/pricing"
 	"llm-relay/internal/proxy"
 	"llm-relay/internal/store"
 )
@@ -220,7 +229,10 @@ func (m *Manager) serveFrame(c *Conn, peer *store.Peer, origin int64, req *Req) 
 	fs := &proxy.FedServe{OriginPeer: origin}
 	if peer != nil {
 		// Hub side: meter against the peer's owner user with a synthetic
-		// key (usage_log.api_key_id has no FK; task 4 adds attribution).
+		// key (usage_log.api_key_id has no FK); the row is the peer's
+		// account CONSUMING capacity — fed_peer_id = the hosting peer
+		// when the resolved member is synthetic, NULL when hub hardware
+		// served (the hub has no peer row for itself; see proxy.fedOf).
 		owner, err := store.UserByID(m.db, peer.OwnerUserID)
 		if err != nil {
 			m.opts.Log.Printf("fed: peer %d owner lookup: %v", peer.ID, err)
@@ -229,12 +241,18 @@ func (m *Manager) serveFrame(c *Conn, peer *store.Peer, origin int64, req *Req) 
 		}
 		fs.User = owner
 		fs.Key = &store.APIKey{ID: 0, Name: "federation"}
+		fs.FedDirection = proxy.FedConsumed
 	} else {
-		// Spoke side: anonymous identity, local engines only, no metering.
+		// Spoke side: the federation user identity meters this box's
+		// SERVED rows; the hub-stamped consumer name rides the frame
+		// (fed_user) so the spoke can say who it served without ever
+		// seeing a spoke-local username from anyone else. Local engines
+		// only.
 		fs.User = &store.User{ID: 0, Username: "federation", PriceMultiplier: 1}
 		fs.Key = &store.APIKey{ID: 0, Name: "federation"}
 		fs.LocalOnly = true
-		fs.NoMeter = true
+		fs.FedDirection = proxy.FedServed
+		fs.FedUser = req.FedUser
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, req.Method, "http://federation"+req.Path,
@@ -265,9 +283,14 @@ func (m *Manager) serveFrame(c *Conn, peer *store.Peer, origin int64, req *Req) 
 }
 
 // transitFrame forwards a spoke→spoke request onward (hub side): the frame
-// keeps its id, gains the requester as OriginPeer, and the answer frames
-// are pumped back to the requesting channel. A's in-flight slot is held by
-// OpenRequest, so transit respects the target's cap.
+// keeps its id, gains the requester's hub-side identity (FedUser), and the
+// answer frames are pumped back to the requesting channel. A's in-flight
+// slot is held by OpenRequest, so transit respects the target's cap.
+//
+// Transit bypasses the proxy pipeline, so the hub meters it here from the
+// frames it pumps: a consumed row (A's account spent B's capacity) and a
+// served row (B served A), both with the token counts parsed out of the
+// response — the same counts B meters on its own served row.
 func (m *Manager) transitFrame(fromPeer, origin int64, req *Req) {
 	if origin == req.TargetPeer {
 		_ = m.hub.Send(fromPeer, &ResEnd{T: TResEnd, ID: req.ID,
@@ -280,11 +303,21 @@ func (m *Manager) transitFrame(fromPeer, origin int64, req *Req) {
 		return
 	}
 	fwd := *req
-	fwd.OriginPeer = origin
+	// The target derives the origin from the channel it arrives on (the
+	// hub), so OriginPeer on the wire is decorative — cleared, not
+	// trusted. Attribution rides FedUser instead: the origin peer's owner
+	// name, which only the hub can stamp.
+	fwd.OriginPeer = 0
+	if name, err := m.peerOwnerName(fromPeer); err == nil {
+		fwd.FedUser = name
+	} else {
+		m.opts.Log.Printf("fed: transit attribution peer %d: %v", fromPeer, err)
+	}
 	// From the target's view this is a serve-here request: the routing
 	// hop is over (and a spoke would reject a non-zero TargetPeer — it has
 	// nobody to transit to).
 	fwd.TargetPeer = 0
+	mt := &transitMeter{start: time.Now(), path: req.Path, reqBody: req.Body}
 	if err := m.hub.Send(req.TargetPeer, &fwd); err != nil {
 		release()
 		_ = m.hub.Send(fromPeer, &ResEnd{T: TResEnd, ID: req.ID, Error: err.Error()})
@@ -300,6 +333,17 @@ func (m *Manager) transitFrame(fromPeer, origin int64, req *Req) {
 		for {
 			select {
 			case f := <-ch:
+				switch fr := f.(type) {
+				case *Res:
+					mt.status = fr.Status
+					mt.stream = strings.Contains(headersFrom(fr.Headers).Get("Content-Type"), "text/event-stream")
+				case *ResBody:
+					mt.feed(fr.Data)
+				case *ResEnd:
+					if fr.Error == "" {
+						m.meterTransit(fromPeer, req.TargetPeer, mt)
+					}
+				}
 				_, done := f.(*ResEnd)
 				if from == nil || from.Closed() || from.Send(f) != nil {
 					// The requester vanished mid-stream: stop the target
@@ -320,6 +364,142 @@ func (m *Manager) transitFrame(fromPeer, origin int64, req *Req) {
 			}
 		}
 	}()
+}
+
+// transitMeter captures what the hub needs to meter one transit request:
+// the response head (status, stream-ness) and a tail-capped copy of the
+// body (usage payloads ride the END of both JSON bodies and SSE streams,
+// so keeping the tail is enough and a long stream stays bounded).
+type transitMeter struct {
+	start   time.Time
+	path    string
+	reqBody []byte
+	status  int
+	stream  bool
+	tail    []byte
+}
+
+const transitMeterCap = 512 << 10
+
+func (mt *transitMeter) feed(p []byte) {
+	if len(mt.tail) >= transitMeterCap {
+		return
+	}
+	mt.tail = append(mt.tail, p...)
+	if len(mt.tail) > transitMeterCap {
+		mt.tail = append(mt.tail[:0:0], mt.tail[len(mt.tail)-transitMeterCap:]...)
+	}
+}
+
+// meterTransit writes the hub's double-entry pair for one completed
+// spoke→spoke request: consumed (origin peer's owner account, counterparty
+// = target host) and served (target's owner, counterparty = target host —
+// the uniform host stamp — fed_user = origin owner name, what the target's
+// own served row will carry). Costs
+// are nominal (no user multiplier): the fairness ledger compares capacity,
+// not billed money.
+func (m *Manager) meterTransit(fromPeer, targetPeer int64, mt *transitMeter) {
+	endpoint := fedEndpointFor(mt.path)
+	if endpoint == "" {
+		return // not a metered endpoint (defensive: serveFrame gates /v1/*)
+	}
+	var tok pricing.Tokens
+	var ok bool
+	if mt.stream {
+		tok, ok = proxy.StreamUsage(endpoint, mt.tail)
+	} else {
+		tok, ok = proxy.ExtractUsage(endpoint, mt.tail)
+	}
+	if !ok {
+		m.opts.Log.Printf("fed: transit %s: no usage in response, no ledger rows", mt.path)
+		return
+	}
+	var in struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(mt.reqBody, &in); err != nil || in.Model == "" {
+		m.opts.Log.Printf("fed: transit %s: request model name unreadable, no ledger rows", mt.path)
+		return
+	}
+	mdl, err := store.FedPeerModel(m.db, targetPeer, in.Model)
+	if err != nil || mdl == nil {
+		m.opts.Log.Printf("fed: transit %s: no materialized row for %q on peer %d: %v",
+			mt.path, in.Model, targetPeer, err)
+		return
+	}
+	fromP, err := store.PeerByID(m.db, fromPeer)
+	if err != nil {
+		m.opts.Log.Printf("fed: transit origin peer %d: %v", fromPeer, err)
+		return
+	}
+	toP, err := store.PeerByID(m.db, targetPeer)
+	if err != nil {
+		m.opts.Log.Printf("fed: transit target peer %d: %v", targetPeer, err)
+		return
+	}
+	fromU, err := store.UserByID(m.db, fromP.OwnerUserID)
+	if err != nil {
+		m.opts.Log.Printf("fed: transit origin owner: %v", err)
+		return
+	}
+	toU, err := store.UserByID(m.db, toP.OwnerUserID)
+	if err != nil {
+		m.opts.Log.Printf("fed: transit target owner: %v", err)
+		return
+	}
+	costs := pricing.Compute(mdl, tok)
+	base := store.UsageEvent{
+		TS:            time.Now().UTC().Format(time.RFC3339),
+		KeyID:         0, // synthetic federation key (no FK)
+		ClientIP:      "federation:0",
+		Endpoint:      endpoint,
+		ModelID:       mdl.ID,
+		ModelRequ:     in.Model,
+		ModelUpstream: mdl.UpstreamModel,
+		Prompt:        tok.Prompt,
+		Completion:    tok.Completion,
+		Cached:        tok.Cached,
+		CacheWrite:    tok.CacheWrite,
+		CostIn:        costs.In,
+		CostOut:       costs.Out,
+		CostCache:     costs.Cache,
+		CostWrite:     costs.Write,
+		CostTotal:     costs.Total,
+		Streamed:      mt.stream,
+		Status:        mt.status,
+		LatencyMS:     time.Since(mt.start).Milliseconds(),
+	}
+	consumed := base
+	consumed.UserID = fromU.ID
+	consumed.FedDirection = proxy.FedConsumed
+	consumed.FedPeerID = &targetPeer
+	served := base
+	served.UserID = toU.ID
+	served.FedDirection = proxy.FedServed
+	served.FedPeerID = &targetPeer // uniform: a served row names the HOST it credits
+	served.FedUser = fromU.Username
+	if err := store.InsertUsage(m.db, &consumed); err != nil {
+		m.opts.Log.Printf("fed: transit consumed row: %v", err)
+	}
+	if err := store.InsertUsage(m.db, &served); err != nil {
+		m.opts.Log.Printf("fed: transit served row: %v", err)
+	}
+}
+
+// fedEndpointFor maps a served path to the usage_log endpoint name
+// (mirrors the proxy's own endpoint constants; "" = not metered).
+func fedEndpointFor(path string) string {
+	switch path {
+	case "/v1/chat/completions":
+		return proxy.EpChat
+	case "/v1/completions":
+		return proxy.EpCompletions
+	case "/v1/messages":
+		return proxy.EpMessages
+	case "/v1/embeddings":
+		return proxy.EpEmbeddings
+	}
+	return ""
 }
 
 func (m *Manager) onCancel(f Frame) {

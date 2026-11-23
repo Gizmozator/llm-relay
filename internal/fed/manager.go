@@ -198,6 +198,22 @@ func (m *Manager) Close() {
 // Hub exposes the live-peer registry (task 3 routing + Servers page).
 func (m *Manager) Hub() *Hub { return m.hub }
 
+// Role reports the reconciled federation role (the API layer's role-
+// dependent stats payloads key on it). A manager that has never re-read
+// settings behaves as standalone (the stored default).
+func (m *Manager) Role() string {
+	if r := m.currentRole(); r != "" {
+		return r
+	}
+	return store.FedRoleStandalone
+}
+
+// IsHub answers proxy.FedTransport: only the hub's usage_log is the
+// fairness ledger, so only hub-side synthetic-backend traffic earns the
+// 'consumed' stamp (a spoke's local consumption is identified by the
+// backend scheme in the stats query instead).
+func (m *Manager) IsHub() bool { return m.currentRole() == store.FedRoleHub }
+
 // Online / Peers / Send delegate to the hub registry, so callers (task 3,
 // the API layer) only ever touch the Manager.
 func (m *Manager) Online(peerID int64) bool         { return m.hub.Online(peerID) }

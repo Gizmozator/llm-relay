@@ -27,6 +27,21 @@ type sseAccum struct {
 
 func newSSEAccum(endpoint string) *sseAccum { return &sseAccum{endpoint: endpoint} }
 
+// StreamUsage runs the dialect accumulator over a captured SSE body and
+// returns the usage it saw (the federation hub meters transit traffic
+// from the response frames it pumps, so it parses after the fact).
+// ok=false when the stream carried no usage payload.
+func StreamUsage(endpoint string, raw []byte) (tok pricing.Tokens, ok bool) {
+	acc := newSSEAccum(endpoint)
+	for _, line := range strings.Split(string(raw), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "data:") {
+			acc.feed([]byte(strings.TrimSpace(trimmed[5:])))
+		}
+	}
+	return acc.result()
+}
+
 // feed parses one SSE `data:` payload (without the "data:" prefix).
 func (a *sseAccum) feed(payload []byte) {
 	if len(payload) == 0 || string(payload) == "[DONE]" {

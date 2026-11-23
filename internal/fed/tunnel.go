@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 
+	"llm-relay/internal/proxy"
 	"llm-relay/internal/store"
 )
 
@@ -160,7 +161,8 @@ func (m *Manager) RoundTripFed(req *http.Request) (*http.Response, error) {
 		return nil, fmt.Errorf("federation tunnel: request body %d bytes over the %d cap", len(body), MaxBody)
 	}
 	frame := &Req{T: TReq, ID: id, TargetPeer: tun.target, Method: req.Method,
-		Path: req.URL.Path, Headers: stripRequestHeaders(req.Header), Body: body}
+		Path: req.URL.Path, Headers: stripRequestHeaders(req.Header), Body: body,
+		FedUser: m.attributionFor(req.Context())}
 	if err := tun.send(frame); err != nil {
 		release()
 		return nil, err
@@ -204,6 +206,43 @@ func (m *Manager) RoundTripFed(req *http.Request) (*http.Response, error) {
 			return nil, req.Context().Err()
 		}
 	}
+}
+
+// attributionFor resolves the FedUser stamp for one outbound Req frame
+// (task 4 attribution): the HUB is the authority. A hub-direct consumer
+// travels under its own username; a request the hub forwards on a spoke's
+// behalf travels under the ORIGIN peer's owner name (the hub holds that
+// identity — spoke-local usernames never leave the spoke). A spoke sends
+// nothing.
+func (m *Manager) attributionFor(ctx context.Context) string {
+	if m.currentRole() != store.FedRoleHub {
+		return ""
+	}
+	if fs := proxy.FedServeFrom(ctx); fs != nil {
+		if fs.OriginPeer == 0 {
+			return ""
+		}
+		name, err := m.peerOwnerName(fs.OriginPeer)
+		if err != nil {
+			m.opts.Log.Printf("fed: attribution for origin peer %d: %v", fs.OriginPeer, err)
+		}
+		return name
+	}
+	return proxy.RequestUserFrom(ctx)
+}
+
+// peerOwnerName resolves a peer's owner username (the hub-side identity
+// stamped onto transit frames and transit usage rows).
+func (m *Manager) peerOwnerName(peerID int64) (string, error) {
+	p, err := store.PeerByID(m.db, peerID)
+	if err != nil {
+		return "", err
+	}
+	u, err := store.UserByID(m.db, p.OwnerUserID)
+	if err != nil {
+		return "", err
+	}
+	return u.Username, nil
 }
 
 // pumpTunnel copies routed frames into the response pipe until the stream

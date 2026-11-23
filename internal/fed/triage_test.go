@@ -9,7 +9,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -364,9 +363,12 @@ func modelVisibility(t *testing.T, db *sql.DB, id int64) string {
 	return v
 }
 
-// C6: materialized models are owned by the materializer — an admin group
-// cannot adopt them (the row may be pruned or re-created under it).
-func TestUpdateGroupRejectsSyntheticMember(t *testing.T) {
+// C6 (corrected by the task-4 design ruling): admin groups MAY adopt
+// materialized (synthetic-backend) models — a federated group is exactly
+// a group whose members live on other relays. The materializer owns the
+// FK hazard: DeleteFedModelsNotIn clears memberships before pruning rows,
+// so a prune leaves the group intact.
+func TestUpdateGroupAcceptsSyntheticMember(t *testing.T) {
 	d := migratedDB(t)
 	sb, err := store.EnsureSyntheticBackend(d, "peer 7", store.PeerBackendURL(7))
 	if err != nil {
@@ -376,15 +378,10 @@ func TestUpdateGroupRejectsSyntheticMember(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g, err := store.CreateGroup(d, "adm")
+	keep, err := store.CreateModel(d, sb.ID, "keep-up", "keep")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.UpdateGroup(d, g.ID, nil, ptrBool(true),
-		[]store.GroupMemberInput{{ModelID: sm.ID, Weight: 1}}); !errors.Is(err, store.ErrSyntheticMember) {
-		t.Fatalf("UpdateGroup with synthetic member = %v, want ErrSyntheticMember", err)
-	}
-	// The guard must not bite ordinary local models.
 	b, err := store.CreateBackend(d, "loc", "http://127.0.0.1:1/v1", "")
 	if err != nil {
 		t.Fatal(err)
@@ -393,9 +390,39 @@ func TestUpdateGroupRejectsSyntheticMember(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	g, err := store.CreateGroup(d, "adm")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := store.UpdateGroup(d, g.ID, nil, ptrBool(true),
-		[]store.GroupMemberInput{{ModelID: lm.ID, Weight: 1}}); err != nil {
-		t.Fatalf("local member rejected: %v", err)
+		[]store.GroupMemberInput{{ModelID: sm.ID, Weight: 1}, {ModelID: lm.ID, Weight: 1}}); err != nil {
+		t.Fatalf("admin group with synthetic + local member: %v", err)
+	}
+	// Membership flips members internal (the group owns the public name).
+	if v := modelVisibility(t, d, sm.ID); v != "internal" {
+		t.Errorf("synthetic member visibility = %s, want internal", v)
+	}
+	// Catalog prune (a frame that no longer advertises "sm"): memberships
+	// are cleared before the row delete — no FK error — and the group
+	// survives with its remaining member.
+	if err := store.DeleteFedModelsNotIn(d, sb.ID, []string{keep.Name}); err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	var n int
+	if err := d.QueryRow(`SELECT COUNT(*) FROM model_group_members WHERE model_id=?`, sm.ID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("pruned synthetic member left %d membership rows behind", n)
+	}
+	if err := d.QueryRow(`SELECT COUNT(*) FROM model_group_members WHERE group_id=?`, g.ID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("group members after prune = %d, want 1 (local member intact)", n)
+	}
+	if _, err := store.GroupByID(d, g.ID); err != nil {
+		t.Errorf("group row after prune: %v", err)
 	}
 }
 

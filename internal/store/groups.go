@@ -324,13 +324,6 @@ func UpdateGroup(db *sql.DB, id int64, name *string, enabled *bool, members []Gr
 		if err := rows.Err(); err != nil {
 			return nil, err
 		}
-		// Materialized (synthetic-backend) models are owned by the
-		// federation materializer: it prunes and re-creates those rows
-		// without regard for any group, so an admin membership over them
-		// can never be stable.
-		if err := assertNoSyntheticMembers(tx, members); err != nil {
-			return nil, err
-		}
 		seen := map[int64]bool{}
 		if _, err := tx.Exec(`DELETE FROM model_group_members WHERE group_id=?`, id); err != nil {
 			return nil, err
@@ -631,37 +624,4 @@ func ListPublicCatalog(db *sql.DB) ([]PublicEntry, error) {
 	}
 	slices.SortFunc(out, func(a, b PublicEntry) int { return strings.Compare(a.Name, b.Name) })
 	return out, nil
-}
-
-// assertNoSyntheticMembers rejects a membership write that would place a
-// materialized (synthetic-backend) model in a group (see ErrSyntheticMember).
-func assertNoSyntheticMembers(tx *sql.Tx, members []GroupMemberInput) error {
-	if len(members) == 0 {
-		return nil
-	}
-	args := make([]any, 0, len(members))
-	for _, mem := range members {
-		args = append(args, mem.ModelID)
-	}
-	rows, err := tx.Query(`SELECT m.name FROM models m JOIN backends b ON b.id=m.backend_id
-		WHERE m.id IN (`+strings.TrimSuffix(strings.Repeat("?,", len(members)), ",")+`) AND (`+syntheticWhereB+`)`, args...)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	var names []string
-	for rows.Next() {
-		var n string
-		if err := rows.Scan(&n); err != nil {
-			return err
-		}
-		names = append(names, n)
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	if len(names) > 0 {
-		return fmt.Errorf("%w: %s", ErrSyntheticMember, strings.Join(names, ", "))
-	}
-	return nil
 }

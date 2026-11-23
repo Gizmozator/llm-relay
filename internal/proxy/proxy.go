@@ -152,9 +152,14 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request, endpoint string
 			return
 		}
 	}
-	// The spoke serving side records nothing (task 3 scope: federation
-	// attribution columns land with task 4).
-	meter := record && (fs == nil || !fs.NoMeter)
+	// Task 4: served federation traffic is metered too — the spoke records
+	// what it served (fed_direction='served' + the hub-stamped consumer),
+	// the hub records what its account consumed. Attribution rides on fs /
+	// the resolved backend, computed once below into fedOf().
+	meter := record
+	// The outbound tunnel attributes a hub-direct consumer by name (only
+	// the fed layer on a hub ever reads this; a spoke never stamps).
+	r = r.WithContext(WithRequestUser(r.Context(), user.Username))
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
 	if err != nil {
@@ -290,6 +295,43 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request, endpoint string
 	}
 	model, backend := candidates[0].Model, candidates[0].Backend
 
+	// fedOf derives the usage-row attribution at record time: the backend
+	// variable follows the member that actually served (see the walk), so
+	// a group that fell over onto a peer:// member stamps the peer that
+	// really answered. The hub's ledger is double-entry: EVERY hub row
+	// whose resolved member lives on a synthetic peer:// backend carries a
+	// mirrored served row crediting that backend's owner (same counts).
+	// Transit never reaches this path — the hub pumps those frames outside
+	// the pipeline and writes its own pair (meterTransit) — so the two
+	// cannot double-write.
+	fedOf := func() *fedAttrib {
+		kind, hostPeer, syn := store.SyntheticBaseURL(backend.BaseURL)
+		syn = syn && kind == store.FedSchemePeer
+		if fs != nil {
+			if fs.FedDirection == "" {
+				return nil
+			}
+			a := &fedAttrib{direction: fs.FedDirection, user: fs.FedUser}
+			if fs.FedDirection == FedConsumed && syn {
+				// Uniform convention: a consumed row names the peer whose
+				// hardware SERVED (the resolved member's host); hub
+				// hardware has no peer row, so a spoke→hub-local serve
+				// leaves fed_peer_id NULL — the spender is already the
+				// row's user.
+				p := hostPeer
+				a.peerID = &p
+				a.mirror = &fedMirror{hostPeer: hostPeer, originPeer: fs.OriginPeer}
+			}
+			return a
+		}
+		if h.Fed != nil && h.Fed.IsHub() && syn {
+			p := hostPeer
+			return &fedAttrib{direction: FedConsumed, peerID: &p,
+				mirror: &fedMirror{hostPeer: hostPeer, consumer: user.Username}}
+		}
+		return nil
+	}
+
 	// Drain gate: a draining backend refuses NEW sessions so the engine's
 	// server can be shut down gracefully, but sessions that are currently
 	// running (active within drainSessionWindow) may finish their
@@ -357,8 +399,10 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request, endpoint string
 		if derr == nil {
 			if cand.Model.ID != model.ID {
 				// The request moved to another member: metering and the
-				// live in-flight entry follow it.
+				// live in-flight entry follow it (backend too — the
+				// consumed stamp names the peer that actually answered).
 				model = cand.Model
+				backend = cand.Backend
 				h.Flight.SetModel(streamID, model.ID, model.Name)
 			}
 			break
@@ -373,7 +417,7 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request, endpoint string
 		}
 		if i == len(candidates)-1 {
 			h.record(meter, start, user, key, r, endpoint, session, model, peek.Model,
-				pricing.Tokens{}, pricing.Costs{}, false, false, http.StatusBadGateway, "upstream request failed")
+				pricing.Tokens{}, pricing.Costs{}, false, false, http.StatusBadGateway, "upstream request failed", fedOf())
 			writeError(w, http.StatusBadGateway, "upstream unavailable")
 			return
 		}
@@ -456,7 +500,7 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request, endpoint string
 		pricing.ApplyMultiplier(&costs, user.PriceMultiplier)
 	}
 	h.record(meter, start, user, key, r, endpoint, session, model, peek.Model,
-		tok, costs, stream, estimated, status, errMsg)
+		tok, costs, stream, estimated, status, errMsg, fedOf())
 }
 
 // keepaliveInterval is the maximum upstream silence tolerated in a stream
@@ -546,13 +590,66 @@ func (h *Handler) copyStream(w http.ResponseWriter, body io.Reader, acc *sseAccu
 	}
 }
 
+// fedAttrib is one usage row's federation attribution (nil = plain local
+// traffic, fed columns stay at their empty defaults).
+type fedAttrib struct {
+	direction string // proxy.FedServed | proxy.FedConsumed
+	user      string // hub-stamped hub-side consumer name (served rows)
+	peerID    *int64 // counterparty peer (nil = none)
+	// mirror is the hub's double-entry counterpart of a consumed row: a
+	// served row crediting the hosting peer's owner with the same counts
+	// (nil = no mirror: local members, spoke-side rows).
+	mirror *fedMirror
+}
+
+// fedMirror names one mirrored served row: hostPeer's owner is credited
+// with serving; originPeer is the requesting peer (0 = a hub-direct user,
+// whose own name rides in consumer).
+type fedMirror struct {
+	hostPeer   int64
+	originPeer int64
+	consumer   string
+}
+
+// fedMirrorRow builds the mirrored served row from the primary (consumed)
+// event: same counts, model row and endpoint, credited to the hosting
+// peer's owner under the synthetic federation key. nil (with a log line)
+// when the identities cannot be resolved — a peer deleted mid-flight; the
+// primary row still stands.
+func (h *Handler) fedMirrorRow(m *fedMirror, ev *store.UsageEvent) *store.UsageEvent {
+	host, err := store.FedPeerOwner(h.DB, m.hostPeer)
+	if err != nil {
+		log.Printf("relay: fed mirror host peer %d: %v", m.hostPeer, err)
+		return nil
+	}
+	// fed_user carries the consumer side: the origin peer's owner name for
+	// a spoke-originated request, the hub user's own name for a direct one.
+	name := m.consumer
+	if m.originPeer != 0 {
+		o, err := store.FedPeerOwner(h.DB, m.originPeer)
+		if err != nil {
+			log.Printf("relay: fed mirror origin peer %d: %v", m.originPeer, err)
+			return nil
+		}
+		name = o.Username
+	}
+	mir := *ev
+	mir.UserID = host.ID
+	mir.KeyID = 0 // synthetic federation key (usage_log.api_key_id has no FK)
+	mir.FedDirection = FedServed
+	mir.FedUser = name
+	p := m.hostPeer
+	mir.FedPeerID = &p // uniform: a served row names the HOST it credits
+	return &mir
+}
+
 func (h *Handler) record(record bool, start time.Time, u *store.User, k *store.APIKey, r *http.Request,
 	endpoint, session string, m *store.Model, requested string,
-	tok pricing.Tokens, costs pricing.Costs, stream, estimated bool, status int, errMsg string) {
+	tok pricing.Tokens, costs pricing.Costs, stream, estimated bool, status int, errMsg string, fed *fedAttrib) {
 	if !record {
 		return
 	}
-	h.Rec.Submit(&store.UsageEvent{
+	ev := &store.UsageEvent{
 		TS:            time.Now().UTC().Format(time.RFC3339),
 		UserID:        u.ID,
 		KeyID:         k.ID,
@@ -576,7 +673,20 @@ func (h *Handler) record(record bool, start time.Time, u *store.User, k *store.A
 		Status:        status,
 		LatencyMS:     time.Since(start).Milliseconds(),
 		Error:         errMsg,
-	})
+	}
+	if fed != nil {
+		ev.FedDirection = fed.direction
+		ev.FedUser = fed.user
+		ev.FedPeerID = fed.peerID
+	}
+	h.Rec.Submit(ev)
+	if fed != nil && fed.mirror != nil {
+		// The hub's double-entry counterpart, submitted after the primary
+		// row so the ledger never shows a credit without its spend.
+		if mir := h.fedMirrorRow(fed.mirror, ev); mir != nil {
+			h.Rec.Submit(mir)
+		}
+	}
 }
 
 // authKey resolves the relay API key from Authorization: Bearer sk-... or,

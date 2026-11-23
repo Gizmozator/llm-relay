@@ -7,7 +7,9 @@ package api
 import (
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"llm-relay/internal/auth"
 	"llm-relay/internal/store"
@@ -65,6 +67,9 @@ type FedController interface {
 	// SyntheticOnline answers the health cache for a peer://hub://
 	// backend: its health is the channel, there is nothing to probe.
 	SyntheticOnline(b store.Backend) bool
+	// Role reports the reconciled federation role ("hub"/"spoke"/
+	// "standalone"); the stats endpoints shape their payload by it.
+	Role() string
 }
 
 // catalogChanged tells the federation manager the shareable catalog may
@@ -358,4 +363,117 @@ func (s *Server) AdminPutFederation(w http.ResponseWriter, r *http.Request, c *a
 		return
 	}
 	writeJSON(w, http.StatusOK, f)
+}
+
+// fedSince parses ?days=N (default 30, bounded 1..365) into the UTC
+// RFC3339 lower bound the federation stats queries take.
+func fedSince(r *http.Request) (string, error) {
+	days := 30
+	if v := r.URL.Query().Get("days"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 365 {
+			return "", errors.New("days must be 1..365")
+		}
+		days = n
+	}
+	return time.Now().UTC().Add(-time.Duration(days) * 24 * time.Hour).Format(time.RFC3339), nil
+}
+
+// AdminFedStats serves GET /api/admin/federation/stats?days=N — the
+// federation ledger, role-dependent:
+//
+//	hub:   {"role":"hub","since":…,"users":[FedUserTotal…],"peers":[FedPeerTotal…]}
+//	       (the fairness ledger: every cross-peer flow wrote a consumed row
+//	       on the spender and a served row on the server)
+//	spoke: {"role":"spoke","since":…,"served_by_source":[FedSourceTotals…],
+//	       "consumed":[FedConsumedEntry…]}
+//	       (what this box served to which hub-stamped identity, and what
+//	       local users spent on federated models)
+//	other: {"role":"standalone"}
+func (s *Server) AdminFedStats(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
+	since, err := fedSince(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	role := store.FedRoleStandalone
+	if s.Fed != nil {
+		role = s.Fed.Role()
+	}
+	switch role {
+	case store.FedRoleHub:
+		users, err := store.FedUserTotals(s.DB, since, 0)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		peers, err := store.FedPeerTotals(s.DB, since)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"role": role, "since": since, "users": users, "peers": peers,
+		})
+	case store.FedRoleSpoke:
+		served, err := store.FedServedBySource(s.DB, since, "")
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		consumed, err := store.FedConsumedSlice(s.DB, since, 0)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"role": role, "since": since,
+			"served_by_source": served, "consumed": consumed,
+		})
+	default:
+		writeJSON(w, http.StatusOK, map[string]any{"role": role})
+	}
+}
+
+// FedStats serves GET /api/federation/stats?days=N — the caller's own
+// federation totals (session auth, always scoped to the caller):
+//
+//	hub:   {"role":"hub","since":…,"totals":[FedUserTotal]} — the caller's
+//	       served/consumed entry (empty when they have no federation rows).
+//	spoke: {"role":"spoke","since":…,"consumed":[FedConsumedEntry]} — what
+//	       the caller spent on federated models. Served rows belong to the
+//	       box, not to a session user, so they only appear on the admin view.
+//	other: {"role":"standalone"}
+func (s *Server) FedStats(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
+	since, err := fedSince(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	role := store.FedRoleStandalone
+	if s.Fed != nil {
+		role = s.Fed.Role()
+	}
+	switch role {
+	case store.FedRoleHub:
+		totals, err := store.FedUserTotals(s.DB, since, c.UserID)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"role": role, "since": since, "totals": totals,
+		})
+	case store.FedRoleSpoke:
+		consumed, err := store.FedConsumedSlice(s.DB, since, c.UserID)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"role": role, "since": since, "consumed": consumed,
+		})
+	default:
+		writeJSON(w, http.StatusOK, map[string]any{"role": role})
+	}
 }

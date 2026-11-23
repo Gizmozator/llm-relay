@@ -30,6 +30,10 @@ import (
 // consumed, so the group retry loop can still fail over on its errors.
 type FedTransport interface {
 	RoundTripFed(req *http.Request) (*http.Response, error)
+	// IsHub reports whether this relay is the federation hub: only the
+	// hub's usage_log is the fairness ledger, so only hub-side rows get
+	// the 'consumed' stamp for synthetic-backend traffic.
+	IsHub() bool
 }
 
 // schemeDispatch routes synthetic schemes to the federation tunnel and
@@ -84,13 +88,20 @@ func upstreamFor(cand store.GroupMember) string {
 	return cand.Model.UpstreamModel
 }
 
+// Usage-row federation directions (usage_log.fed_direction).
+const (
+	FedServed   = "served"   // this relay's capacity went to a peer
+	FedConsumed = "consumed" // this relay's account used a peer's capacity
+)
+
 // FedServe is the identity a tunneled request carries through the pipeline
 // (set by the fed frame server via WithFedServe). It replaces API-key
 // authentication for the duration of one served request.
 type FedServe struct {
-	// User/Key are the identity metering attributes: on the hub, the peer's
-	// owner user and a synthetic "federation" key; on a spoke serving the
-	// hub, an anonymous pair that is never recorded (NoMeter).
+	// User/Key are the identity the usage row is metered against: on the
+	// hub, the peer's owner user and a synthetic "federation" key; on a
+	// spoke serving the hub, an anonymous federation user (the real
+	// consumer's hub-side name rides in FedUser).
 	User *store.User
 	Key  *store.APIKey
 	// OriginPeer is the requesting peer as the receiver sees it (0 = not a
@@ -100,9 +111,13 @@ type FedServe struct {
 	// LocalOnly restricts member selection to local http(s) backends: a
 	// spoke serving a frame never re-forwards into the federation.
 	LocalOnly bool
-	// NoMeter suppresses the usage row (spoke serving side, task 3 scope:
-	// attribution columns land with task 4).
-	NoMeter bool
+	// FedDirection/FedUser are the usage-row attribution stamped onto
+	// every row this served request records: "consumed" on the hub (the
+	// peer's account spent; FedPeerID = OriginPeer) or "served" on a
+	// spoke (FedUser = the hub-stamped hub-side consumer name, the
+	// counterparty has no local peer row → NULL).
+	FedDirection string
+	FedUser      string
 }
 
 type fedServeKey struct{}
@@ -116,6 +131,23 @@ func WithFedServe(ctx context.Context, fs *FedServe) context.Context {
 func FedServeFrom(ctx context.Context) *FedServe {
 	fs, _ := ctx.Value(fedServeKey{}).(*FedServe)
 	return fs
+}
+
+type reqUserKey struct{}
+
+// WithRequestUser carries the authenticated relay user's name into the
+// outbound request context, so the federation tunnel can attribute a
+// hub-direct consumer on the wire (the fed layer only reads it when this
+// relay is the hub; spoke-local names never leave the spoke).
+func WithRequestUser(ctx context.Context, name string) context.Context {
+	return context.WithValue(ctx, reqUserKey{}, name)
+}
+
+// RequestUserFrom returns the name injected by WithRequestUser ("" when
+// absent).
+func RequestUserFrom(ctx context.Context) string {
+	s, _ := ctx.Value(reqUserKey{}).(string)
+	return s
 }
 
 // fedMemberFilter decides which group members a served (tunneled) request
