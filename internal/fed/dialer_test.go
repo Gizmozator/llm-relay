@@ -74,7 +74,11 @@ func newStubHub(t *testing.T) (*stubHub, *httptest.Server) {
 		for {
 			select {
 			case <-kick:
-				return // handler exit closes the socket
+				// Explicit close: a hijacked socket survives the handler
+				// return, so a bare return would leave the spoke staring
+				// at a half-open channel.
+				_ = c.Close(websocket.StatusGoingAway, "kicked")
+				return
 			default:
 			}
 			rctx, rcancel := context.WithTimeout(context.Background(), 50*time.Millisecond)

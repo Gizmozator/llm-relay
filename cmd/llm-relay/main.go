@@ -49,9 +49,10 @@ func main() {
 
 	// Federation channel singleton (plan 2026-11-22-relay-federation):
 	// owns the hub registry + spoke dialer; Reload applies the stored
-	// role at startup and after every settings PUT.
+	// role. Deferred below, AFTER AttachServe: a dialer started here could
+	// receive catalog frames whose tunnel would hit a mux with no frame
+	// server mounted yet.
 	fedMgr := fed.NewManager(d, nil)
-	fedMgr.Reload()
 	defer fedMgr.Close()
 
 	apiSrv := &api.Server{DB: d, JWTSecret: cfg.JWTSecret, JWTTTL: 12 * time.Hour,
@@ -61,6 +62,13 @@ func main() {
 	apiSrv.Flight = ph.Flight
 	ph.RelayURL = cfg.PublicRelayURL
 	ph.DashboardURL = cfg.PublicDashboardURL
+	// Federation seams on the proxy: the scheme-dispatching transport asks
+	// the Manager to tunnel peer://hub:// backends, the health cache asks
+	// it whether a synthetic backend's channel is up, and the Manager runs
+	// tunneled requests back through this mux (its frame server refuses
+	// any path outside /v1/).
+	ph.Fed = fedMgr
+	ph.Health.Synthetic = fedMgr.SyntheticOnline
 
 	healthz := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -88,6 +96,13 @@ func main() {
 	relayMux.Handle("GET /federation/v1/ping", apiSrv.PeerAuth(apiSrv.FederationPing))
 	relayMux.Handle("GET /federation/v1/connect", apiSrv.PeerAuth(apiSrv.FederationConnect))
 	relayMux.HandleFunc("POST /mcp", ph.MCP)
+	// Tunneled (federation) requests are served from this same mux; the
+	// fed frame server restricts them to /v1/* paths (see serve.go).
+	fedMgr.AttachServe(relayMux)
+	// Start federation only now that the tunnel's target mux is complete:
+	// the stored role comes alive (spoke dialer starts, hub purges stale
+	// materialized rows) with every route in place.
+	fedMgr.Reload()
 
 	// Dashboard port: JWT API + embedded SPA. This is the port to put
 	// behind the reverse proxy.

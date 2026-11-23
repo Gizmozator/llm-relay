@@ -37,7 +37,14 @@ type FlightSource interface {
 // healthStatus returns the lazily created shared health cache (the probe
 // rules live in internal/proxy so the agent endpoints use the same ones).
 func (s *Server) healthStatus() *proxy.HealthCache {
-	s.healthOnce.Do(func() { s.health = proxy.NewHealthCache() })
+	s.healthOnce.Do(func() {
+		s.health = proxy.NewHealthCache()
+		// Materialized federation backends have no HTTP endpoint: their
+		// health is the live channel (same rule the proxy enforces).
+		if s.Fed != nil {
+			s.health.Synthetic = s.Fed.SyntheticOnline
+		}
+	})
 	return s.health
 }
 

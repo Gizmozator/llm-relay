@@ -46,6 +46,18 @@ type Hub struct {
 
 	mu      sync.Mutex
 	entries map[int64]*entry
+
+	// Hooks into the Manager (task 3): onEvent fires when a peer's live
+	// channel appears or disappears; attach wires the catalog/tunnel
+	// handlers onto a freshly registered Conn. Both are set once at
+	// construction (SetHooks), never mutated concurrently.
+	onEvent func(peerID int64, online bool)
+	attach  func(c *Conn, peer *store.Peer)
+}
+
+// SetHooks installs the Manager's registry hooks (see Hub fields).
+func (h *Hub) SetHooks(onEvent func(int64, bool), attach func(*Conn, *store.Peer)) {
+	h.onEvent, h.attach = onEvent, attach
 }
 
 func NewHub(db *sql.DB, opts Options, name, version string) *Hub {
@@ -86,6 +98,40 @@ func (h *Hub) Send(peerID int64, f Frame) error {
 		return ErrNotOnline
 	}
 	return e.conn.Send(f)
+}
+
+// OpenRequest registers a request id on a peer's channel (task 3's tunnel
+// and transit): frames answering that id route back to the returned
+// channel. ErrNotOnline when the peer has no live channel.
+func (h *Hub) OpenRequest(peerID int64, id string) (<-chan Frame, func(), error) {
+	h.mu.Lock()
+	e, ok := h.entries[peerID]
+	h.mu.Unlock()
+	if !ok || e.conn.Closed() {
+		return nil, nil, ErrNotOnline
+	}
+	return e.conn.OpenRequest(id)
+}
+
+// connFor returns a peer's live Conn (nil when offline).
+func (h *Hub) connFor(peerID int64) *Conn {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if e, ok := h.entries[peerID]; ok && !e.conn.Closed() {
+		return e.conn
+	}
+	return nil
+}
+
+// connDone returns the peer channel's death signal; an already-closed
+// channel when the peer is not registered (callers select on it unconditionally).
+func (h *Hub) connDone(peerID int64) <-chan struct{} {
+	if c := h.connFor(peerID); c != nil {
+		return c.Done()
+	}
+	ch := make(chan struct{})
+	close(ch)
+	return ch
 }
 
 // Kick closes the peer's live channel with 1008 + reason (async: the
@@ -172,7 +218,24 @@ func (h *Hub) ServeConn(w http.ResponseWriter, r *http.Request, peer *store.Peer
 		PeerID: peer.ID, Name: peer.Name, Version: ver,
 		ConnectedAt: time.Now(),
 	}}
+	if h.attach != nil {
+		h.attach(conn, peer)
+	}
 	h.register(e)
+	// Post-register role re-check: the role gate ran before the upgrade, but
+	// a PUT /federation landing during the handshake must not leave a live
+	// channel on a relay that is no longer a hub. Reload's CloseAll may race
+	// with this registration (entry not yet present), so self-close here.
+	// A failed settings read KEEPS the channel — same contract as the Touch
+	// sweep: a transient SQLITE_BUSY must not disconnect a healthy peer,
+	// and a real transition CloseAll's the channel anyway.
+	if f2, err := store.GetFederationSettings(h.db); err != nil {
+		h.opts.Log.Printf("fed: post-register role check peer %d: %v", peer.ID, err)
+	} else if f2.Role != store.FedRoleHub {
+		h.unregister(peer.ID, conn)
+		conn.Close(websocket.StatusPolicyViolation, "role changed")
+		return
+	}
 	// The handler may return while the channel lives: Accept hijacked the
 	// connection, so net/http will not close it on handler exit, and the
 	// pumps run on their own context (never r.Context(), which dies with
@@ -253,10 +316,19 @@ func (h *Hub) handshake(ws *websocket.Conn, peer *store.Peer) (string, error) {
 // register installs e, replacing (and closing) any previous channel for
 // the same peer: a spoke restart takes over immediately instead of
 // leaving the hub waiting for the dead socket's pong timeout.
+//
+// The liveness event fires UNDER h.mu so online/offline events deliver in
+// registry order (an old channel's exit must not mark a freshly replaced
+// peer offline behind the new registration's back). The handler contract
+// is therefore: cheap, no Hub re-entry, no manager-lock inversion — see
+// Manager.peerEvent.
 func (h *Hub) register(e *entry) {
 	h.mu.Lock()
 	old := h.entries[e.info.PeerID]
 	h.entries[e.info.PeerID] = e
+	if h.onEvent != nil {
+		h.onEvent(e.info.PeerID, true)
+	}
 	h.mu.Unlock()
 	if old != nil && old.conn != e.conn {
 		go old.conn.Close(websocket.StatusPolicyViolation, "replaced")
@@ -264,11 +336,19 @@ func (h *Hub) register(e *entry) {
 }
 
 // unregister drops the peer only if the entry is still this conn — a
-// replacement must not be evicted by the old channel's exit.
+// replacement must not be evicted by the old channel's exit. The liveness
+// event fires only on a real removal (and, like register, under h.mu for
+// delivery order): a replaced peer stays online, and the old channel's
+// exit must not mark it offline.
 func (h *Hub) unregister(peerID int64, c *Conn) {
 	h.mu.Lock()
-	if e, ok := h.entries[peerID]; ok && e.conn == c {
+	e, ok := h.entries[peerID]
+	removed := ok && e.conn == c
+	if removed {
 		delete(h.entries, peerID)
+		if h.onEvent != nil {
+			h.onEvent(peerID, false)
+		}
 	}
 	h.mu.Unlock()
 }

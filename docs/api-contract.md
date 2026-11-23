@@ -62,7 +62,7 @@ Proxy requests may carry `X-Session-Id: <string>`; without it the relay derives 
 ### Admin — models (public catalog)
 - `GET /api/admin/models` → `{"models":[{"id":1,"name":"halogen","backend_id":1,"backend_name":"halogen","upstream_model":"halogen-qwen3.8-flash-next","visibility":"public","enabled":true,"price_in":100,"price_out":200,"price_cache_read":10,"price_cache_write":0,"context_length":262144,"concurrency_limit":4,"busy_threshold_pct":80,"bench_tok_per_s":41.2,"bench_pp_tok_per_s":1850.4,"bench_at":"...|","fed_visibility":"off","fed_peer_ids":[]}]}`
 - `PATCH /api/admin/models/{id}` — any of `{"name","enabled","visibility","price_in","price_out","price_cache_read","price_cache_write","context_length","concurrency_limit","busy_threshold_pct","bench_tok_per_s","bench_pp_tok_per_s","fed_visibility","fed_peer_ids"}` → model object. `visibility` is `"public"` (listed on `/v1/models`) or `"internal"` (hidden from the catalog but still directly requestable); group members are forced `internal` by the store on every membership edit. `bench_tok_per_s`/`bench_pp_tok_per_s` (float ≥0) set the generation/prompt-processing speed manually and clear `bench_at` (configured value, not a measured benchmark). `busy_threshold_pct` (0–10000, else `400`) is the mean-busy % at which the agent surfaces report `busy`; `0` = default 80, values over 100 require that many parallel streams (300 = busy from 3 concurrent). New models are created with `80`.
-- `POST /api/admin/models/{id}/benchmark` — runs two timed **streaming** calls against the upstream. Decode pass (TG): natural-prose prompt; speed = completion tokens over first→last token, so speculative/MTP decoding is measured at realistic acceptance rates. Prefill pass (PP): ~10k-token randomized filler prompt (shrunk to ¾ of `context_length` when that is smaller), `max_tokens=1`; speed = `prompt_tokens` over request→first token (prefill completes before the first token is emitted). May take minutes; `409` while another benchmark runs. → `{"bench_tok_per_s":41.2,"completion_tokens":700,"seconds":17.0,"bench_pp_tok_per_s":1850.4,"prompt_tokens":9876,"pp_seconds":5.3,"bench_at":"..."}`. A failed prefill pass never voids the decode result: TG is stored, the previous PP value is kept, and the response carries `"pp_error":"..."` instead of the `bench_pp_tok_per_s`/`prompt_tokens`/`pp_seconds` fields.
+- `POST /api/admin/models/{id}/benchmark` — runs two timed **streaming** calls against the upstream. Decode pass (TG): natural-prose prompt; speed = completion tokens over first→last token, so speculative/MTP decoding is measured at realistic acceptance rates. Prefill pass (PP): ~10k-token randomized filler prompt (shrunk to ¾ of `context_length` when that is smaller), `max_tokens=1`; speed = `prompt_tokens` over request→first token (prefill completes before the first token is emitted). May take minutes; `409` while another benchmark runs; `400` for a federated (materialized) model — its "upstream" is a peer relay, not an engine. → `{"bench_tok_per_s":41.2,"completion_tokens":700,"seconds":17.0,"bench_pp_tok_per_s":1850.4,"prompt_tokens":9876,"pp_seconds":5.3,"bench_at":"..."}`. A failed prefill pass never voids the decode result: TG is stored, the previous PP value is kept, and the response carries `"pp_error":"..."` instead of the `bench_pp_tok_per_s`/`prompt_tokens`/`pp_seconds` fields.
 - `DELETE /api/admin/models/{id}` → `204`
 
 ### Admin — model groups
@@ -70,7 +70,7 @@ A group pools several catalog model rows (typically the same model on different 
 - `GET /api/admin/groups` → `{"groups":[{"id":1,"name":"qwen3-coder","enabled":true,"member_count":2,"members":[{"model_id":3,"weight":41.2,"position":0,"model_name":"qwen3-coder-a","backend_name":"gpu1","upstream_model":"qwen3-coder","visibility":"internal","model_enabled":true,"backend_enabled":true,"backend_draining":false}]}]}`
 - `POST /api/admin/groups` — `{"name"}` → `201` group object (empty `members`). New groups are born **disabled**; enabling requires ≥1 member. `400` blank/invalid name · `409` name taken.
 - `GET /api/admin/groups/{id}` → group object (same shape as list entries) · `404` unknown id
-- `PATCH /api/admin/groups/{id}` — partial merge of any of `{"name","enabled","members"}` → group object. `members` is a **full replacement** list of `{"model_id","weight","position"}` (≤256 entries, else `400`): `weight` 0/omitted seeds from the model's `bench_tok_per_s` (relative share of new sessions); `position` is the member order. `409` when the name would shadow a public model or another group, when a model already belongs to a different group, when the same model is listed twice in `members`, or when enabling a group with no members.
+- `PATCH /api/admin/groups/{id}` — partial merge of any of `{"name","enabled","members"}` → group object. `members` is a **full replacement** list of `{"model_id","weight","position"}` (≤256 entries, else `400`): `weight` 0/omitted seeds from the model's `bench_tok_per_s` (relative share of new sessions); `position` is the member order. `409` when the name would shadow a public model or another group, when a model already belongs to a different group, when the same model is listed twice in `members`, or when enabling a group with no members; `400` when a member is a federated (materialized) model — those rows belong to the federation materializer and cannot join an admin group.
 - `DELETE /api/admin/groups/{id}` → `204` (members are released, not deleted)
 
 ### Admin — settings
@@ -127,11 +127,10 @@ Federation channel (relay port, `fed-` tokens):
   A second connect with the same token **replaces** the live channel
   (old socket closed `1008 "replaced"`).
 - Frame envelope: JSON text frames `{"t":<type>,"id"?,"...payload"}`,
-  read limit 4 MiB/frame. Types: `hello`, `hello_ack`, `ping`, `pong`
-  (implemented now) and `catalog`, `status`, `req`, `res`, `res_body`,
-  `res_end` (codec defined, handlers land with task 3; unknown types are
-  ignored for forward-compat). Binary payloads (`req.body`,
-  `res_body.data`) ride base64 inside the JSON.
+  read limit 4 MiB/frame. Types: `hello`, `hello_ack`, `ping`, `pong`,
+  `catalog`, `status`, `req`, `res`, `res_body`, `res_end`, `cancel`
+  (unknown types are ignored for forward-compat). Binary payloads
+  (`req.body`, `res_body.data`) ride base64 inside the JSON.
 - Liveness (both sides): `ping` every **20 s**; the channel must show any
   inbound frame within **10 s** of it or it closes (`1008 "pong
   timeout"`). The hub refreshes the peer's `last_seen` at most once per
@@ -146,6 +145,100 @@ Federation channel (relay port, `fed-` tokens):
   (`1008 "revoked"`), so revocation lands within ~30 s either way. A
   spoke reconnects only with a valid token: after a rotate, the old
   channel stays dead until the spoke's config carries the new token.
+
+#### Catalog sync (task 3)
+
+- `catalog {origin?,models,groups}` — the sender's shared catalog.
+  `origin` labels whose entries these are: `0`/absent = the sender's own;
+  a peer id = another spoke's entries relayed by the hub. `models` and
+  `groups` are **always serialized**, and null vs empty differ in meaning:
+  `null`/absent = "this frame carries no data for that section" (partial
+  or malformed frame — the receiver skips it, never prunes); `[]` = "shares
+  nothing" and does prune the materialized rows of that section. A model
+  entry carries `name`, `upstream_model`, the four prices, `context_length`
+  and the bench/concurrency meta; a group entry carries `name` plus members
+  as `{model_name,weight}` — **names only, ids never cross the wire**.
+- A spoke pushes its catalog right after `hello_ack` and after every
+  debounced (**500 ms**) local change to model sharing/enabled, backend
+  enabled or groups. Only `fed_visibility='all'` models are shared from a
+  spoke: `allowlist` names rows of *this* instance's peer table, which a
+  spoke does not have — it shares nobody.
+- The hub answers each spoke with the **merged catalog**: every other
+  spoke's relayed entries (one frame per origin, `origin=<peer id>`)
+  first, then its own frame (`origin:0`) — its `SharedWithPeer`-filtered
+  models plus its enabled groups, each pre-filtered to members visible to
+  that peer (a group with no visible member is not named at all).
+- `status {peer_id,online}` — the hub broadcasts peer liveness on connect
+  and channel death; a spoke maps it onto that peer's materialized
+  backend (offline = disabled backend, rows kept so model ids survive the
+  flap). Direction is **hub→spoke only**: a spoke cannot push status (it
+  does not know its own peer id, and a peer that could name a victim could
+  flip another peer's backend at the hub), so hub channels ignore inbound
+  status frames.
+
+#### Materialization
+
+A peer's catalog becomes ordinary local rows: models on a **synthetic
+backend** whose `base_url` is `peer://<peer-id>` (or `hub://federation` on
+a spoke, for the hub's own entries), and, on a spoke, the hub's groups as
+`model_groups` rows marked `federated=1`. From there HRW affinity,
+health, drain, `/v1/models` and metering treat them like local rows.
+Rules: upsert by `(backend,name)` keeps row ids stable across catalog
+churn; a frame prunes what it no longer advertises (subject to the
+null-vs-empty rule above — a section with no data never prunes); a peer
+delete removes its backend and rows; startup and role transitions purge
+all synthetic rows (they are rebuilt from live frames), and the purge also
+returns federated-group members to `public` — leaving the federation
+undoes what a federated group did to a local model. Synthetic backends are
+never HTTP-probed — their health **is** the channel — and the admin probe
+and benchmark endpoints refuse them (`400`).
+Collision policy: a shared name owned by a local group or a local
+(non-synthetic) public model is **skipped with a logged warning** (the
+admin renames on their side); two peers advertising the same name is fine
+(distinct backends). Group members resolve local-first: a spoke with its
+own copy of a member model hashes its own sessions to it — and stays that
+member across re-pushes (a member row's membership in the very federated
+group being re-applied never disqualifies it). A catalog frame
+is dropped (with a log line) when it arrives on a channel the manager no
+longer trusts — role changed since the channel opened, or the channel was
+replaced — so a dying channel's queued frames cannot re-materialize rows
+a role transition just purged.
+
+#### Request tunnel
+
+- `req {id,target?,origin?,method,path,headers,body}` — one tunneled
+  request; `target:0` (or absent) means "serve here", `target=<peer-id>`
+  means "transit to that spoke" (spoke→spoke via the hub; never routes a
+  frame back to its origin — loop guard). `origin` is **receiver-derived,
+  never sender-trusted**: each relay labels a request with the peer id of
+  the channel it arrived on (a spoke always arrives as `0` to its hub;
+  the hub stamps the requesting peer on transit), so a spoke cannot claim
+  another peer's id to inherit its sharing rights.
+  `res {id,status,headers}` / `res_body {id,data}`
+  / `res_end {id,error?}` stream the answer; `cancel {id}` aborts it.
+  Bodies are capped at **3 MiB − 4 KiB** raw per frame (base64 stays
+  under the 4 MiB read limit); an oversized request fails as a dial
+  error. At most **16** concurrent tunneled requests per peer channel —
+  the cap surfaces as a dial failure, which the group retry loop already
+  treats as failover.
+- Outbound: a `peer://`/`hub://` backend is dialed through the channel by
+  the proxy's scheme-dispatching transport; auth headers and hop-by-hop
+  framing are stripped at the hop, `X-Session-Id` survives (affinity
+  crosses the tunnel), and the model name on the wire stays the *catalog
+  name* — the serving relay applies its own upstream mapping locally.
+- Serving side: the hub serves a spoke's request as the peer's **owner
+  user** with a synthetic `federation` key (`api_key_id=0`; attribution
+  columns land with task 4) and enforces the sharing rules — a model not
+  shared with the requesting peer answers `403 {"error":{"message":"model
+  \"x\" is not shared with this peer"}}`, and group members invisible to
+  the peer are dropped before ranking. A spoke serving the hub uses local
+  engines only (never re-forwards), applies its own stored backend keys,
+  and records no usage rows (task 3 scope) — and it enforces **its own**
+  sharing rules on the hub's requests too: a model with
+  `fed_visibility='off'` (or `allowlist` — a spoke shares nobody by name)
+  answers the same `403`, so a compromised hub cannot name a private
+  spoke model into serving. Only `/v1/*` paths are
+  served over the tunnel.
 
 
 Admin usage = same summary/detail endpoints under `/api/admin/usage/...` with extra optional `user_id`, `key_id` params; detail rows always include `username`.

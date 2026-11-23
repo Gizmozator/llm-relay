@@ -42,6 +42,9 @@ type Handler struct {
 	// Health caches backend reachability for the agent endpoints; the
 	// dashboard API keeps its own instance (same rules, same TTL).
 	Health *HealthCache
+	// Fed tunnels peer:// and hub:// backends through a federation channel
+	// (nil = standalone: synthetic schemes fail as unroutable).
+	Fed FedTransport
 	// RelayURL is the public relay ROOT (PUBLIC_RELAY_URL, no /v1),
 	// used to render the agent guide. Empty renders the placeholder as-is.
 	RelayURL string
@@ -52,24 +55,24 @@ type Handler struct {
 }
 
 func New(db *sql.DB, rec *usage.Recorder, trustProxyHeaders bool) *Handler {
-	return &Handler{
+	h := &Handler{
 		DB:                db,
 		Rec:               rec,
 		TrustProxyHeaders: trustProxyHeaders,
 		Flight:            NewInFlight(),
 		Sessions:          NewSessionTracker(),
 		Health:            NewHealthCache(),
-		// No overall client timeout: generations may run for many minutes
-		// (OCR sends 10+ min non-streaming requests). Bounded at the
-		// transport level instead: dial and TLS handshake only.
-		Client: &http.Client{
-			Transport: &http.Transport{
-				DialContext:         (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-				TLSHandshakeTimeout: 10 * time.Second,
-				MaxIdleConnsPerHost: 8,
-			},
-		},
 	}
+	inner := &http.Transport{
+		DialContext:         (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		TLSHandshakeTimeout: 10 * time.Second,
+		MaxIdleConnsPerHost: 8,
+	}
+	// No overall client timeout: generations may run for many minutes
+	// (OCR sends 10+ min non-streaming requests). Bounded at the
+	// transport level instead: dial and TLS handshake only.
+	h.Client = &http.Client{Transport: &schemeDispatch{inner: inner, h: h}}
+	return h
 }
 
 // Mux returns a handler with all relay routes registered — used by main and
@@ -134,11 +137,24 @@ func (h *Handler) Models(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handle(w http.ResponseWriter, r *http.Request, endpoint string, record bool) {
 	start := time.Now()
 
-	key, user, err := h.authKey(r)
-	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid API key")
-		return
+	// A tunneled request arrives with an injected identity (fed frame
+	// server); ordinary traffic authenticates its relay API key.
+	fs := FedServeFrom(r.Context())
+	var key *store.APIKey
+	var user *store.User
+	if fs != nil && fs.User != nil && fs.Key != nil {
+		key, user = fs.Key, fs.User
+	} else {
+		var err error
+		key, user, err = h.authKey(r)
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, "invalid API key")
+			return
+		}
 	}
+	// The spoke serving side records nothing (task 3 scope: federation
+	// attribution columns land with task 4).
+	meter := record && (fs == nil || !fs.NoMeter)
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
 	if err != nil {
@@ -171,6 +187,51 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request, endpoint string
 		log.Printf("resolve target %q: %v", peek.Model, err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
+	}
+	// Serving gates for tunneled traffic. A spoke-side served request
+	// (LocalOnly) may only touch local engines: a plain model materialized
+	// from the federation is not servable here — the spoke must have asked
+	// the hub, not the other way around.
+	//
+	// Both served sides enforce the sharing rules. The hub keys on the
+	// requesting peer's id; the spoke keys on LocalOnly with peer id 0 —
+	// the hub's own traffic arrives with OriginPeer=0 (a spoke has no peer
+	// rows), and SharedWithPeer(model, 0) is exactly the spoke's semantics:
+	// 'all' → true, 'allowlist' → no rows for peer 0 → false, 'off' →
+	// false. Without the LocalOnly arm a compromised hub could name an
+	// 'off' model in a req frame and get it served. Not shared → 403 with
+	// a clear body; for a group, invisible members are dropped before
+	// ranking (the catalog only advertises visible ones, so an invisible
+	// pick means a stale or forged request).
+	if fs != nil && fs.LocalOnly && tgt.Kind == store.TargetModel {
+		if _, _, syn := store.SyntheticBaseURL(tgt.Backend.BaseURL); syn {
+			writeError(w, http.StatusNotFound, fmt.Sprintf("model %q not found", peek.Model))
+			return
+		}
+	}
+	if fs != nil && (fs.OriginPeer != 0 || fs.LocalOnly) {
+		switch tgt.Kind {
+		case store.TargetGroup:
+			keep := make([]store.GroupMember, 0, len(tgt.Members))
+			for _, mem := range tgt.Members {
+				if fedShareVisible(h.DB, mem, fs.OriginPeer) {
+					keep = append(keep, mem)
+				}
+			}
+			if len(keep) == 0 {
+				writeError(w, http.StatusForbidden,
+					fmt.Sprintf("model %q is not shared with this peer", peek.Model))
+				return
+			}
+			tgt.Members = keep
+		case store.TargetModel:
+			mem := store.GroupMember{Model: tgt.Model, Backend: tgt.Backend}
+			if !fedShareVisible(h.DB, mem, fs.OriginPeer) {
+				writeError(w, http.StatusForbidden,
+					fmt.Sprintf("model %q is not shared with this peer", peek.Model))
+				return
+			}
+		}
 	}
 	// The session key uses the REQUESTED name: for a group that is the group
 	// name, so affinity (and metering) stays stable across membership edits.
@@ -276,8 +337,8 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request, endpoint string
 			log.Printf("relay: client gone before upstream attempt: %v", cerr)
 			return
 		}
-		fwdBody := rewriteBody(body, cand.Model.UpstreamModel, endpoint, peek.Stream)
-		url := strings.TrimRight(cand.Backend.BaseURL, "/") + r.URL.Path
+		fwdBody := rewriteBody(body, upstreamFor(cand), endpoint, peek.Stream)
+		url := joinBackendURL(cand.Backend.BaseURL, r.URL.Path)
 		var derr error
 		req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, url, bytes.NewReader(fwdBody))
 		if err != nil {
@@ -311,7 +372,7 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request, endpoint string
 			return
 		}
 		if i == len(candidates)-1 {
-			h.record(record, start, user, key, r, endpoint, session, model, peek.Model,
+			h.record(meter, start, user, key, r, endpoint, session, model, peek.Model,
 				pricing.Tokens{}, pricing.Costs{}, false, false, http.StatusBadGateway, "upstream request failed")
 			writeError(w, http.StatusBadGateway, "upstream unavailable")
 			return
@@ -394,7 +455,7 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request, endpoint string
 		costs = pricing.Compute(model, tok)
 		pricing.ApplyMultiplier(&costs, user.PriceMultiplier)
 	}
-	h.record(record, start, user, key, r, endpoint, session, model, peek.Model,
+	h.record(meter, start, user, key, r, endpoint, session, model, peek.Model,
 		tok, costs, stream, estimated, status, errMsg)
 }
 

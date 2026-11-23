@@ -1,9 +1,8 @@
-// Federation wire protocol (plan 2026-11-22-relay-federation, task 2):
+// Federation wire protocol (plan 2026-11-22-relay-federation, tasks 2–3):
 // JSON text frames over one WebSocket per peer. Every frame is an object
-// {"t": <type>, "id"?: <request-id>, ...payload}. Task 2 implements
-// hello/hello_ack/ping/pong; the catalog/status/req/res types are defined
-// and registered here so the codec is complete, but no handlers exist yet
-// — task 3 (catalog sync + tunnel) registers them.
+// {"t": <type>, "id"?: <request-id>, ...payload}. Task 2 shipped
+// hello/hello_ack/ping/pong; task 3 added the catalog/status/cancel handlers
+// and the req/res/res_body/res_end tunnel.
 //
 // Binary payloads (HTTP body chunks) ride as JSON strings: Go's
 // encoding/json encodes []byte as base64 automatically, so ResBody.Data
@@ -32,9 +31,17 @@ const (
 	TRes      = "res"
 	TResBody  = "res_body"
 	TResEnd   = "res_end"
+	TCancel   = "cancel"
 	TPing     = "ping"
 	TPong     = "pong"
 )
+
+// MaxBody caps the raw bytes of one tunneled body frame: a request body
+// (Req) or one response chunk (ResBody). The wire form is base64 (~4/3 of
+// raw), and base64 of 3 MiB is exactly the 4 MiB ReadLimit, so the cap sits
+// a page below 3 MiB to leave room for the JSON envelope — a peer that
+// honors MaxBody can never produce a frame the read pump refuses.
+const MaxBody = 3<<20 - 4<<10
 
 // Frame is a decoded protocol frame. Every type carries its tag so a
 // re-encoded frame keeps its identity.
@@ -63,39 +70,84 @@ type HelloAck struct {
 	Version string `json:"version"`
 }
 
-// CatalogModel is one advertised model in a catalog frame. Task 3 fills in
-// the materialization fields it needs (pricing, context, bench); the shape
-// here is deliberately minimal.
+// CatalogModel is one advertised model: everything the receiving side needs
+// to materialize it as an ordinary model row (pricing, context, bench,
+// concurrency meta). Names are the advertising relay's local names; ids
+// never cross the wire.
 type CatalogModel struct {
-	Name          string `json:"name"`
-	UpstreamModel string `json:"upstream_model"`
-	PriceIn       int64  `json:"price_in"`
-	PriceOut      int64  `json:"price_out"`
-	ContextLength int64  `json:"context_length"`
+	Name             string  `json:"name"`
+	UpstreamModel    string  `json:"upstream_model"`
+	PriceIn          int64   `json:"price_in"`
+	PriceOut         int64   `json:"price_out"`
+	PriceCacheRead   int64   `json:"price_cache_read"`
+	PriceCacheWrite  int64   `json:"price_cache_write"`
+	ContextLength    int64   `json:"context_length"`
+	BenchTokPerS     float64 `json:"bench_tok_per_s,omitempty"`
+	ConcurrencyLimit int64   `json:"concurrency_limit,omitempty"`
+	BusyThresholdPct int64   `json:"busy_threshold_pct,omitempty"`
 }
 
-// Catalog advertises the sender's shared model list (task 3).
+// CatalogGroupMember is one group member by MODEL NAME (ids are local to
+// the advertising relay): the receiving side maps names to its own rows,
+// which is what makes local-first resolution fall out.
+type CatalogGroupMember struct {
+	ModelName string  `json:"model_name"`
+	Weight    float64 `json:"weight"`
+}
+
+// CatalogGroup is one federated group: a public name over several members,
+// materialized on the spoke as an ordinary (federated-marked) group.
+type CatalogGroup struct {
+	Name    string               `json:"name"`
+	Members []CatalogGroupMember `json:"members"`
+}
+
+// Catalog advertises the sender's shared model list. Origin labels whose
+// catalog the entries are: 0 = the sender's own (a spoke always sends 0;
+// the hub labels relayed spoke entries with the advertising peer's id so a
+// spoke can hang them off per-peer synthetic backends).
+//
+// Models and Groups deliberately carry NO omitempty: JSON null means "this
+// frame carries no data for that section" (a partial or malformed frame —
+// the receiver must skip it, never prune), while [] is a legitimate
+// "shares nothing" and does prune. An omitted field would decode to nil
+// and be indistinguishable from no-data, letting one failed list query
+// wipe every materialized row on the peer.
 type Catalog struct {
 	T      string         `json:"t"`
+	Origin int64          `json:"origin,omitempty"`
 	Models []CatalogModel `json:"models"`
+	Groups []CatalogGroup `json:"groups"`
 }
 
-// Status propagates peer liveness through the hub (task 3): which peers
-// came online / went offline since the last frame.
+// Status propagates one peer's liveness through the hub (task 3): the hub
+// broadcasts it when a peer connects or its channel dies, and a spoke maps
+// it onto the peer's synthetic backend (offline → disabled backend, rows
+// kept so model ids survive the reconnect).
 type Status struct {
-	T       string  `json:"t"`
-	Online  []int64 `json:"online,omitempty"`
-	Offline []int64 `json:"offline,omitempty"`
+	T      string `json:"t"`
+	PeerID int64  `json:"peer_id"`
+	Online bool   `json:"online"`
 }
 
-// Req is a tunneled HTTP request (task 3), keyed by its request id.
+// Req is a tunneled HTTP request, keyed by its request id. TargetPeer 0
+// means "serve here"; a non-zero id means "forward to that peer" (spoke →
+// spoke transit via the hub). OriginPeer is the requesting peer — but it
+// is RECEIVER-derived, never sender-trusted: each side labels a frame with
+// the peer id of the channel it arrived on (the hub stamps it onward on
+// transit), so a spoke cannot claim another peer's id to inherit its
+// sharing rights. The loop guard never routes a request back to its
+// origin, and the hub's sharing gate checks against the derived origin.
+// Body is capped at MaxBody raw bytes.
 type Req struct {
-	T       string  `json:"t"`
-	ID      string  `json:"id"`
-	Method  string  `json:"method"`
-	Path    string  `json:"path"`
-	Headers Headers `json:"headers,omitempty"`
-	Body    []byte  `json:"body,omitempty"` // base64 on the wire
+	T          string  `json:"t"`
+	ID         string  `json:"id"`
+	TargetPeer int64   `json:"target,omitempty"`
+	OriginPeer int64   `json:"origin,omitempty"`
+	Method     string  `json:"method"`
+	Path       string  `json:"path"`
+	Headers    Headers `json:"headers,omitempty"`
+	Body       []byte  `json:"body,omitempty"` // base64 on the wire
 }
 
 // Res is the response head of a tunneled request (task 3).
@@ -122,6 +174,14 @@ type ResEnd struct {
 	Error string `json:"error,omitempty"`
 }
 
+// Cancel aborts an in-flight tunneled request (task 3): the client sends it
+// when its own consumer hung up, the hub forwards it along the transit path.
+// The serving side maps the id to the served request's context cancel.
+type Cancel struct {
+	T  string `json:"t"`
+	ID string `json:"id"`
+}
+
 // Ping is the liveness probe; any inbound frame answers it, but an
 // explicit Pong keeps the channel honest when nothing else flows.
 type Ping struct {
@@ -141,6 +201,7 @@ func (Req) FrameType() string      { return TReq }
 func (Res) FrameType() string      { return TRes }
 func (ResBody) FrameType() string  { return TResBody }
 func (ResEnd) FrameType() string   { return TResEnd }
+func (Cancel) FrameType() string   { return TCancel }
 func (Ping) FrameType() string     { return TPing }
 func (Pong) FrameType() string     { return TPong }
 
@@ -155,6 +216,7 @@ var frameFactories = map[string]func() Frame{
 	TRes:      func() Frame { return &Res{} },
 	TResBody:  func() Frame { return &ResBody{} },
 	TResEnd:   func() Frame { return &ResEnd{} },
+	TCancel:   func() Frame { return &Cancel{} },
 	TPing:     func() Frame { return &Ping{} },
 	TPong:     func() Frame { return &Pong{} },
 }

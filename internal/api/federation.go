@@ -55,6 +55,25 @@ type FedController interface {
 	// KickPeer drops a peer's live channel now (disable/rotate/delete
 	// must not wait for the hub's revocation sweep).
 	KickPeer(peerID int64, reason string)
+	// CatalogChanged signals that this instance's shareable catalog may
+	// have changed (model fed_visibility/enabled, backend-enabled, group
+	// edits); the manager debounces and re-pushes to every live channel.
+	CatalogChanged()
+	// PeerRemoved tears down a deleted peer's materialized rows and
+	// stops relaying its catalog (called after the peer row is deleted).
+	PeerRemoved(peerID int64)
+	// SyntheticOnline answers the health cache for a peer://hub://
+	// backend: its health is the channel, there is nothing to probe.
+	SyntheticOnline(b store.Backend) bool
+}
+
+// catalogChanged tells the federation manager the shareable catalog may
+// have moved (nil-safe when federation is not wired; a no-op cost on a
+// standalone relay — the debounced push finds no channels to push to).
+func (s *Server) catalogChanged() {
+	if s.Fed != nil {
+		s.Fed.CatalogChanged()
+	}
 }
 
 // kickPeer drops the peer's live federation channel if one exists
@@ -62,6 +81,14 @@ type FedController interface {
 func (s *Server) kickPeer(id int64, reason string) {
 	if s.Fed != nil {
 		s.Fed.KickPeer(id, reason)
+	}
+}
+
+// peerRemoved is the delete-side companion of kickPeer: drop the live
+// channel AND the peer's materialized rows (nil-safe, see kickPeer).
+func (s *Server) peerRemoved(id int64) {
+	if s.Fed != nil {
+		s.Fed.PeerRemoved(id)
 	}
 }
 
@@ -190,6 +217,7 @@ func (s *Server) DeleteMyPeer(w http.ResponseWriter, r *http.Request, c *auth.Cl
 		return
 	}
 	s.kickPeer(id, "deleted")
+	s.peerRemoved(id)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -280,6 +308,7 @@ func (s *Server) AdminDeletePeer(w http.ResponseWriter, r *http.Request, c *auth
 		return
 	}
 	s.kickPeer(id, "deleted")
+	s.peerRemoved(id)
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -44,6 +44,9 @@ type Options struct {
 	BackoffMax    time.Duration // spoke reconnect backoff ceiling (60s)
 	StableAfter   time.Duration // connection alive this long resets backoff (60s)
 	DialTimeout   time.Duration // spoke: dial+upgrade budget per attempt (10s)
+	// CatalogDebounce coalesces a burst of local catalog edits (model
+	// toggles, group edits) into one catalog re-push (default 500ms).
+	CatalogDebounce time.Duration
 	// InstanceName / Version identify this instance in hello/hello_ack.
 	InstanceName string
 	Version      string
@@ -82,6 +85,9 @@ func (o *Options) withDefaults() Options {
 	}
 	if d.DialTimeout == 0 {
 		d.DialTimeout = 10 * time.Second
+	}
+	if d.CatalogDebounce == 0 {
+		d.CatalogDebounce = 500 * time.Millisecond
 	}
 	if d.Log == nil {
 		d.Log = log.Default()
@@ -291,8 +297,9 @@ func (c *Conn) Serve(ctx context.Context) error {
 		if h != nil {
 			h(c, f)
 		}
-		// Unhandled known types (catalog/status/req/res before task 3)
-		// are ignored: a channel stays alive even if one feature is dark.
+		// Frames this channel does not serve (e.g. a Status arriving at a
+		// hub, which only ever sends them — see attachChannel) are ignored:
+		// a channel stays alive even if one feature is dark.
 	}
 }
 

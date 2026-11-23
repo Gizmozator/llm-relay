@@ -110,13 +110,16 @@ func rankMembers(members []store.GroupMember, session string, flight *InFlight, 
 // reroute (plan Decision 3): a hashed member stays chosen even when its
 // engine queue is long; InFlight only orders session-less requests.
 // Ranking is rankMembers' job; the split lets the caller register the
-// request in InFlight between exclusion and ranking.
+// request in InFlight between exclusion and ranking. A tunneled request
+// adds its own exclusions from the context (fedMemberFilter): the loop
+// guard on the hub, local-only serving on a spoke.
 func (h *Handler) eligibleMembers(ctx context.Context, members []store.GroupMember) []store.GroupMember {
 	// Cheap exclusions first (no network), then ONE batched health-cache
 	// call for the survivors: Status is slice-based on purpose — one lock
 	// acquisition, one clock read, one result map — where per-member calls
 	// would take the shared mutex once per member on every group request.
 	// Members sharing a backend are deduped: one cache entry per backend.
+	fedFilter := fedMemberFilter(FedServeFrom(ctx))
 	candidates := make([]store.GroupMember, 0, len(members))
 	var backends []store.Backend
 	seen := make(map[int64]bool, len(members))
@@ -125,6 +128,9 @@ func (h *Handler) eligibleMembers(ctx context.Context, members []store.GroupMemb
 			continue
 		}
 		if mem.Backend.Draining {
+			continue
+		}
+		if fedFilter != nil && !fedFilter(mem) {
 			continue
 		}
 		candidates = append(candidates, mem)

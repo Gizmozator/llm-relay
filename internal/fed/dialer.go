@@ -21,6 +21,7 @@ import (
 
 type dialer struct {
 	db      *sql.DB
+	mgr     *Manager
 	hubURL  string
 	token   string
 	opts    Options
@@ -30,10 +31,10 @@ type dialer struct {
 	dialSem chan struct{} // cap 1: one attempt at a time; also dial counter seam
 }
 
-func newDialer(db *sql.DB, f store.FederationSettings, opts Options) *dialer {
+func newDialer(db *sql.DB, f store.FederationSettings, opts Options, mgr *Manager) *dialer {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &dialer{
-		db: db, hubURL: f.HubURL, token: f.HubToken, opts: opts,
+		db: db, mgr: mgr, hubURL: f.HubURL, token: f.HubToken, opts: opts,
 		ctx: ctx, cancel: cancel, done: make(chan struct{}),
 		dialSem: make(chan struct{}, 1),
 	}
@@ -80,7 +81,11 @@ func jitter(d time.Duration) time.Duration {
 }
 
 // dialOnce performs one full connect: upgrade, hello/hello_ack, then
-// Serve until the channel dies.
+// Serve until the channel dies. A live channel is published on the Manager
+// (the tunnel's route to the hub), the spoke's catalog goes out immediately
+// (the hub answers with its merged catalog), and when the channel dies every
+// materialized backend is disabled — the rows stay so model ids survive the
+// reconnect, and the hub's next catalog frames re-enable what still exists.
 func (d *dialer) dialOnce() error {
 	d.dialSem <- struct{}{}
 	defer func() { <-d.dialSem }()
@@ -99,6 +104,15 @@ func (d *dialer) dialOnce() error {
 		return err
 	}
 	conn := NewConn(ws, d.opts)
+	d.mgr.attachChannel(conn, nil)
+	d.mgr.setSpokeConn(conn)
+	defer func() {
+		d.mgr.clearSpokeConn(conn)
+		d.mgr.mat.allOffline()
+	}()
+	// Announce our catalog right away; the hub answers with the merged
+	// catalog (its own entries + the other spokes' relayed ones).
+	d.mgr.cats.pushSpokeCatalog()
 	return conn.Serve(d.ctx)
 }
 

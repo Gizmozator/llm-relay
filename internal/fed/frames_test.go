@@ -15,17 +15,23 @@ func TestCodecRoundTrip(t *testing.T) {
 	cases := []fed.Frame{
 		&fed.Hello{T: fed.THello, Proto: 1, Name: "spoke-a", Version: "0.4.2"},
 		&fed.HelloAck{T: fed.THelloAck, Proto: 1, Name: "hub-a", Version: "0.4.2"},
-		&fed.Catalog{T: fed.TCatalog, Models: []fed.CatalogModel{
-			{Name: "qwen", UpstreamModel: "qwen-up", PriceIn: 100, PriceOut: 200, ContextLength: 262144},
+		&fed.Catalog{T: fed.TCatalog, Origin: 3, Models: []fed.CatalogModel{
+			{Name: "qwen", UpstreamModel: "qwen-up", PriceIn: 100, PriceOut: 200,
+				PriceCacheRead: 10, PriceCacheWrite: 120, ContextLength: 262144,
+				BenchTokPerS: 42.5, ConcurrencyLimit: 2, BusyThresholdPct: 80},
+		}, Groups: []fed.CatalogGroup{
+			{Name: "pool", Members: []fed.CatalogGroupMember{{ModelName: "qwen", Weight: 2}}},
 		}},
-		&fed.Status{T: fed.TStatus, Online: []int64{2, 3}, Offline: []int64{4}},
-		&fed.Req{T: fed.TReq, ID: "r1", Method: "POST", Path: "/v1/chat/completions",
+		&fed.Status{T: fed.TStatus, PeerID: 2, Online: true},
+		&fed.Req{T: fed.TReq, ID: "r1", TargetPeer: 4, OriginPeer: 2,
+			Method: "POST", Path: "/v1/chat/completions",
 			Headers: fed.Headers{{"Content-Type", "application/json"}, {"X-Dup", "a"}, {"X-Dup", "b"}},
 			Body:    []byte{0x00, 0x01, 0x02, 0xff}},
 		&fed.Res{T: fed.TRes, ID: "r1", Status: 200,
 			Headers: fed.Headers{{"Content-Type", "text/event-stream"}}},
 		&fed.ResBody{T: fed.TResBody, ID: "r1", Data: []byte{0xde, 0xad, 0xbe, 0xef}},
 		&fed.ResEnd{T: fed.TResEnd, ID: "r1", Error: "upstream died"},
+		&fed.Cancel{T: fed.TCancel, ID: "r1"},
 		&fed.Ping{T: fed.TPing},
 		&fed.Pong{T: fed.TPong},
 	}

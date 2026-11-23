@@ -25,11 +25,17 @@ type HealthEntry struct {
 }
 
 // HealthCache probes backends at most once per TTL and shares the result
-// across concurrent callers. The mutex is held across probes, which doubles
-// as probe-stampede dedupe.
+// across the consumers (dashboard viewers, agent endpoints). The mutex is
+// held across probes, which doubles as probe-stampede dedupe.
 type HealthCache struct {
 	mu      sync.Mutex
 	entries map[int64]HealthEntry
+	// Synthetic answers "is this federation backend reachable" for
+	// peer://hub:// backends, which have no HTTP endpoint to probe: the
+	// fed.Manager wires it to the channel registry (channel online =
+	// healthy). nil = treat synthetic backends as online (materialization
+	// already disables the backend when its channel dies).
+	Synthetic func(b store.Backend) bool
 }
 
 func NewHealthCache() *HealthCache {
@@ -50,6 +56,18 @@ func (hc *HealthCache) Status(ctx context.Context, backends []store.Backend) map
 		switch {
 		case !b.Enabled:
 			e = HealthEntry{Online: false, Err: "backend disabled", At: time.Now()}
+		case isSyntheticURL(b.BaseURL):
+			// A federation backend has no HTTP endpoint: its health IS the
+			// channel. Never probed, never cached (the answer is a map
+			// lookup against the live registry).
+			online := true
+			if hc.Synthetic != nil {
+				online = hc.Synthetic(b)
+			}
+			e = HealthEntry{Online: online, At: time.Now()}
+			if !online {
+				e.Err = "federation channel offline"
+			}
 		case fresh:
 			// cached result stands
 		default:

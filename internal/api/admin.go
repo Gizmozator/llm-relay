@@ -262,6 +262,8 @@ func (s *Server) AdminUpdateBackend(w http.ResponseWriter, r *http.Request, c *a
 		writeErr(w, http.StatusInternalServerError, "backend update failed")
 		return
 	}
+	// Enabled state gates what the catalog shares (both roles push).
+	s.catalogChanged()
 	writeJSON(w, http.StatusOK, b)
 }
 
@@ -280,6 +282,7 @@ func (s *Server) AdminDeleteBackend(w http.ResponseWriter, r *http.Request, c *a
 	case err != nil:
 		writeErr(w, http.StatusInternalServerError, "backend delete failed")
 	default:
+		s.catalogChanged()
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
@@ -299,6 +302,13 @@ func (s *Server) AdminProbeBackend(w http.ResponseWriter, r *http.Request, c *au
 	}
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if _, _, syn := store.SyntheticBaseURL(b.BaseURL); syn {
+		// peer://hub:// backends have no HTTP endpoint: their health IS the
+		// federation channel, and their model list arrives via catalog
+		// frames. Probing one would dial a fake hostname.
+		writeErr(w, http.StatusBadRequest, "federation backends are served over the peer channel, not HTTP")
 		return
 	}
 	res := proxy.Probe(r.Context(), b.BaseURL, b.APIKey)
@@ -537,6 +547,7 @@ func (s *Server) AdminUpdateModel(w http.ResponseWriter, r *http.Request, c *aut
 	case err != nil:
 		writeErr(w, http.StatusInternalServerError, "model update failed")
 	default:
+		s.catalogChanged()
 		writeJSON(w, http.StatusOK, m)
 	}
 }
@@ -685,6 +696,13 @@ func (s *Server) AdminBenchmarkModel(w http.ResponseWriter, r *http.Request, c *
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	// A synthetic backend is a peer's relay, not an engine (same guard the
+	// health probe uses): benchmarking it would time a tunnel, not a
+	// model, and burn a peer's upstream for an admin click.
+	if _, _, syn := store.SyntheticBaseURL(b.BaseURL); syn {
+		writeErr(w, http.StatusBadRequest, "cannot benchmark a federated model")
+		return
+	}
 	if !benchMu.TryLock() {
 		writeErr(w, http.StatusConflict, "a benchmark is already running")
 		return
@@ -773,6 +791,9 @@ func (s *Server) AdminBenchmarkModel(w http.ResponseWriter, r *http.Request, c *
 		writeErr(w, http.StatusInternalServerError, "benchmark save failed")
 		return
 	}
+	// Bench numbers ride the federation catalog: peers advertising this
+	// model must see the fresh score, not the one from before the run.
+	s.catalogChanged()
 	res := map[string]any{
 		"bench_tok_per_s":   tokPerS,
 		"completion_tokens": tg.completion,
@@ -802,6 +823,7 @@ func (s *Server) AdminDeleteModel(w http.ResponseWriter, r *http.Request, c *aut
 		writeErr(w, http.StatusInternalServerError, "model delete failed")
 		return
 	}
+	s.catalogChanged()
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -856,6 +878,8 @@ func groupViewOf(g *store.Group, members []store.GroupMember) groupView {
 // error text is an internal detail and never echoed.
 func writeGroupErr(w http.ResponseWriter, err error, fallback string) {
 	switch {
+	case errors.Is(err, store.ErrSyntheticMember):
+		writeErr(w, http.StatusBadRequest, "federated models cannot join an admin group")
 	case errors.Is(err, store.ErrInvalid):
 		writeErr(w, http.StatusBadRequest, "invalid group name")
 	case errors.Is(err, store.ErrExists):
@@ -909,6 +933,7 @@ func (s *Server) AdminCreateGroup(w http.ResponseWriter, r *http.Request, c *aut
 	// CreateGroup already re-reads the row; a born-empty group provably has
 	// no members, so no second fetch (GetGroup would add a query + join
 	// that can only return empty).
+	s.catalogChanged()
 	writeJSON(w, http.StatusCreated, groupViewOf(g, nil))
 }
 
@@ -1039,6 +1064,7 @@ func (s *Server) AdminUpdateGroup(w http.ResponseWriter, r *http.Request, c *aut
 		writeGroupErr(w, err, "group updated; read-back failed")
 		return
 	}
+	s.catalogChanged()
 	writeJSON(w, http.StatusOK, groupViewOf(g, members2))
 }
 
@@ -1052,6 +1078,7 @@ func (s *Server) AdminDeleteGroup(w http.ResponseWriter, r *http.Request, c *aut
 		writeGroupErr(w, err, "group delete failed")
 		return
 	}
+	s.catalogChanged()
 	w.WriteHeader(http.StatusNoContent)
 }
 

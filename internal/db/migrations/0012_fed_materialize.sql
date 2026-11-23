@@ -1,0 +1,11 @@
+-- 0012: federation materialization (plan 2026-11-22-relay-federation, task 3).
+--
+-- A spoke materializes the hub's federated GROUPS as ordinary group rows so
+-- HRW affinity, resolution and the public catalog work unchanged. The marker
+-- separates those rows from admin-owned groups: the materializer replaces and
+-- prunes only federated=1 groups, and the admin group API leaves them alone
+-- by convention (the UI never lists them as editable until task 5).
+--
+-- Materialized MODELS need no marker: they live on synthetic backends
+-- (base_url peer://<id> or hub://federation), which identifies them fully.
+ALTER TABLE model_groups ADD COLUMN federated INTEGER NOT NULL DEFAULT 0;
