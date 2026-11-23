@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -465,12 +466,18 @@ type Model struct {
 	BenchTokPerS     float64 `json:"bench_tok_per_s"`
 	BenchPPTokPerS   float64 `json:"bench_pp_tok_per_s"`
 	BenchAt          string  `json:"bench_at"`
+	// FedVisibility: 'off' | 'all' | 'allowlist' (federation sharing switch,
+	// plan 2026-11-22-relay-federation). FedPeerIDs is the allowlist side:
+	// peer ids when FedVisibility=="allowlist", empty otherwise.
+	FedVisibility string  `json:"fed_visibility"`
+	FedPeerIDs    []int64 `json:"fed_peer_ids"`
 }
 
 const modelCols = `m.id, m.backend_id, b.name, m.name, m.upstream_model, m.visibility, m.enabled,
 	m.price_in, m.price_out, m.price_cache_read, m.price_cache_write,
 	m.context_length, m.concurrency_limit, m.busy_threshold_pct, m.bench_tok_per_s,
-	m.bench_pp_tok_per_s, COALESCE(m.bench_at,'')`
+	m.bench_pp_tok_per_s, COALESCE(m.bench_at,''), m.fed_visibility,
+	COALESCE((SELECT GROUP_CONCAT(fa.peer_id) FROM fed_allowlist fa WHERE fa.model_id=m.id), '')`
 
 // backendJoinCols is backendCols qualified for joins where backends is b.
 const backendJoinCols = `b.id, b.name, b.base_url, COALESCE(b.api_key,''), b.enabled, b.draining,
@@ -492,14 +499,35 @@ func scanModel(row interface{ Scan(...any) error }) (*Model, error) {
 // other. finalize applies the int→bool conversions after a successful Scan.
 func modelScanTargets(m *Model) (targets []any, finalize func()) {
 	var en int
+	var fedPeers string
 	targets = []any{
 		&m.ID, &m.BackendID, &m.BackendName, &m.Name, &m.UpstreamModel, &m.Visibility, &en,
 		&m.PriceIn, &m.PriceOut, &m.PriceCacheRead, &m.PriceCacheWrite,
 		&m.ContextLength, &m.ConcurrencyLimit, &m.BusyThresholdPct, &m.BenchTokPerS,
-		&m.BenchPPTokPerS, &m.BenchAt,
+		&m.BenchPPTokPerS, &m.BenchAt, &m.FedVisibility, &fedPeers,
 	}
-	finalize = func() { m.Enabled = en != 0 }
+	finalize = func() {
+		m.Enabled = en != 0
+		m.FedPeerIDs = parseIDList(fedPeers)
+	}
 	return targets, finalize
+}
+
+// parseIDList reads the GROUP_CONCAT projection of an id list ("1,7"; the
+// query COALESCEs the empty case to ""). Malformed entries are skipped:
+// the column is machine-written, a surprise there must not fail the whole
+// model scan.
+func parseIDList(s string) []int64 {
+	out := []int64{}
+	if s == "" {
+		return out
+	}
+	for _, part := range strings.Split(s, ",") {
+		if n, err := strconv.ParseInt(part, 10, 64); err == nil {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // modelBackendScanTargets returns the scan targets for modelCols +

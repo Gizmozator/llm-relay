@@ -70,6 +70,12 @@ func main() {
 	relayMux.HandleFunc("GET /v1/models", ph.Models)
 	relayMux.HandleFunc("GET /v1/agent-guide", ph.AgentGuide)
 	relayMux.HandleFunc("GET /v1/utilization", ph.UtilizationREST)
+	// Federation channel (plan 2026-11-22-relay-federation): server-token
+	// (fed-) endpoints, machine-to-machine, on the public port beside the
+	// sk-key surface — the spoke admin points hub_url at the hub's relay
+	// URL. Task 1 ships only the auth-guarded ping stub; task 2 replaces it
+	// with the WS channel. Role gating (hub-only) is task 2's job.
+	relayMux.Handle("GET /federation/v1/ping", apiSrv.PeerAuth(apiSrv.FederationPing))
 	relayMux.HandleFunc("POST /mcp", ph.MCP)
 
 	// Dashboard port: JWT API + embedded SPA. This is the port to put
@@ -109,6 +115,19 @@ func main() {
 	adminMux.Handle("DELETE /api/admin/groups/{id}", apiSrv.Admin(apiSrv.AdminDeleteGroup))
 	adminMux.Handle("GET /api/admin/settings", apiSrv.Admin(apiSrv.AdminGetSettings))
 	adminMux.Handle("PUT /api/admin/settings", apiSrv.Admin(apiSrv.AdminPutSettings))
+	// Federation (plan 2026-11-22-relay-federation): self-service server
+	// tokens (any user, My Keys page) + admin Servers-page management +
+	// the instance role pair.
+	adminMux.Handle("GET /api/peers", apiSrv.Auth(apiSrv.ListPeers))
+	adminMux.Handle("POST /api/peers", apiSrv.Auth(apiSrv.CreatePeer))
+	adminMux.Handle("POST /api/peers/{id}/rotate", apiSrv.Auth(apiSrv.RotateMyPeer))
+	adminMux.Handle("DELETE /api/peers/{id}", apiSrv.Auth(apiSrv.DeleteMyPeer))
+	adminMux.Handle("GET /api/admin/peers", apiSrv.Admin(apiSrv.AdminListPeers))
+	adminMux.Handle("POST /api/admin/peers/{id}/rotate", apiSrv.Admin(apiSrv.AdminRotatePeer))
+	adminMux.Handle("PATCH /api/admin/peers/{id}", apiSrv.Admin(apiSrv.AdminUpdatePeer))
+	adminMux.Handle("DELETE /api/admin/peers/{id}", apiSrv.Admin(apiSrv.AdminDeletePeer))
+	adminMux.Handle("GET /api/admin/federation", apiSrv.Admin(apiSrv.AdminGetFederation))
+	adminMux.Handle("PUT /api/admin/federation", apiSrv.Admin(apiSrv.AdminPutFederation))
 	adminMux.Handle("GET /api/admin/usage/summary", apiSrv.Admin(apiSrv.UsageSummary))
 	adminMux.Handle("GET /api/admin/usage/detail", apiSrv.Admin(apiSrv.UsageDetail))
 	adminMux.Handle("GET /api/admin/live", apiSrv.Admin(apiSrv.Live))

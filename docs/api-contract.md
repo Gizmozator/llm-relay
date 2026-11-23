@@ -60,8 +60,8 @@ Proxy requests may carry `X-Session-Id: <string>`; without it the relay derives 
 - `POST /api/admin/backends/{id}/models` — `{"model_ids":["halogen-qwen3.8-flash-next"]}` → `201 {"created":[{"id":3,"name":"halogen-qwen3.8-flash-next","upstream_model":"halogen-qwen3.8-flash-next"}]}` (skips already-present ids)
 
 ### Admin — models (public catalog)
-- `GET /api/admin/models` → `{"models":[{"id":1,"name":"halogen","backend_id":1,"backend_name":"halogen","upstream_model":"halogen-qwen3.8-flash-next","visibility":"public","enabled":true,"price_in":100,"price_out":200,"price_cache_read":10,"price_cache_write":0,"context_length":262144,"concurrency_limit":4,"busy_threshold_pct":80,"bench_tok_per_s":41.2,"bench_pp_tok_per_s":1850.4,"bench_at":"...|"}]}`
-- `PATCH /api/admin/models/{id}` — any of `{"name","enabled","visibility","price_in","price_out","price_cache_read","price_cache_write","context_length","concurrency_limit","busy_threshold_pct","bench_tok_per_s","bench_pp_tok_per_s"}` → model object. `visibility` is `"public"` (listed on `/v1/models`) or `"internal"` (hidden from the catalog but still directly requestable); group members are forced `internal` by the store on every membership edit. `bench_tok_per_s`/`bench_pp_tok_per_s` (float ≥0) set the generation/prompt-processing speed manually and clear `bench_at` (configured value, not a measured benchmark). `busy_threshold_pct` (0–10000, else `400`) is the mean-busy % at which the agent surfaces report `busy`; `0` = default 80, values over 100 require that many parallel streams (300 = busy from 3 concurrent). New models are created with `80`.
+- `GET /api/admin/models` → `{"models":[{"id":1,"name":"halogen","backend_id":1,"backend_name":"halogen","upstream_model":"halogen-qwen3.8-flash-next","visibility":"public","enabled":true,"price_in":100,"price_out":200,"price_cache_read":10,"price_cache_write":0,"context_length":262144,"concurrency_limit":4,"busy_threshold_pct":80,"bench_tok_per_s":41.2,"bench_pp_tok_per_s":1850.4,"bench_at":"...|","fed_visibility":"off","fed_peer_ids":[]}]}`
+- `PATCH /api/admin/models/{id}` — any of `{"name","enabled","visibility","price_in","price_out","price_cache_read","price_cache_write","context_length","concurrency_limit","busy_threshold_pct","bench_tok_per_s","bench_pp_tok_per_s","fed_visibility","fed_peer_ids"}` → model object. `visibility` is `"public"` (listed on `/v1/models`) or `"internal"` (hidden from the catalog but still directly requestable); group members are forced `internal` by the store on every membership edit. `bench_tok_per_s`/`bench_pp_tok_per_s` (float ≥0) set the generation/prompt-processing speed manually and clear `bench_at` (configured value, not a measured benchmark). `busy_threshold_pct` (0–10000, else `400`) is the mean-busy % at which the agent surfaces report `busy`; `0` = default 80, values over 100 require that many parallel streams (300 = busy from 3 concurrent). New models are created with `80`.
 - `POST /api/admin/models/{id}/benchmark` — runs two timed **streaming** calls against the upstream. Decode pass (TG): natural-prose prompt; speed = completion tokens over first→last token, so speculative/MTP decoding is measured at realistic acceptance rates. Prefill pass (PP): ~10k-token randomized filler prompt (shrunk to ¾ of `context_length` when that is smaller), `max_tokens=1`; speed = `prompt_tokens` over request→first token (prefill completes before the first token is emitted). May take minutes; `409` while another benchmark runs. → `{"bench_tok_per_s":41.2,"completion_tokens":700,"seconds":17.0,"bench_pp_tok_per_s":1850.4,"prompt_tokens":9876,"pp_seconds":5.3,"bench_at":"..."}`. A failed prefill pass never voids the decode result: TG is stored, the previous PP value is kept, and the response carries `"pp_error":"..."` instead of the `bench_pp_tok_per_s`/`prompt_tokens`/`pp_seconds` fields.
 - `DELETE /api/admin/models/{id}` → `204`
 
@@ -76,6 +76,47 @@ A group pools several catalog model rows (typically the same model on different 
 ### Admin — settings
 - `GET /api/admin/settings` → `{"currency":"EUR"}`
 - `PUT /api/admin/settings` — `{"currency":"USD"}` → same shape
+
+### Federation (plan 2026-11-22-relay-federation, task 1)
+Instance role + spoke config, and the peer registry (server tokens a spoke
+dials the hub with). Server tokens are `fed-…` strings, stored hashed like
+API keys, shown **only** in the create/rotate response. Disabling the
+owner user revokes their tokens immediately (same contract as API keys).
+Type scoping is
+structural: `sk-` keys authenticate `/v1/*` only, `fed-` tokens the
+`/federation/*` channel only (separate tables; both directions tested).
+
+Self-service (JWT, any user — the **My Keys** surface):
+- `GET /api/peers` → `{"peers":[{"id":1,"name":"home-server","owner_user_id":2,"owner_name":"alice","enabled":true,"last_seen":"","version":"","created_at":"...","shared_models":3}]}` (own peers only)
+- `POST /api/peers` — `{"name"}` → `201 {"peer":{…},"token":"fed-…"}` — the raw token appears exactly here
+- `POST /api/peers/{id}/rotate` (own only, else `404`) → `{"token":"fed-…"}`; the old token dies immediately
+- `DELETE /api/peers/{id}` (own only, else `404`) → `204`
+
+Admin (JWT, admin — the **Servers** page):
+- `GET /api/admin/peers` → all peers, same shape (owner name + `shared_models` = models visible to that peer: every `fed_visibility:"all"` model + its allowlist rows)
+- `POST /api/admin/peers/{id}/rotate` → `{"token":"fed-…"}` · `PATCH /api/admin/peers/{id}` — `{"enabled":true|false}` → peer object (disable is the incident lever) · `DELETE /api/admin/peers/{id}` → `204` — all `404` on unknown id
+
+Federation settings (JWT, admin):
+- `GET /api/admin/federation` → `{"role":"standalone","hub_url":"","hub_token":""}` — `role` is `standalone` (default) | `hub` | `spoke`; `hub_token` is echoed back (it is the hub's token the admin pasted, not a secret this server minted). Spoke config is plaintext-at-rest like other DB secrets here; the spoke must present it verbatim.
+- `PUT /api/admin/federation` — full replacement `{"role","hub_url","hub_token"}` → same shape. `400` when the role is not one of the three, or a spoke lacks an http(s) `hub_url` or the `hub_token`. Leaving spoke mode clears `hub_url`/`hub_token`. Live-safe handling of the change (connect/drop) is task 2.
+
+Per-model sharing switch (rides the model object everywhere the admin API
+returns models): `PATCH /api/admin/models/{id}` gains `fed_visibility`
+(`"off"` default | `"all"` | `"allowlist"`, else `400`) and `fed_peer_ids`
+(replaces the peer allowlist wholesale; only accepted together with
+`fed_visibility:"allowlist"`, unknown peer id → `400`). PATCH semantics:
+switching to `"allowlist"` without `fed_peer_ids` keeps the stored list;
+switching to `"off"`/`"all"` clears it (those modes share with
+nobody/everybody). The model row surfaces both as `fed_visibility` +
+`fed_peer_ids`.
+
+Federation channel (relay port, `fed-` tokens): `GET /federation/v1/ping`
+— task-1 placeholder behind the server-token middleware: `200
+{"pong":true,"peer_id":1,"peer_name":"home-server"}` · `401` missing/
+unknown token · `403` peer disabled. **Pending (task 2):**
+`GET /federation/v1/connect` — the WebSocket channel proper; the ping stub
+is replaced by it.
+
 
 Admin usage = same summary/detail endpoints under `/api/admin/usage/...` with extra optional `user_id`, `key_id` params; detail rows always include `username`.
 

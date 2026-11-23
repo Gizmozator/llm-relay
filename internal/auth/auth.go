@@ -38,6 +38,20 @@ func GenerateAPIKey() (plain, hash, prefix string, err error) {
 	return plain, HashKey(plain), plain[:KeyPrefixLen], nil
 }
 
+// GenerateServerToken returns a fresh federation server token ("fed-" +
+// 40 hex chars) and its SHA-256 hex digest. Only the hash is ever stored.
+// The distinct prefix is deliberate: it makes the token self-describing
+// about which surface it authenticates (sk- → /v1/*, fed- → /federation/*),
+// so a leaked string is visibly out of scope in any log or review.
+func GenerateServerToken() (plain, hash string, err error) {
+	buf := make([]byte, 20)
+	if _, err = rand.Read(buf); err != nil {
+		return "", "", fmt.Errorf("token rand: %w", err)
+	}
+	plain = "fed-" + hex.EncodeToString(buf)
+	return plain, HashKey(plain), nil
+}
+
 // HashKey returns the SHA-256 hex digest of an API key.
 func HashKey(key string) string {
 	sum := sha256.Sum256([]byte(key))

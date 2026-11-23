@@ -407,6 +407,11 @@ func (s *Server) AdminUpdateModel(w http.ResponseWriter, r *http.Request, c *aut
 		BusyThresholdPct *int64   `json:"busy_threshold_pct"`
 		BenchTokPerS     *float64 `json:"bench_tok_per_s"`
 		BenchPPTokPerS   *float64 `json:"bench_pp_tok_per_s"`
+		// Federation sharing (plan 2026-11-22-relay-federation): the
+		// per-model switch + allowlist. fed_peer_ids replaces the allowlist
+		// wholesale and must ride together with fed_visibility="allowlist".
+		FedVisibility *string  `json:"fed_visibility"`
+		FedPeerIDs    *[]int64 `json:"fed_peer_ids"`
 	}
 	if err := decode(r, &in); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON")
@@ -450,6 +455,38 @@ func (s *Server) AdminUpdateModel(w http.ResponseWriter, r *http.Request, c *aut
 		writeErr(w, http.StatusBadRequest, "visibility must be public or internal")
 		return
 	}
+	// Federation sharing fields validate here, with every other field: a
+	// PATCH that also renames the model must not commit the rename before
+	// discovering fed_visibility is bogus (validate-then-mutate).
+	fedVis := ""
+	if in.FedVisibility != nil {
+		fedVis = *in.FedVisibility
+		if fedVis != store.FedVisOff && fedVis != store.FedVisAll && fedVis != store.FedVisAllowlist {
+			writeErr(w, http.StatusBadRequest, "fed_visibility must be off, all or allowlist")
+			return
+		}
+	}
+	// The allowlist only means something together with the allowlist
+	// mode; requiring both in one call keeps the pair unambiguous (an
+	// id-only PATCH could silently retarget a list the model no longer
+	// uses).
+	if in.FedPeerIDs != nil && fedVis != store.FedVisAllowlist {
+		writeErr(w, http.StatusBadRequest, "fed_peer_ids requires fed_visibility=allowlist")
+		return
+	}
+	// Unknown peer ids are a client mistake, not a 404 about the model:
+	// check them here so the store's ErrNotFound stays model-only.
+	if in.FedPeerIDs != nil {
+		for _, pid := range *in.FedPeerIDs {
+			if _, perr := store.PeerByID(s.DB, pid); errors.Is(perr, store.ErrNotFound) {
+				writeErr(w, http.StatusBadRequest, "fed_peer_ids contains an unknown peer")
+				return
+			} else if perr != nil {
+				writeErr(w, http.StatusInternalServerError, "internal error")
+				return
+			}
+		}
+	}
 	m, err := store.UpdateModel(s.DB, id, in.Name, in.Enabled,
 		[4]*int64{in.PriceIn, in.PriceOut, in.PriceCacheRead, in.PriceCacheWrite})
 	if err == nil && in.Visibility != nil {
@@ -465,6 +502,27 @@ func (s *Server) AdminUpdateModel(w http.ResponseWriter, r *http.Request, c *aut
 			m, err = store.ModelByID(s.DB, id)
 		}
 	}
+	if err == nil && (in.FedVisibility != nil || in.FedPeerIDs != nil) {
+		// The pair rules were validated up front; only the PATCH semantics
+		// remain: an unmentioned field does not change, so switching to
+		// allowlist without naming a list keeps the stored one (it may
+		// still hold the previous allowlist). Switching to off/all clears
+		// the list on purpose: those modes share with nobody/everybody, so
+		// a stale list would be a lie the UI could later re-apply.
+		var ids []int64
+		switch {
+		case in.FedPeerIDs != nil:
+			ids = *in.FedPeerIDs
+		case fedVis == store.FedVisAllowlist:
+			if ids, err = store.ModelFedAllowlist(s.DB, id); err != nil {
+				writeErr(w, http.StatusInternalServerError, "internal error")
+				return
+			}
+		}
+		if err = store.SetModelFedVisibility(s.DB, id, fedVis, ids); err == nil {
+			m, err = store.ModelByID(s.DB, id)
+		}
+	}
 	switch {
 	case err == store.ErrNotFound:
 		writeErr(w, http.StatusNotFound, "model not found")
@@ -474,6 +532,8 @@ func (s *Server) AdminUpdateModel(w http.ResponseWriter, r *http.Request, c *aut
 		// Rename onto a group-owned name (assertNoGroupName). Fixed
 		// string: the store error text is an internal detail.
 		writeErr(w, http.StatusConflict, "model name already in use")
+	case errors.Is(err, store.ErrFedConfig):
+		writeErr(w, http.StatusBadRequest, "fed_visibility must be off, all or allowlist")
 	case err != nil:
 		writeErr(w, http.StatusInternalServerError, "model update failed")
 	default:
