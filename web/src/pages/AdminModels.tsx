@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
-import { api, errMsg } from '../api';
-import type { CatalogModel } from '../api';
+import type { FormEvent } from 'react';
+import { api, errMsg, VISIBILITIES } from '../api';
+import type { CatalogModel, GroupPatch, ModelGroup, ModelPatch, Visibility } from '../api';
 import { fmtDateTime, microToPerM } from '../format';
 import { useLoad } from '../useLoad';
 import { useToast } from '../components/Toast';
@@ -13,22 +14,9 @@ import {
   Field,
   Loading,
   Modal,
+  parseNumInput,
   Toggle,
 } from '../components/ui';
-
-type ModelPatch = {
-  name?: string;
-  enabled?: boolean;
-  price_in?: number;
-  price_out?: number;
-  price_cache_read?: number;
-  price_cache_write?: number;
-  context_length?: number;
-  concurrency_limit?: number;
-  busy_threshold_pct?: number;
-  bench_tok_per_s?: number;
-  bench_pp_tok_per_s?: number;
-};
 
 const PRICE_FIELDS = [
   { key: 'price_in', label: 'Input' },
@@ -56,11 +44,44 @@ export default function AdminModelsPage() {
   const [benching, setBenching] = useState<number | null>(null);
   // Model whose price calculator dialog is open.
   const [calcFor, setCalcFor] = useState<CatalogModel | null>(null);
+  // Model groups: the list drives the groups section AND the per-row group
+  // badge (a model belongs to at most one group — the store rejects a
+  // second membership with 409).
+  const groups = useLoad(() => api.groups().then((r) => r.groups), []);
+  const [showGroupAdd, setShowGroupAdd] = useState(false);
+  // Id of the group whose member editor is open; the group itself is looked
+  // up from the fresh list so a reload never edits a stale copy.
+  const [editGroupId, setEditGroupId] = useState<number | null>(null);
+  const groupOf = useMemo(() => {
+    const map = new Map<number, string>();
+    for (const g of groups.data ?? []) {
+      for (const mem of g.members) map.set(mem.model_id, g.name);
+    }
+    return map;
+  }, [groups.data]);
+  const editGroup =
+    editGroupId === null
+      ? null
+      : (groups.data ?? []).find((g) => g.id === editGroupId) ?? null;
+  // Models claimed by another group: one group per model, so the member
+  // picker must not offer these.
+  const takenModelIds = useMemo(() => {
+    const set = new Set<number>();
+    for (const g of groups.data ?? []) {
+      if (g.id === editGroupId) continue;
+      for (const mem of g.members) set.add(mem.model_id);
+    }
+    return set;
+  }, [groups.data, editGroupId]);
 
   const patch = async (id: number, p: ModelPatch): Promise<boolean> => {
     try {
       const updated = await api.patchModel(id, p);
       setRows((prev) => (prev ?? []).map((m) => (m.id === id ? updated : m)));
+      // A rename or an enabled flip must also refresh the groups payload:
+      // the group chips and the member editor render model names and
+      // model_enabled state from its member rows.
+      if (p.name !== undefined || p.enabled !== undefined) groups.reload();
       return true;
     } catch (e: unknown) {
       toast.push('error', errMsg(e));
@@ -98,9 +119,55 @@ export default function AdminModelsPage() {
       await api.deleteModel(m.id);
       toast.push('success', `Deleted “${m.name}”.`);
       models.reload();
+      // Deleting a member row silently drops its group membership
+      // server-side: the badges and the member chips must follow.
+      groups.reload();
     } catch (e: unknown) {
       toast.push('error', errMsg(e));
     }
+  };
+
+  // Group membership flips member visibility (join → internal, leave →
+  // public), so membership changes reload the model table too; name/enable
+  // edits touch only the group row.
+  const patchGroup = async (g: ModelGroup, p: GroupPatch): Promise<boolean> => {
+    try {
+      await api.patchGroup(g.id, p);
+      // Flat message choice (no nested ternary): the toast must be honest
+      // about whichever part of the GroupPatch was actually sent.
+      let msg: string;
+      if (p.name !== undefined) msg = `Group renamed to “${p.name}”.`;
+      else if (p.members !== undefined) msg = `Group “${g.name}” members updated.`;
+      else msg = `Group “${g.name}” ${p.enabled ? 'enabled' : 'disabled'}.`;
+      toast.push('success', msg);
+      return true;
+    } catch (e: unknown) {
+      // e.g. enabling an empty group → 409; the reload reverts the toggle.
+      toast.push('error', errMsg(e));
+      return false;
+    } finally {
+      groups.reload();
+    }
+  };
+
+  const removeGroup = async (g: ModelGroup) => {
+    try {
+      await api.deleteGroup(g.id);
+      toast.push('success', `Deleted group “${g.name}”.`);
+    } catch (e: unknown) {
+      // The group survives a failed delete: reloading would clobber mid-edit
+      // table values for nothing, and closing the editor would lie about it.
+      toast.push('error', errMsg(e));
+      return;
+    }
+    // Deleting a group releases its members (visibility flips back), so the
+    // model table follows as well.
+    groups.reload();
+    models.reload();
+    // If the members editor was open on this group, close it: editGroup
+    // would resolve to null after the reload and the modal would silently
+    // vanish instead.
+    if (editGroupId === g.id) setEditGroupId(null);
   };
 
   return (
@@ -126,6 +193,9 @@ export default function AdminModelsPage() {
                   <th>Public name</th>
                   <th>Backend</th>
                   <th>Upstream id</th>
+                  <th title="public: listed on /v1/models; internal: hidden but still requestable (group members are internal)">
+                    Visibility
+                  </th>
                   <th>Enabled</th>
                   <th className="num" title="Parallel streams the engine serves at once (0 = unset)">
                     Parallel
@@ -146,9 +216,33 @@ export default function AdminModelsPage() {
                           ariaLabel={`Public name of ${m.name}`}
                           onCommit={(v) => patch(m.id, { name: v })}
                         />
+                        {groupOf.has(m.id) && (
+                          <span className="tag" title={`Member of group “${groupOf.get(m.id)}”`}>
+                            group:{groupOf.get(m.id)}
+                          </span>
+                        )}
                       </td>
                       <td>{m.backend_name}</td>
                       <td className="mono">{m.upstream_model}</td>
+                      <td>
+                        <select
+                          className="input input-inline"
+                          value={m.visibility}
+                          aria-label={`Visibility of ${m.name}`}
+                          title={
+                            groupOf.has(m.id)
+                              ? 'Group member: re-exposing it is allowed, but any later membership edit of the group forces members back to internal — a manual “public” here is transient'
+                              : undefined
+                          }
+                          onChange={(e) => patch(m.id, { visibility: e.target.value as Visibility })}
+                        >
+                          {VISIBILITIES.map((v) => (
+                            <option key={v} value={v}>
+                              {v}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
                       <td>
                         <Toggle checked={m.enabled} onChange={(v) => patch(m.id, { enabled: v })} />
                       </td>
@@ -163,6 +257,7 @@ export default function AdminModelsPage() {
                         <EditableNumber
                           display={String(m.busy_threshold_pct)}
                           ariaLabel={`Busy threshold (percent) of ${m.name}`}
+                          max={10000}
                           onCommit={(n) => patch(m.id, { busy_threshold_pct: Math.round(n) })}
                         />
                       </td>
@@ -184,7 +279,7 @@ export default function AdminModelsPage() {
                       </td>
                     </tr>
                     <tr className="sub-row">
-                      <td colSpan={7}>
+                      <td colSpan={8}>
                         <div className="model-metrics">
                           {PRICE_FIELDS.map((p) => (
                             <span className="metric" key={p.key}>
@@ -237,6 +332,120 @@ export default function AdminModelsPage() {
             </table>
           </div>
         </section>
+      )}
+
+      <section className="panel">
+        <div className="panel-head">
+          <h3>Model groups</h3>
+          <button className="btn small primary" onClick={() => setShowGroupAdd(true)}>
+            + New group
+          </button>
+        </div>
+        {groups.loading && !groups.data ? (
+          <Loading />
+        ) : groups.data && groups.data.length > 0 ? (
+          <>
+            {/* A background refetch failure (groups.reload also fires from
+                unrelated paths: model rename/enable patches, group delete)
+                must not wipe a good table — the error rides as a banner
+                above the rows; only the no-data case replaces the panel. */}
+            {groups.error && <Banner>{groups.error}</Banner>}
+            <div className="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Group</th>
+                    <th>Enabled</th>
+                    <th>Members</th>
+                    <th className="actions">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {groups.data.map((g) => (
+                    <tr key={g.id}>
+                      <td>
+                        <EditableText
+                          value={g.name}
+                          mono
+                          ariaLabel={`Name of group ${g.name}`}
+                          onCommit={(v) => patchGroup(g, { name: v })}
+                        />
+                      </td>
+                      <td>
+                        <span title="Disabled groups are not advertised on /v1/models; enabling needs ≥1 member">
+                          <Toggle
+                            checked={g.enabled}
+                            ariaLabel={`Enable group ${g.name}`}
+                            // A memberless group cannot be enabled (the store 409s) —
+                            // spare the round-trip. Disabling is always allowed.
+                            disabled={!g.enabled && g.members.length === 0}
+                            onChange={(v) => patchGroup(g, { enabled: v })}
+                          />
+                        </span>
+                      </td>
+                      <td>
+                        {g.members.length === 0 ? (
+                          <span className="dim">no members</span>
+                        ) : (
+                          g.members.map((mem) => {
+                            const tags = memberHealthTags(mem);
+                            return (
+                              <span
+                                className="tag"
+                                key={mem.model_id}
+                                title={`${mem.model_name} @ ${mem.backend_name} · weight ${fmtWeight(mem.weight)} · position ${mem.position}`}
+                              >
+                                {mem.model_name}@{mem.backend_name} · {fmtWeight(mem.weight)}
+                                {tags && ` (${tags})`}
+                              </span>
+                            );
+                          })
+                        )}
+                      </td>
+                      <td className="actions">
+                        <button className="btn small" onClick={() => setEditGroupId(g.id)}>
+                          Members
+                        </button>
+                        <ConfirmButton label="Delete" onConfirm={() => removeGroup(g)} />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        ) : groups.error ? (
+          <Banner>{groups.error}</Banner>
+        ) : (
+          <Empty label="No model groups. A group pools several model rows under one public name; sessions spread across members and stay pinned to one." />
+        )}
+      </section>
+
+      {showGroupAdd && (
+        <GroupCreateModal
+          onClose={() => setShowGroupAdd(false)}
+          onCreated={(name) => {
+            toast.push('success', `Group “${name}” created — add members first, then flip its Enabled toggle.`);
+            setShowGroupAdd(false);
+            groups.reload();
+          }}
+        />
+      )}
+
+      {editGroup && (
+        <GroupMembersModal
+          group={editGroup}
+          models={rows ?? []}
+          taken={takenModelIds}
+          onClose={() => setEditGroupId(null)}
+          onSaved={() => {
+            toast.push('success', `Members updated for “${editGroup.name}”.`);
+            setEditGroupId(null);
+            // Membership flips member visibility, so both tables follow.
+            groups.reload();
+            models.reload();
+          }}
+        />
       )}
 
       {calcFor && (
@@ -446,6 +655,397 @@ function PriceCalcModal({
           </button>
           <button type="submit" className="btn primary" disabled={!calc || !pricesValid || busy}>
             Apply prices
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+// ---------- model groups ----------
+
+// Weight display: seeded weights are floats (bench tok/s), so trim to two
+// decimals instead of printing 42.50000000000001-style noise.
+const fmtWeight = (w: number) => String(Math.round(w * 100) / 100);
+
+// One health wording for every member listing (groups-table chips and the
+// member editor); "" when the member is fully servable.
+const memberHealthTags = (m: {
+  model_enabled: boolean;
+  backend_enabled: boolean;
+  backend_draining: boolean;
+}) =>
+  [
+    !m.model_enabled && 'model off',
+    !m.backend_enabled && 'backend off',
+    m.backend_draining && 'draining',
+  ]
+    .filter(Boolean)
+    .join(', ');
+
+// Seed the member-editor draft with the RAW stored weight, not the
+// display-rounded fmtWeight: the PATCH is a full replace, so seeding a
+// rounded value would silently rewrite a bench-seeded weight (e.g.
+// 137.4567 → 137.46) on every unrelated edit. String() is the shortest
+// round-tripping form, so an untouched field re-sends the stored value
+// verbatim — except in exponent notation (below 1e-6 or ≥ 1e21), which
+// the strict parser rejects, so those fall back to fixed notation.
+// A weight ≤0 should never be stored (the API seeds it from the
+// benchmark at write time); the blank branch is defensive for hand-written
+// rows — it drafts such a member as "auto" instead of a literal 0 the
+// validator would reject.
+const weightSeed = (w: number) =>
+  /[eE]/.test(String(w))
+    ? w.toLocaleString('en-US', { useGrouping: false, maximumFractionDigits: 20 })
+    : String(w);
+
+const seedMembers = (g: ModelGroup) =>
+  g.members.map((m) => ({ model_id: m.model_id, weight: m.weight > 0 ? weightSeed(m.weight) : '' }));
+
+function GroupCreateModal({
+  onClose,
+  onCreated,
+}: {
+  onClose: () => void;
+  onCreated: (name: string) => void;
+}) {
+  const [name, setName] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const g = await api.createGroup(name.trim());
+      onCreated(g.name);
+    } catch (err: unknown) {
+      setError(errMsg(err));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal title="New model group" onClose={onClose} dismissable={!busy}>
+      <form
+        className="form-stack"
+        onSubmit={(e) => {
+          void submit(e);
+        }}
+      >
+        {error && <Banner>{error}</Banner>}
+        <Field label="Public name">
+          <input
+            className="input mono"
+            value={name}
+            placeholder="qwen3-coder"
+            onChange={(e) => setName(e.target.value)}
+            autoFocus
+          />
+        </Field>
+        <p className="dim">
+          The group owns this public name: it must not collide with a public model or another
+          group. New groups start disabled: add members first, then flip the Enabled toggle
+          in the groups table — a group without members cannot be enabled.
+        </p>
+        <div className="modal-actions">
+          <button type="button" className="btn" onClick={onClose} disabled={busy}>
+            Cancel
+          </button>
+          <button type="submit" className="btn primary" disabled={busy || !name.trim()}>
+            {busy ? 'Creating…' : 'Create group'}
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+/**
+ * Member editor. The group PATCH replaces the whole member list, so the
+ * modal edits a local copy and commits once: row order is the member
+ * position. Weight contract: blank = the server seeds from the model's
+ * bench_tok_per_s; anything else must be a positive number — the input is
+ * free text (inputMode decimal) so save()'s validator owns every rule
+ * (a type=number field would silently sanitize garbage to blank).
+ * Joining flips a model to internal, leaving flips it
+ * back (store rule) — members stay directly requestable either way.
+ */
+function GroupMembersModal({
+  group,
+  models,
+  taken,
+  onClose,
+  onSaved,
+}: {
+  group: ModelGroup;
+  models: CatalogModel[];
+  taken: Set<number>;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  // Lazy initializer: seedMembers builds the whole draft array; evaluating
+  // it on every render (plain argument) allocates work React discards
+  // after the first mount.
+  const [members, setMembers] = useState<{ model_id: number; weight: string }[]>(
+    () => seedMembers(group),
+  );
+  // Re-seed whenever the group object changes (a groups.reload() hands in a
+  // fresh object): the PATCH is a full replace, so a draft seeded from a
+  // stale copy could commit members that no longer exist. The modal overlay
+  // blocks NEW reload triggers, but a groups.reload() fired just BEFORE the
+  // modal opened can still land here — the re-seed is what keeps that late
+  // refresh from leaving a stale draft behind (same adopt-external-updates
+  // rule EditableText follows).
+  useEffect(() => {
+    setMembers(seedMembers(group));
+  }, [group]);
+  const [addId, setAddId] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // Two-step arm for the destructive save (see save()): clearing every
+  // member commits server-side either way (the store only rejects an empty
+  // list when the payload itself flips enabled=true) — an enabled group
+  // would serve nothing, a disabled one would publish every departing
+  // member — so the UI makes the operator confirm it explicitly.
+  const [armedEmpty, setArmedEmpty] = useState(false);
+
+  const label = (id: number) => {
+    const mem = group.members.find((m) => m.model_id === id);
+    if (mem) return `${mem.model_name} @ ${mem.backend_name}`;
+    const m = models.find((x) => x.id === id);
+    return m ? `${m.name} @ ${m.backend_name}` : `model ${id}`;
+  };
+  // One group per model (store enforces it with 409), so models claimed by
+  // another group and models already listed here are not offered.
+  const candidates = models.filter(
+    (m) => !taken.has(m.id) && !members.some((x) => x.model_id === m.id),
+  );
+
+  const add = () => {
+    if (!addId) return;
+    setMembers([...members, { model_id: Number(addId), weight: '' }]);
+    setAddId('');
+  };
+
+  // Reorder within the draft: the whole row (weight draft included) swaps,
+  // so moving never loses an edited weight. Index = the position sent.
+  const move = (from: number, to: number) => {
+    const next = [...members];
+    [next[from], next[to]] = [next[to], next[from]];
+    setMembers(next);
+  };
+
+  // Health hints with the shared wording (memberHealthTags), from the
+  // member payload (the model list carries no backend state, so newly
+  // added candidates can only show the model-off hint below). Returns
+  // the finished tag element (or null) so the wording is evaluated once.
+  const healthHint = (id: number) => {
+    const mem = group.members.find((m) => m.model_id === id);
+    if (!mem) return null;
+    const hints = memberHealthTags(mem);
+    return hints ? <span className="tag warn">{`(${hints})`}</span> : null;
+  };
+
+  // Any draft change disarms the empty-save confirmation (change-based,
+  // unlike ConfirmButton's time-based auto-disarm — a timer could disarm
+  // while the operator reads the warning).
+  useEffect(() => setArmedEmpty(false), [members]);
+
+  // Clearing the member list is the destructive edit the backend does not
+  // reject (it only refuses an empty list when the payload flips
+  // enabled=true), so it needs an explicit second click either way: an
+  // ENABLED group would serve nothing, a disabled one would publish every
+  // departing member to the public catalog. Only arming when members are
+  // actually leaving: a freshly created (already empty) group saving empty
+  // is a no-op, not a destruction.
+  const emptyDanger = members.length === 0 && group.members.length > 0;
+
+  const save = async () => {
+    // Weight validation: blank means "seed from the benchmark" (field is
+    // omitted); anything else must be a positive number, parsed with the
+    // SAME strict rule as every numeric editor (no hex/exponent/thousands
+    // surprises — Number() would read "0x10" as 16). A typed negative or
+    // unparseable value must not silently collapse into the seed.
+    for (const m of members) {
+      const w = m.weight.trim();
+      if (w === '') continue;
+      const n = parseNumInput(w);
+      if (n === null || n <= 0) {
+        setError(
+          `Weight for ${label(m.model_id)} must be a positive number (digits, one . or , ` +
+            `separator) — leave it blank to seed from the model's benchmark speed.`,
+        );
+        return;
+      }
+    }
+    if (emptyDanger && !armedEmpty) {
+      setArmedEmpty(true);
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await api.patchGroup(group.id, {
+        members: members.map((m, i) => ({
+          model_id: m.model_id,
+          // Parsed with the strict rule (a comma decimal would be NaN via
+          // bare Number()); validation above guarantees non-null.
+          ...(m.weight.trim() === '' ? {} : { weight: parseNumInput(m.weight.trim()) as number }),
+          position: i,
+        })),
+      });
+      onSaved();
+    } catch (err: unknown) {
+      setError(errMsg(err));
+      setBusy(false);
+      // A failed destructive save must not leave the confirmation armed:
+      // the next click would then commit without the second click.
+      setArmedEmpty(false);
+    }
+  };
+
+  // Flat label computation (no nested ternary): the destructive-action
+  // affordance must be scannable.
+  let submitLabel = 'Save members';
+  if (busy) {
+    submitLabel = 'Saving…';
+  } else if (emptyDanger && armedEmpty) {
+    submitLabel = 'Confirm: remove all members';
+  }
+
+  return (
+    <Modal title={`Members — ${group.name}`} onClose={onClose} wide dismissable={!busy}>
+      <form
+        className="form-stack"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!busy) void save();
+        }}
+      >
+        {error && <Banner>{error}</Banner>}
+        <fieldset disabled={busy} aria-label="Member editor">
+          {members.length === 0 ? (
+            <Empty label="No members yet — add at least one model row below." />
+          ) : (
+            <div className="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Model</th>
+                    <th className="num" title="Relative share of new sessions; leave blank to seed from the model's benchmark speed (a positive number is required otherwise)">
+                      Weight
+                    </th>
+                    <th title="Member order (position): ties in the session-to-member choice break by it">
+                      Order
+                    </th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {members.map((mem, i) => (
+                    <tr key={mem.model_id}>
+                      <td className="mono">
+                        {label(mem.model_id)}
+                        {healthHint(mem.model_id)}
+                      </td>
+                      <td className="num">
+                        <input
+                          className="input input-num"
+                          type="text"
+                          inputMode="decimal"
+                          placeholder="auto"
+                          title="Blank = seed from benchmark speed; otherwise a positive number — digits with one . or , as decimal separator (no thousands separators)"
+                          value={mem.weight}
+                          aria-label={`Weight of ${label(mem.model_id)}`}
+                          onChange={(e) =>
+                            setMembers(members.map((x, j) => (j === i ? { ...x, weight: e.target.value } : x)))
+                          }
+                        />
+                      </td>
+                      <td>
+                        <button
+                          type="button"
+                          className="btn small"
+                          disabled={i === 0}
+                          aria-label={`Move ${label(mem.model_id)} up`}
+                          onClick={() => move(i, i - 1)}
+                        >
+                          ↑
+                        </button>
+                        <button
+                          type="button"
+                          className="btn small"
+                          disabled={i === members.length - 1}
+                          aria-label={`Move ${label(mem.model_id)} down`}
+                          onClick={() => move(i, i + 1)}
+                        >
+                          ↓
+                        </button>
+                      </td>
+                      <td>
+                        <button
+                          type="button"
+                          className="btn small"
+                          onClick={() => setMembers(members.filter((_, j) => j !== i))}
+                        >
+                          Remove
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {/* Not a Field: a <label> may associate with only one control, and
+              this row holds a select AND a button. Same classes, div wrapper. */}
+          <div className="field">
+            <span className="field-label">Add model</span>
+            <div className="copy-row">
+              <select className="input" value={addId} onChange={(e) => setAddId(e.target.value)} aria-label="Model to add">
+                <option value="">— choose a model —</option>
+                {candidates.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name} @ {m.backend_name}
+                    {!m.enabled && ' (model off)'}
+                  </option>
+                ))}
+              </select>
+              <button type="button" className="btn" disabled={!addId} onClick={add}>
+                Add
+              </button>
+            </div>
+          </div>
+        </fieldset>
+        <p className="dim">
+          Adding a model hides it from the public catalog (it becomes internal); removing it
+          makes it public again. Members stay directly requestable either way. Row order is
+          the member position — use ↑/↓ to move a member.
+        </p>
+        {!group.enabled && (
+          <p className="dim">This group is disabled — enable it from the groups table after saving.</p>
+        )}
+        {emptyDanger && armedEmpty && (
+          <Banner kind="info">
+            {group.enabled
+              ? `This removes every member from the ENABLED group “${group.name}”. All of them are published to the public catalog (visibility flips to public) and the group stops pooling: the name keeps resolving to a former member only if one carries it (lowest id, no failover) — otherwise it resolves to nothing until a member is added.`
+              : `This removes every member of “${group.name}”. All of them will be published to the public catalog (their visibility flips back to public).`}{' '}
+            Click the button again to confirm.
+          </Banner>
+        )}
+        <div className="modal-actions">
+          <button type="button" className="btn" onClick={onClose} disabled={busy}>
+            Cancel
+          </button>
+          <button
+            type="submit"
+            className={emptyDanger && armedEmpty ? 'btn danger' : 'btn primary'}
+            disabled={busy}
+          >
+            {submitLabel}
           </button>
         </div>
       </form>

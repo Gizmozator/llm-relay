@@ -337,3 +337,61 @@ func TestAdminModelVisibility(t *testing.T) {
 		t.Fatalf("re-expose member = %d %q, want 200 public", code, out.Visibility)
 	}
 }
+
+// GET /api/models (the dashboard catalog) mirrors the proxy's /v1/models:
+// an enabled group appears as a kind=group row and its internal members
+// stay hidden — the group row stands for the whole pool.
+func TestPublicModelsShowsGroups(t *testing.T) {
+	e := newTestEnv(t, http.NotFoundHandler())
+	tok := login(t, e)
+	member := newCatalogModel(t, e, "node-a", "qwen-a")
+	solo := newCatalogModel(t, e, "node-b", "solo-model")
+
+	resp := e.do(t, "POST", "/api/admin/groups", `{"name":"qwen3-coder"}`, tok)
+	var g groupResp
+	json.NewDecoder(resp.Body).Decode(&g)
+	resp.Body.Close()
+	if resp := e.do(t, "PATCH", pathf("/api/admin/groups/%d", g.ID),
+		fmt.Sprintf(`{"enabled":true,"members":[{"model_id":%d}]}`, member.ID), tok); resp.StatusCode != http.StatusOK {
+		t.Fatalf("enable group = %d, want 200", resp.StatusCode)
+	}
+
+	resp = e.do(t, "GET", "/api/models", "", tok)
+	var out struct {
+		Models []struct {
+			Kind string `json:"kind"`
+			Name string `json:"name"`
+		} `json:"models"`
+	}
+	json.NewDecoder(resp.Body).Decode(&out)
+	resp.Body.Close()
+
+	byName := map[string]string{}
+	for _, m := range out.Models {
+		byName[m.Name] = m.Kind
+	}
+	if byName["qwen3-coder"] != "group" {
+		t.Errorf("qwen3-coder kind = %q, want group (entries: %+v)", byName["qwen3-coder"], out.Models)
+	}
+	if _, ok := byName["qwen-a"]; ok {
+		t.Errorf("internal member qwen-a leaked into the public catalog: %+v", out.Models)
+	}
+	if byName[solo.Name] != "model" {
+		t.Errorf("%s kind = %q, want model", solo.Name, byName[solo.Name])
+	}
+
+	// Disabling the group drops the row again (members stay internal, so
+	// nothing takes its place).
+	if resp := e.do(t, "PATCH", pathf("/api/admin/groups/%d", g.ID), `{"enabled":false}`, tok); resp.StatusCode != http.StatusOK {
+		t.Fatalf("disable group = %d", resp.StatusCode)
+	}
+	resp = e.do(t, "GET", "/api/models", "", tok)
+	out.Models = nil
+	json.NewDecoder(resp.Body).Decode(&out)
+	resp.Body.Close()
+	for _, m := range out.Models {
+		if m.Name == "qwen3-coder" || m.Name == "qwen-a" {
+			t.Errorf("disabled group or its member still listed: %+v", out.Models)
+		}
+	}
+}

@@ -41,6 +41,22 @@ func (f fakeFlight) Snapshot(userID int64) map[string]int {
 	return out
 }
 
+// SnapshotByModel derives id-keyed counts from the fake's stream records,
+// mirroring proxy.InFlight: the streams list is the source of truth for
+// per-member (ModelID) counts.
+func (f fakeFlight) SnapshotByModel(userID int64) map[int64]int {
+	out := map[int64]int{}
+	for uid, streams := range f.streams {
+		if userID != 0 && uid != userID {
+			continue
+		}
+		for _, s := range streams {
+			out[s.ModelID]++
+		}
+	}
+	return out
+}
+
 func (f fakeFlight) BusySince(userID int64) map[string][]time.Time {
 	out := map[string][]time.Time{}
 	for uid, perModel := range f.since {
@@ -384,11 +400,24 @@ func TestLiveUtilizationInFlight(t *testing.T) {
 
 func TestLiveActiveServerWideAndModels(t *testing.T) {
 	flights := map[int64]map[string]int{}
-	e := newLiveEnv(t, fakeFlight{byUser: flights})
+	streams := map[int64][]proxy.Stream{}
+	e := newLiveEnv(t, fakeFlight{byUser: flights, streams: streams})
 	admID := userID(t, e.db, "admin")
 	friID := userID(t, e.db, "friend")
+	models, err := store.ListModels(e.db)
+	if err != nil || len(models) != 1 {
+		t.Fatalf("models = %+v, err = %v", models, err)
+	}
+	mid := models[0].ID
 	flights[admID] = map[string]int{"test-model": 2}
 	flights[friID] = map[string]int{"test-model": 5}
+	// The id-keyed view (per-member row counts) reads the stream records.
+	for i := 0; i < 2; i++ {
+		streams[admID] = append(streams[admID], proxy.Stream{UserID: admID, ModelID: mid, Model: "test-model"})
+	}
+	for i := 0; i < 5; i++ {
+		streams[friID] = append(streams[friID], proxy.Stream{UserID: friID, ModelID: mid, Model: "test-model"})
+	}
 
 	admTok := liveLogin(t, e, "admin", "adminpass1")
 	friTok := liveLogin(t, e, "friend", "userpass1")
@@ -433,6 +462,487 @@ func TestLiveActiveServerWideAndModels(t *testing.T) {
 	resp.Body.Close()
 	if len(filtered.Active) != 1 || filtered.Active[0].Count != 5 {
 		t.Errorf("user_id-filtered active = %+v, want [{test-model 5}]", filtered.Active)
+	}
+}
+
+// Group pool view (plan 2026-11-22 open question): two members share one
+// public name. The active list and the utilization series stay name-keyed
+// (pool totals — that is the pool view), while the model rows are per
+// member: each row carries its own id and its own stream count, and the
+// util limit is the SUM of the members' limits (0 = any member unset).
+func TestLiveSameNamePool(t *testing.T) {
+	fl := fakeFlight{streams: map[int64][]proxy.Stream{}, since: map[int64]map[string][]time.Time{},
+		byUser: map[int64]map[string]int{}}
+	e := newLiveEnv(t, fl)
+	admID := userID(t, e.db, "admin")
+
+	members, err := store.ListModels(e.db)
+	if err != nil || len(members) != 1 {
+		t.Fatalf("models = %+v, err = %v", members, err)
+	}
+	mA := members[0].ID
+	b2, err := store.CreateBackend(e.db, "eng2", "http://127.0.0.1:1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mBModel, err := store.CreateModel(e.db, b2.ID, "up-id-2", "test-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	two, three := int64(2), int64(3)
+	if err := store.UpdateModelMeta(e.db, mA, nil, &two, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateModelMeta(e.db, mBModel.ID, nil, &three, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// 2 streams on member A, 1 on member B; busy credit keeps the util
+	// series alive for the name.
+	for i := 0; i < 2; i++ {
+		fl.streams[admID] = append(fl.streams[admID], proxy.Stream{UserID: admID, ModelID: mA, Model: "test-model"})
+	}
+	fl.streams[admID] = append(fl.streams[admID], proxy.Stream{UserID: admID, ModelID: mBModel.ID, Model: "test-model"})
+	fl.byUser[admID] = map[string]int{"test-model": 3}
+	fl.since[admID] = map[string][]time.Time{"test-model": {time.Now().Add(-10 * time.Second)}}
+
+	tok := liveLogin(t, e, "admin", "adminpass1")
+	resp := liveGet(t, e, "/api/admin/live", tok)
+	var r liveResp
+	json.NewDecoder(resp.Body).Decode(&r)
+	resp.Body.Close()
+
+	// Pool view: ONE name-keyed active row with the total.
+	if len(r.Active) != 1 || r.Active[0].Model != "test-model" || r.Active[0].Count != 3 {
+		t.Errorf("active = %+v, want [{test-model 3}] (pool total)", r.Active)
+	}
+	// Member rows: two rows, distinct ids, per-member counts (not 3/3).
+	if len(r.Models) != 2 {
+		t.Fatalf("models = %+v, want two member rows", r.Models)
+	}
+	// Deterministic (name, id) order: mA predates mBModel, so it leads.
+	if r.Models[0].ID != mA || r.Models[1].ID != mBModel.ID {
+		t.Errorf("row order = %d,%d, want %d,%d (id tie-break for same-name rows)",
+			r.Models[0].ID, r.Models[1].ID, mA, mBModel.ID)
+	}
+	byID := map[int64]api.LiveModel{}
+	for _, m := range r.Models {
+		byID[m.ID] = m
+	}
+	if byID[mA].Active != 2 || byID[mBModel.ID].Active != 1 {
+		t.Errorf("member actives = A:%d B:%d, want A:2 B:1 (per-member, not pool total)",
+			byID[mA].Active, byID[mBModel.ID].Active)
+	}
+	// Util limit: summed pool slots 2+3=5.
+	if len(r.Util) != 1 || r.Util[0].Model != "test-model" || r.Util[0].ConcurrencyLimit != 5 {
+		t.Errorf("util = %+v, want one test-model row with limit 5 (pool sum)", r.Util)
+	}
+
+	// One member without a limit makes the pool limit unknown (0): the
+	// frontend auto-scales instead of clipping the axis below real capacity.
+	zero := int64(0)
+	if err := store.UpdateModelMeta(e.db, mBModel.ID, nil, &zero, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	resp = liveGet(t, e, "/api/admin/live", tok)
+	var r2 liveResp
+	json.NewDecoder(resp.Body).Decode(&r2)
+	resp.Body.Close()
+	if len(r2.Util) != 1 || r2.Util[0].ConcurrencyLimit != 0 {
+		t.Errorf("util limit = %+v, want 0 (member unset → pool unknown)", r2.Util)
+	}
+
+	// A disabled member must not inflate the pool denominator: with B back
+	// at limit 3 but disabled, only A's 2 slots count.
+	off := false
+	if err := store.UpdateModelMeta(e.db, mBModel.ID, nil, &three, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateModel(e.db, mBModel.ID, nil, &off, [4]*int64{}); err != nil {
+		t.Fatal(err)
+	}
+	resp = liveGet(t, e, "/api/admin/live", tok)
+	var r3 liveResp
+	json.NewDecoder(resp.Body).Decode(&r3)
+	resp.Body.Close()
+	if len(r3.Util) != 1 || r3.Util[0].ConcurrencyLimit != 2 {
+		t.Errorf("util limit = %+v, want 2 (disabled member excluded from the pool sum)", r3.Util)
+	}
+
+	// Same for a member whose BACKEND is disabled: the store's eligibility
+	// rule excludes it from serving, so its slots must not count either.
+	// (B back on with limit 3, on backend eng2.)
+	online := true
+	if _, err := store.UpdateModel(e.db, mBModel.ID, nil, &online, [4]*int64{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateBackend(e.db, b2.ID, nil, nil, nil, &online, nil); err != nil {
+		t.Fatal(err)
+	}
+	resp = liveGet(t, e, "/api/admin/live", tok)
+	var r4 liveResp
+	json.NewDecoder(resp.Body).Decode(&r4)
+	resp.Body.Close()
+	if len(r4.Util) != 1 || r4.Util[0].ConcurrencyLimit != 5 {
+		t.Errorf("util limit = %+v, want 5 (backend re-enabled, member counts again)", r4.Util)
+	}
+	if _, err := store.UpdateBackend(e.db, b2.ID, nil, nil, nil, &off, nil); err != nil {
+		t.Fatal(err)
+	}
+	resp = liveGet(t, e, "/api/admin/live", tok)
+	var r5 liveResp
+	json.NewDecoder(resp.Body).Decode(&r5)
+	resp.Body.Close()
+	if len(r5.Util) != 1 || r5.Util[0].ConcurrencyLimit != 2 {
+		t.Errorf("util limit = %+v, want 2 (backend-disabled member excluded from the pool sum)", r5.Util)
+	}
+}
+
+// The personal live view is group-aware: one synthetic pool row per ENABLED
+// group with a servable member (group name, folded active, summed limit, no
+// wiring), and the group OWNS its name — same-name public standalone rows are
+// suppressed (shadowing, matching the catalog). Plain internal models and
+// disabled groups are hidden; internal member names fold into the group name
+// in active/util for EVERY group, public member names stay as requested.
+// Admins keep the per-member view.
+func TestLiveInternalRowsAdminOnly(t *testing.T) {
+	fl := fakeFlight{streams: map[int64][]proxy.Stream{}, since: map[int64]map[string][]time.Time{},
+		byUser: map[int64]map[string]int{}}
+	e := newLiveEnv(t, fl)
+	members, err := store.ListModels(e.db)
+	if err != nil || len(members) != 1 {
+		t.Fatalf("models = %+v, err = %v", members, err)
+	}
+	engID := members[0].BackendID
+	b2, err := store.CreateBackend(e.db, "eng2", "http://127.0.0.1:1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	yes := true
+	meta := func(id, limit int64) {
+		t.Helper()
+		if err := store.UpdateModelMeta(e.db, id, nil, &limit, nil, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// pool-x: enabled group, two same-name members (limits 2+3), one
+	// stream each — the canonical pool.
+	gx, err := store.CreateGroup(e.db, "pool-x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p1, err := store.CreateModel(e.db, engID, "up-p1", "pool-x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p2, err := store.CreateModel(e.db, b2.ID, "up-p2", "pool-x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta(p1.ID, 2)
+	meta(p2.ID, 3)
+	if _, err := store.UpdateGroup(e.db, gx.ID, nil, &yes,
+		[]store.GroupMemberInput{{ModelID: p1.ID, Position: 0}, {ModelID: p2.ID, Position: 1}}); err != nil {
+		t.Fatal(err)
+	}
+
+	// pool-y: enabled group whose member kept its own name (renamed after
+	// joining) — the pool row must carry the GROUP name with folded active.
+	gy, err := store.CreateGroup(e.db, "pool-y")
+	if err != nil {
+		t.Fatal(err)
+	}
+	q1, err := store.CreateModel(e.db, engID, "up-q1", "q-renamed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta(q1.ID, 4)
+	if _, err := store.UpdateGroup(e.db, gy.ID, nil, &yes,
+		[]store.GroupMemberInput{{ModelID: q1.ID, Position: 0}}); err != nil {
+		t.Fatal(err)
+	}
+
+	// pool-z: member joined but the group stayed DISABLED → no user row.
+	gz, err := store.CreateGroup(e.db, "pool-z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	z1, err := store.CreateModel(e.db, engID, "up-z1", "z-hidden")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateGroup(e.db, gz.ID, nil, nil,
+		[]store.GroupMemberInput{{ModelID: z1.ID, Position: 0}}); err != nil {
+		t.Fatal(err)
+	}
+
+	// pool-w: member shares the group name but was re-exposed to public →
+	// the group OWNS the name (shadowing rule): the user sees the POOL row,
+	// the standalone is suppressed (the store resolves the name to the
+	// group, so the live view must not show the row that cannot serve it).
+	gw, err := store.CreateGroup(e.db, "pool-w")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w1, err := store.CreateModel(e.db, engID, "up-w1", "pool-w")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateGroup(e.db, gw.ID, nil, &yes,
+		[]store.GroupMemberInput{{ModelID: w1.ID, Position: 0}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateModelVisibility(e.db, w1.ID, "public"); err != nil {
+		t.Fatal(err)
+	}
+
+	// pool-v: a PUBLIC member under its own name — its name must NOT fold
+	// into the group name (it has its own visible row and is what the user
+	// requested), but its streams still count in the pool aggregate.
+	gv, err := store.CreateGroup(e.db, "pool-v")
+	if err != nil {
+		t.Fatal(err)
+	}
+	v1, err := store.CreateModel(e.db, engID, "up-v1", "v-public")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateGroup(e.db, gv.ID, nil, &yes,
+		[]store.GroupMemberInput{{ModelID: v1.ID, Position: 0}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateModelVisibility(e.db, v1.ID, "public"); err != nil {
+		t.Fatal(err)
+	}
+
+	// shadow-x: enabled group whose name is ALSO carried by an external
+	// public row (AddModels import — the guard-free path). The group wins:
+	// users see only the pool row; admins still see both rows.
+	gs, err := store.CreateGroup(e.db, "shadow-x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sh1, err := store.CreateModel(e.db, engID, "up-sh1", "shadow-x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta(sh1.ID, 6)
+	if _, err := store.UpdateGroup(e.db, gs.ID, nil, &yes,
+		[]store.GroupMemberInput{{ModelID: sh1.ID, Position: 0}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.AddModels(e.db, b2.ID, []string{"shadow-x"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A plain internal model (admin flip, not a member): hidden entirely.
+	secret, err := store.CreateModel(e.db, engID, "up-s", "secret-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateModelVisibility(e.db, secret.ID, "internal"); err != nil {
+		t.Fatal(err)
+	}
+
+	admID := userID(t, e.db, "admin")
+	fl.streams[admID] = []proxy.Stream{
+		{UserID: admID, ModelID: p1.ID, Model: "pool-x"},
+		{UserID: admID, ModelID: p2.ID, Model: "pool-x"},
+		{UserID: admID, ModelID: q1.ID, Model: "q-renamed"},
+		{UserID: admID, ModelID: z1.ID, Model: "z-hidden"},
+		{UserID: admID, ModelID: v1.ID, Model: "v-public"},
+		{UserID: admID, ModelID: sh1.ID, Model: "shadow-x"},
+		{UserID: admID, ModelID: secret.ID, Model: "secret-model"},
+		// No catalog row at all: a deleted/renamed model with a live
+		// stream — nothing internal about its name, it keeps showing.
+		{UserID: admID, ModelID: 999999, Model: "ghost-model"},
+	}
+	fl.byUser[admID] = map[string]int{
+		"pool-x": 2, "q-renamed": 1, "z-hidden": 1, "v-public": 1,
+		"shadow-x": 1, "secret-model": 1, "ghost-model": 1,
+	}
+	fl.since[admID] = map[string][]time.Time{
+		"q-renamed":    {time.Now().Add(-10 * time.Second)},
+		"z-hidden":     {time.Now().Add(-10 * time.Second)},
+		"secret-model": {time.Now().Add(-10 * time.Second)},
+		"ghost-model":  {time.Now().Add(-10 * time.Second)},
+		"v-public":     {time.Now().Add(-10 * time.Second)},
+	}
+
+	live := func(tok, path string) liveResp {
+		t.Helper()
+		resp := liveGet(t, e, path, tok)
+		var r liveResp
+		json.NewDecoder(resp.Body).Decode(&r)
+		resp.Body.Close()
+		return r
+	}
+	count := func(ms []api.LiveModel, name string) []api.LiveModel {
+		var out []api.LiveModel
+		for _, m := range ms {
+			if m.Name == name {
+				out = append(out, m)
+			}
+		}
+		return out
+	}
+
+	admTok := liveLogin(t, e, "admin", "adminpass1")
+	ar := live(admTok, "/api/admin/live")
+	if px := count(ar.Models, "pool-x"); len(px) != 2 {
+		t.Fatalf("admin pool-x rows = %+v, want two per-member rows", px)
+	} else {
+		for _, m := range px {
+			if m.Active != 1 || m.Backend == "" || m.Upstream == "" {
+				t.Errorf("admin member row = %+v, want per-member active 1 with backend+upstream", m)
+			}
+		}
+	}
+	for _, want := range []string{"q-renamed", "z-hidden", "secret-model", "pool-w", "v-public", "test-model"} {
+		if len(count(ar.Models, want)) != 1 {
+			t.Errorf("admin rows missing %q: %+v", want, ar.Models)
+		}
+	}
+	// Admins see both shadowed rows: the group member and the external
+	// same-name public import (the shadow is a user-facing view rule).
+	if sx := count(ar.Models, "shadow-x"); len(sx) != 2 {
+		t.Errorf("admin shadow-x rows = %+v, want member + external standalone", sx)
+	}
+
+	// Admins see the internal name in active/util — that is the point of
+	// the admin route.
+	admAct := map[string]int{}
+	for _, a := range ar.Active {
+		admAct[a.Model] = a.Count
+	}
+	if admAct["secret-model"] != 1 {
+		t.Errorf("admin active = %+v, want secret-model:1", ar.Active)
+	}
+	admUtil := false
+	for _, u := range ar.Util {
+		if u.Model == "secret-model" {
+			admUtil = true
+		}
+	}
+	if !admUtil {
+		t.Errorf("admin util missing secret-model series: %+v", ar.Util)
+	}
+
+	usrTok := liveLogin(t, e, "friend", "userpass1")
+	ur := live(usrTok, "/api/live")
+	// pool-x: one synthetic row, id = -groupID (can never collide with a
+	// real row id), folded active, summed limit.
+	px := count(ur.Models, "pool-x")
+	if len(px) != 1 {
+		t.Fatalf("user pool-x rows = %+v, want exactly one synthetic row", px)
+	}
+	if px[0].ID != -gx.ID || !px[0].Pool || px[0].Active != 2 || px[0].ConcurrencyLimit != 5 ||
+		px[0].Backend != "" || px[0].Online || px[0].Draining {
+		t.Errorf("user pool-x row = %+v, want id %d (synthetic -groupID), pool marker, active 2, limit 5, empty wiring",
+			px[0], -gx.ID)
+	}
+	// pool-y: one row under the GROUP name with the member's folded active.
+	py := count(ur.Models, "pool-y")
+	if len(py) != 1 || py[0].ID != -gy.ID || py[0].Active != 1 || py[0].ConcurrencyLimit != 4 ||
+		py[0].Backend != "" {
+		t.Errorf("user pool-y row = %+v, want one row id %d active 1 limit 4, empty wiring", py, -gy.ID)
+	}
+	// Hidden: the member's own name, the disabled group's member, the
+	// plain internal model, and the disabled group itself.
+	for _, gone := range []string{"q-renamed", "z-hidden", "secret-model", "pool-z"} {
+		if len(count(ur.Models, gone)) != 0 {
+			t.Errorf("user rows must not contain %q: %+v", gone, ur.Models)
+		}
+	}
+	// pool-w: the group owns the name — the user sees the POOL row and the
+	// re-exposed standalone is suppressed (the store resolves the name to
+	// the group, so showing the standalone would be a lie).
+	pw := count(ur.Models, "pool-w")
+	if len(pw) != 1 || pw[0].ID != -gw.ID || !pw[0].Pool || pw[0].Backend != "" {
+		t.Errorf("user pool-w rows = %+v, want the single synthetic pool row id %d", pw, -gw.ID)
+	}
+	// shadow-x: an external public same-name row (imported) is shadowed by
+	// the enabled group — users see only the pool row.
+	sx := count(ur.Models, "shadow-x")
+	if len(sx) != 1 || sx[0].ID != -gs.ID || !sx[0].Pool || sx[0].Backend != "" ||
+		sx[0].Active != 1 || sx[0].ConcurrencyLimit != 6 {
+		t.Errorf("user shadow-x rows = %+v, want only the pool row id %d active 1 limit 6", sx, -gs.ID)
+	}
+	// pool-v: a PUBLIC member keeps its own visible standalone row (not
+	// folded, not suppressed — the pool row carries a different name), and
+	// its stream still counts in the pool aggregate.
+	pv := count(ur.Models, "pool-v")
+	if len(pv) != 1 || pv[0].ID != -gv.ID || !pv[0].Pool || pv[0].Active != 1 {
+		t.Errorf("user pool-v rows = %+v, want pool row id %d with the public member's stream counted",
+			pv, -gv.ID)
+	}
+	vp := count(ur.Models, "v-public")
+	if len(vp) != 1 || vp[0].Backend == "" || vp[0].Pool {
+		t.Errorf("user v-public rows = %+v, want the real standalone public row", vp)
+	}
+	if len(count(ur.Models, "test-model")) != 1 {
+		t.Errorf("user rows missing the public test-model: %+v", ur.Models)
+	}
+	// Active list: internal member names fold into the group name — even
+	// for the DISABLED group (their streams would otherwise leak the
+	// internal name); public member names stay as requested; internal-only
+	// names (plain internal model) are dropped; a name with no row at all
+	// (deleted model with a live stream) keeps showing.
+	act := map[string]int{}
+	for _, a := range ur.Active {
+		act[a.Model] = a.Count
+	}
+	if act["pool-x"] != 2 || act["pool-y"] != 1 || act["pool-z"] != 1 || act["v-public"] != 1 {
+		t.Errorf("user active = %+v, want pool-x:2 pool-y:1 pool-z:1 v-public:1", ur.Active)
+	}
+	if act["ghost-model"] != 1 {
+		t.Errorf("user active = %+v, want the rowless ghost-model:1 kept", ur.Active)
+	}
+	for _, leaked := range []string{"q-renamed", "z-hidden", "secret-model"} {
+		if _, ok := act[leaked]; ok {
+			t.Errorf("user active leaks internal name %q: %+v", leaked, ur.Active)
+		}
+	}
+	// Util series: in-flight busy credits fold to the group name too
+	// (disabled group included); public member names stay put.
+	utilNames := map[string]int64{}
+	for _, u := range ur.Util {
+		utilNames[u.Model] = u.ConcurrencyLimit
+	}
+	if _, ok := utilNames["pool-y"]; !ok {
+		t.Errorf("user util missing folded pool-y series: %+v", ur.Util)
+	}
+	if utilNames["pool-y"] != 4 {
+		t.Errorf("pool-y util limit = %d, want 4 (pool sum)", utilNames["pool-y"])
+	}
+	if _, ok := utilNames["pool-z"]; !ok {
+		t.Errorf("user util missing folded pool-z series (disabled group): %+v", ur.Util)
+	}
+	for _, leaked := range []string{"q-renamed", "z-hidden", "secret-model"} {
+		if _, ok := utilNames[leaked]; ok {
+			t.Errorf("user util leaks internal name %q: %+v", leaked, ur.Util)
+		}
+	}
+	if _, ok := utilNames["ghost-model"]; !ok {
+		t.Errorf("user util dropped the rowless ghost-model series: %+v", ur.Util)
+	}
+	// pool-v: the public member's in-flight busy credits BOTH series —
+	// its own (direct requests keep their name) and the pool's (the pool
+	// limit sums its slots, so the numerator must cover them too).
+	lastVal := func(model string) (float64, bool) {
+		for _, u := range ur.Util {
+			if u.Model == model && len(u.Values) > 0 {
+				return u.Values[len(u.Values)-1], true
+			}
+		}
+		return 0, false
+	}
+	if v, ok := lastVal("pool-v"); !ok || v <= 0 {
+		t.Errorf("user util missing pool-v credit from the public member's stream: %+v", ur.Util)
+	}
+	if v, ok := lastVal("v-public"); !ok || v <= 0 {
+		t.Errorf("user util dropped the public member's own series: %+v", ur.Util)
 	}
 }
 

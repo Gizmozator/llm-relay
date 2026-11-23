@@ -223,6 +223,14 @@ a {
   font-variant-numeric: tabular-nums;
 }
 
+/* Secondary suffix inside a card value (e.g. "+3 groups"): must read as
+   an annotation, not part of the big number, so it drops to the file's
+   secondary-text scale instead of inheriting .card-value. */
+.card-value-sub {
+  font-size: 12px;
+  font-weight: 500;
+}
+
 /* ---------- forms ---------- */
 
 .field {
@@ -377,8 +385,16 @@ select.input {
   padding: 2px 6px;
 }
 
-.icon-btn:hover {
+.icon-btn:hover:not(:disabled) {
   color: var(--text);
+}
+
+/* Disabled affordance (e.g. the modal × while a commit is in flight):
+   without this the × keeps its pointer cursor and hover highlight and
+   silently swallows clicks. */
+.icon-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 /* ---------- tables ---------- */
@@ -562,6 +578,15 @@ tr.sub-row > td {
   background: rgba(56, 189, 248, 0.1);
 }
 
+/* Model-group marker: its own color so it never rides on "new" semantics.
+   The margin separates it from the model name (JSX whitespace collapses). */
+.badge.group {
+  color: var(--accent-dim);
+  border-color: rgba(129, 140, 248, 0.45);
+  background: rgba(129, 140, 248, 0.1);
+  margin-left: 6px;
+}
+
 .tag {
   display: inline-block;
   font-size: 10.5px;
@@ -735,6 +760,21 @@ tr.sub-row > td {
   justify-content: flex-end;
   gap: 8px;
   margin-top: 14px;
+}
+
+/* <fieldset disabled> wraps modal editors while a PATCH is in flight: the
+   browser inertes every contained control at once. Strip the browser
+   chrome; the grey-out comes from the per-control :disabled rules. Keep
+   the .form-stack rhythm the wrapped elements had as direct children.
+   Scoped (not a bare element selector) per this file's class convention. */
+.form-stack > fieldset {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .account-section h4 {

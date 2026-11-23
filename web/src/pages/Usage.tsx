@@ -4,7 +4,7 @@ import type { AdminUser, GroupBy, UsageSummary } from '../api';
 import { daysAgoISO, fmtDateTime, fmtInt, fmtMoney, inNewTokens } from '../format';
 import { useLoad } from '../useLoad';
 import { useToast } from '../components/Toast';
-import { Banner, Empty, Loading } from '../components/ui';
+import { Banner, Card, Empty, Loading } from '../components/ui';
 import LineChart from '../components/LineChart';
 
 const GROUP_OPTIONS: { value: GroupBy; label: string }[] = [
@@ -310,7 +310,14 @@ export default function UsagePage({ admin }: { admin: boolean }) {
                     <td className="nowrap">{fmtDateTime(r.ts)}</td>
                     {admin && <td>{r.username ?? '—'}</td>}
                     <td>{r.key_name}</td>
-                    <td className="mono">{r.model_requested}</td>
+                    <td className="mono">
+                      {r.model_requested}
+                      {admin && r.model_upstream && r.model_upstream !== r.model_requested && (
+                        <div className="dim" title="upstream model id the engine served (differs from the requested name when the relay maps public names to engine-specific ids)">
+                          {r.model_upstream}
+                        </div>
+                      )}
+                    </td>
                     <td>{r.endpoint}</td>
                     <td className="mono">{r.client_ip}</td>
                     <td className="mono dim" title={r.session_id ?? undefined}>
@@ -339,15 +346,6 @@ export default function UsagePage({ admin }: { admin: boolean }) {
           </div>
         )}
       </section>
-    </div>
-  );
-}
-
-function Card({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
-  return (
-    <div className={`card${accent ? ' card-accent' : ''}`}>
-      <div className="card-label">{label}</div>
-      <div className="card-value">{value}</div>
     </div>
   );
 }

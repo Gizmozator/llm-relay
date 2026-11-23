@@ -51,24 +51,47 @@ export default function ModelsPage() {
                 </tr>
               </thead>
               <tbody>
-                {models.data.map((m) => (
-                  <tr key={m.name}>
-                    <td className="mono">{m.name}</td>
-                    {PRICE_FIELDS.map((p) => (
-                      <td className="num money" key={p.key}>
-                        {fmtMoney(m[p.key], currency)}
+                {models.data.map((m) => {
+                  // A group row pools several machines under one name; it
+                  // carries no single price/speed of its own (billing and
+                  // speed follow the member that serves the session), so
+                  // its numeric cells stay empty instead of showing zeros.
+                  const isGroup = m.kind === 'group';
+                  // One place for the "group rows carry no numbers" rule:
+                  // unset values and group rows both render an em dash, so
+                  // a future column cannot forget the guard.
+                  const num = (v: number, fmt: (n: number) => string) =>
+                    !isGroup && v ? fmt(v) : '—';
+                  return (
+                    <tr key={m.name}>
+                      <td className="mono">
+                        {m.name}
+                        {isGroup && (
+                          <span
+                            className="badge group"
+                            title="Model group: one name backed by several machines; each conversation stays pinned to one of them"
+                          >
+                            group
+                          </span>
+                        )}
                       </td>
-                    ))}
-                    <td className="num">{m.context_length ? `${fmtInt(m.context_length)} tokens` : '—'}</td>
-                    <td className="num" title={m.bench_at ? fmtDateTime(m.bench_at) : undefined}>
-                      {m.bench_tok_per_s ? `${m.bench_tok_per_s.toFixed(1)} tok/s` : '—'}
-                    </td>
-                    <td className="num" title={m.bench_at ? fmtDateTime(m.bench_at) : undefined}>
-                      {m.bench_pp_tok_per_s ? `${m.bench_pp_tok_per_s.toFixed(0)} tok/s` : '—'}
-                    </td>
-                    <td className="num">{m.concurrency_limit ? fmtInt(m.concurrency_limit) : '—'}</td>
-                  </tr>
-                ))}
+                      {PRICE_FIELDS.map((p) => (
+                        <td className="num money" key={p.key}>
+                          {/* 0 is a real price (free) — only group rows dash here. */}
+                          {isGroup ? '—' : fmtMoney(m[p.key], currency)}
+                        </td>
+                      ))}
+                      <td className="num">{num(m.context_length, (v) => `${fmtInt(v)} tokens`)}</td>
+                      <td className="num" title={m.bench_at ? fmtDateTime(m.bench_at) : undefined}>
+                        {num(m.bench_tok_per_s, (v) => `${v.toFixed(1)} tok/s`)}
+                      </td>
+                      <td className="num" title={m.bench_at ? fmtDateTime(m.bench_at) : undefined}>
+                        {num(m.bench_pp_tok_per_s, (v) => `${v.toFixed(0)} tok/s`)}
+                      </td>
+                      <td className="num">{num(m.concurrency_limit, fmtInt)}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

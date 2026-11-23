@@ -206,15 +206,19 @@ func (s *Server) Info(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
 }
 
 // PublicModels serves GET /api/models: the catalog every user may call —
-// enabled models on enabled backends — with the prices they are billed at.
-// Internal wiring (backend, upstream id) stays hidden.
+// the same entries the proxy advertises on /v1/models (enabled groups plus
+// enabled public models, store.ListPublicCatalog) — with the prices models
+// are billed at. Internal wiring (backend, upstream id) stays hidden, and
+// internal group members never appear: the group row stands for the pool,
+// so its per-member fields are zero (the frontend renders them as "—").
 func (s *Server) PublicModels(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
-	models, err := store.ListPublicModels(s.DB)
+	entries, err := store.ListPublicCatalog(s.DB)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	type pubModel struct {
+		Kind             string  `json:"kind"` // "model" | "group"
 		Name             string  `json:"name"`
 		PriceIn          int64   `json:"price_in"`
 		PriceOut         int64   `json:"price_out"`
@@ -226,10 +230,16 @@ func (s *Server) PublicModels(w http.ResponseWriter, r *http.Request, c *auth.Cl
 		BenchPPTokPerS   float64 `json:"bench_pp_tok_per_s"`
 		BenchAt          string  `json:"bench_at"`
 	}
-	out := make([]pubModel, 0, len(models))
-	for _, m := range models {
+	out := make([]pubModel, 0, len(entries))
+	for _, en := range entries {
+		if en.Kind == store.TargetGroup {
+			out = append(out, pubModel{Kind: "group", Name: en.Name})
+			continue
+		}
+		m := en.Model
 		out = append(out, pubModel{
-			Name: m.Name, PriceIn: m.PriceIn, PriceOut: m.PriceOut,
+			Kind: "model", Name: m.Name,
+			PriceIn: m.PriceIn, PriceOut: m.PriceOut,
 			PriceCacheRead: m.PriceCacheRead, PriceCacheWrite: m.PriceCacheWrite,
 			ContextLength: m.ContextLength, ConcurrencyLimit: m.ConcurrencyLimit,
 			BenchTokPerS: m.BenchTokPerS, BenchPPTokPerS: m.BenchPPTokPerS, BenchAt: m.BenchAt,
@@ -482,6 +492,14 @@ func (s *Server) UsageDetail(w http.ResponseWriter, r *http.Request, c *auth.Cla
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
+	}
+	if scope != 0 {
+		// model_upstream is internal wiring (the engine-side model id, which
+		// tells group members apart): personal views must not learn it, so
+		// it is zeroed here rather than filtered in the frontend.
+		for i := range rows {
+			rows[i].ModelUpstream = nil
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"total": total, "rows": rows})
 }

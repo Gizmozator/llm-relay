@@ -573,6 +573,69 @@ func TestUsageScopingPerUser(t *testing.T) {
 	}
 }
 
+// model_upstream is internal wiring (the engine-side model id that tells
+// group members apart): it must never reach a non-admin usage view, so the
+// handler zeroes it on the personal route instead of relying on the UI.
+func TestUsageDetailUpstreamAdminOnly(t *testing.T) {
+	e := newTestEnv(t, http.NotFoundHandler())
+	admin := login(t, e)
+	resp := e.do(t, "POST", "/api/admin/users",
+		`{"username":"alice","password":"pass123456","role":"user"}`, admin)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create alice = %d, want 201", resp.StatusCode)
+	}
+	var users struct {
+		Users []store.User `json:"users"`
+	}
+	resp = e.do(t, "GET", "/api/admin/users", "", admin)
+	json.NewDecoder(resp.Body).Decode(&users)
+	resp.Body.Close()
+	var aliceID int64
+	for _, u := range users.Users {
+		if u.Username == "alice" {
+			aliceID = u.ID
+		}
+	}
+	if aliceID == 0 {
+		t.Fatal("alice not found")
+	}
+	if err := store.InsertUsage(e.db, &store.UsageEvent{
+		TS: "2026-11-20T10:00:00Z", UserID: aliceID, KeyID: 99, Endpoint: "chat",
+		ModelRequ: "pool-x", ModelUpstream: "engine-variant-b",
+		Prompt: 10, Completion: 5, CostTotal: 7, Status: 200,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	type detail struct {
+		Total int `json:"total"`
+		Rows  []struct {
+			ModelRequested string  `json:"model_requested"`
+			ModelUpstream  *string `json:"model_upstream"`
+		} `json:"rows"`
+	}
+	decode := func(resp *http.Response) detail {
+		t.Helper()
+		var d detail
+		json.NewDecoder(resp.Body).Decode(&d)
+		resp.Body.Close()
+		if d.Total != 1 || len(d.Rows) != 1 {
+			t.Fatalf("detail = %+v, want one row", d)
+		}
+		return d
+	}
+
+	alice := loginAs(t, e, "alice", "pass123456")
+	if d := decode(e.do(t, "GET", "/api/usage/detail", "", alice)); d.Rows[0].ModelUpstream != nil {
+		t.Errorf("user sees model_upstream = %q, want absent", *d.Rows[0].ModelUpstream)
+	}
+	d := decode(e.do(t, "GET", "/api/admin/usage/detail", "", admin))
+	if d.Rows[0].ModelUpstream == nil || *d.Rows[0].ModelUpstream != "engine-variant-b" {
+		t.Errorf("admin sees model_upstream = %v, want engine-variant-b", d.Rows[0].ModelUpstream)
+	}
+}
+
 func TestUserMultiplierAndModelMeta(t *testing.T) {
 	e := newTestEnv(t, http.NotFoundHandler())
 	admin := login(t, e)

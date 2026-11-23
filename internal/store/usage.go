@@ -327,24 +327,29 @@ func BusyByModel(db *sql.DB, f *UsageFilter, now time.Time, minutes int) ([]Mode
 
 // UsageRow is one detailed usage record for the detail table.
 type UsageRow struct {
-	ID         int64   `json:"id"`
-	TS         string  `json:"ts"`
-	Username   string  `json:"username"`
-	KeyName    string  `json:"key_name"`
-	ClientIP   *string `json:"client_ip"`
-	SessionID  *string `json:"session_id"`
-	Endpoint   string  `json:"endpoint"`
-	ModelRequ  *string `json:"model_requested"`
-	Prompt     int64   `json:"prompt_tokens"`
-	Completion int64   `json:"completion_tokens"`
-	Cached     int64   `json:"cached_tokens"`
-	CacheWrite int64   `json:"cache_write_tokens"`
-	CostMicro  int64   `json:"cost_micro"`
-	Streamed   bool    `json:"streamed"`
-	Estimated  bool    `json:"usage_estimated"`
-	Status     int     `json:"status_code"`
-	LatencyMS  int64   `json:"latency_ms"`
-	Error      *string `json:"error"`
+	ID        int64   `json:"id"`
+	TS        string  `json:"ts"`
+	Username  string  `json:"username"`
+	KeyName   string  `json:"key_name"`
+	ClientIP  *string `json:"client_ip"`
+	SessionID *string `json:"session_id"`
+	Endpoint  string  `json:"endpoint"`
+	ModelRequ *string `json:"model_requested"`
+	// ModelUpstream is the upstream model id the chosen member actually
+	// served: for a group it names the member's engine model, telling
+	// members apart when their upstream ids differ (the requested name is
+	// the group's for every member).
+	ModelUpstream *string `json:"model_upstream"`
+	Prompt        int64   `json:"prompt_tokens"`
+	Completion    int64   `json:"completion_tokens"`
+	Cached        int64   `json:"cached_tokens"`
+	CacheWrite    int64   `json:"cache_write_tokens"`
+	CostMicro     int64   `json:"cost_micro"`
+	Streamed      bool    `json:"streamed"`
+	Estimated     bool    `json:"usage_estimated"`
+	Status        int     `json:"status_code"`
+	LatencyMS     int64   `json:"latency_ms"`
+	Error         *string `json:"error"`
 }
 
 // UsageDetail returns one page of per-request rows, newest first.
@@ -361,7 +366,7 @@ func UsageDetail(db *sql.DB, f *UsageFilter, page, pageSize int) (int64, []Usage
 		pageSize = 50
 	}
 	rows, err := db.Query(`SELECT u.id, u.ts, COALESCE(us.username,''), COALESCE(k.name,''),
-			u.client_ip, u.session_id, u.endpoint, u.model_requested,
+			u.client_ip, u.session_id, u.endpoint, u.model_requested, u.model_upstream,
 			u.prompt_tokens, u.completion_tokens, u.cached_tokens, u.cache_write_tokens,
 			u.cost_total, u.streamed, u.usage_estimated, u.status_code, u.latency_ms, u.error
 		FROM usage_log u
@@ -377,7 +382,7 @@ func UsageDetail(db *sql.DB, f *UsageFilter, page, pageSize int) (int64, []Usage
 		var r UsageRow
 		var streamed, est int
 		if err := rows.Scan(&r.ID, &r.TS, &r.Username, &r.KeyName, &r.ClientIP, &r.SessionID, &r.Endpoint,
-			&r.ModelRequ, &r.Prompt, &r.Completion, &r.Cached, &r.CacheWrite,
+			&r.ModelRequ, &r.ModelUpstream, &r.Prompt, &r.Completion, &r.Cached, &r.CacheWrite,
 			&r.CostMicro, &streamed, &est, &r.Status, &r.LatencyMS, &r.Error); err != nil {
 			return total, out, err
 		}

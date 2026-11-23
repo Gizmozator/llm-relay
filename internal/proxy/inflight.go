@@ -129,6 +129,25 @@ func (f *InFlight) Snapshot(userID int64) map[string]int {
 	return out
 }
 
+// SnapshotByModel is Snapshot keyed by the physical model row id instead of
+// the name: group members share a name, so per-member live rows need the id
+// view (the name view stays the pool view). userID 0 means "all users".
+func (f *InFlight) SnapshotByModel(userID int64) map[int64]int {
+	if f == nil {
+		return map[int64]int{}
+	}
+	f.mu.Lock()
+	out := map[int64]int{}
+	for _, s := range f.streams {
+		if userID != 0 && s.UserID != userID {
+			continue
+		}
+		out[s.ModelID]++
+	}
+	f.mu.Unlock()
+	return out
+}
+
 // CountModels returns active-stream counts for the given model rows in ONE
 // lock acquisition and one scan — group ranking reads it once before
 // sorting, never per comparison. Missing ids count zero; a nil tracker

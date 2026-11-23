@@ -114,14 +114,24 @@ are visible in the dashboard.
 
 - None blocking. (Live-view member display already works: in-flight `Stream.Model`
   is the resolved member name.)
-- Live page keys active counts and `concurrency_limit` by model **name**
-  (`internal/api/live.go`): same-name duplicates across backends aggregate into
-  one entry (consistent with name-based metering; benign pre-grouping window),
-  but per-row limit divergence picks one row's limit for the utilization axis.
-  Display nuance — task 4's pool aggregation revisits this.
+- ~~Live page keys active counts and `concurrency_limit` by model **name**~~
+  **Resolved (task 4)**: the name-keyed views stay name-keyed on purpose —
+  the active list and the utilization series aggregate a group's members
+  into one pool row (streams carry the resolved member name — equal to
+  the group name in the canonical same-name setup; completed-work busy
+  keys on `model_requested`, in-flight credit on the member name, so a
+  renamed member shows under its own name in those two places).
+  The per-row model list is keyed by the
+  physical row **id** (`LiveModel.id`, frontend keys rows by it) and shows
+  each member's own stream count (`InFlight.SnapshotByModel`), so
+  same-name members no longer double-display the pool total. The util
+  `concurrency_limit` for a name is the **sum** of the rows' limits; if
+  any row has no limit set the pool limit reports 0 (unknown → frontend
+  auto-scales). Pinned by `TestLiveSameNamePool`.
 - Admin model list (`store.ListModels`) deliberately returns **every** row
   (replicas are per-backend admin state; dedupe would hide them) — the web UI
-  must key model rows by id, not name.
+  must key model rows by id, not name. (AdminModels already keyed rows by
+  `m.id`; the live Models table now keys by the new `LiveModel.id` too.)
 - Group drain semantics are stricter than the single-model gate: a draining
   member is a hard exclusion even for a recently-active session, while the
   model-path drain gate lets such sessions finish. A session pinned to a
@@ -140,3 +150,12 @@ are visible in the dashboard.
 - 2026-11-22 — task 3: group update endpoint is `PATCH /api/admin/groups/{id}`
   (partial merge), not `PUT` — repo convention reserves `PUT` for full
   replacement (settings); every sibling partial-update admin route uses PATCH.
+- 2026-11-22 — task 4 (web UI): admin Models page gains the groups section
+  (create / rename / enable / delete, member editor with weights — blank
+  weight seeds from bench, row order = position) and model rows gain a
+  visibility editor + group badge. User Models page lists groups via
+  `ListPublicCatalog` (`/api/models` rows carry `kind`). Usage page:
+  per-pool rollup verified (model group-by keys on `model_requested`);
+  detail rows now also surface `model_upstream`. Live page pool-aggregation
+  decision recorded under Open questions (name-keyed pool views, id-keyed
+  member rows, summed util limits).

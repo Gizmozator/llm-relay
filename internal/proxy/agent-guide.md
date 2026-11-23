@@ -35,6 +35,7 @@ Response:
   "window_minutes": 5,
   "models": [
     {
+      "id": 3,
       "name": "halogen-flash",
       "online": true,
       "active": 1,
@@ -48,12 +49,19 @@ Response:
 
 | field | meaning |
 |---|---|
+| `id` | physical model row id — use it to tell rows apart (see below) |
 | `online` | the backend answers its health endpoint |
 | `draining` | admin is shutting this backend down: existing sessions may finish, new ones are refused |
 | `active` | streams currently generating on this model (server-wide) |
 | `concurrency_limit` | engine slots for this model (0 = unset) |
 | `utilization_pct` | mean busy % of the last 5 minutes, including streams still running; >100 = parallel streams |
 | `status` | derived verdict: `free`, `busy`, `draining` or `offline` |
+
+A **model group** is one public name backed by several machines: the list then
+contains several same-name rows — distinct members of one pool, possibly with
+different `status` — and `id` is the only way to tell them apart. Requesting
+the name lets the relay pick a member for you; each conversation stays pinned
+to the member it started on.
 
 `status` rules: `offline` = backend unreachable; `draining` = backend is
 being taken down for maintenance — a request starting a **new** session gets

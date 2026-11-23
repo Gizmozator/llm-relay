@@ -1,13 +1,50 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api, errMsg } from '../api';
-import type { LiveConnection, LiveResponse } from '../api';
+import type { LiveConnection, LiveModel, LiveResponse } from '../api';
 import { useAuth } from '../auth';
 import { fmtAgo, fmtDateTime, fmtDurationSec, fmtInt } from '../format';
-import { Banner, Empty, Loading } from '../components/ui';
+import { Banner, Card, Empty, Loading } from '../components/ui';
 import LineChart from '../components/LineChart';
 
 const POLL_MS = 5000;
 const WINDOW_MIN = 60;
+
+/** Status badges for a real (per-row) model: online/offline, plus draining
+ *  while online (a draining backend still serves running conversations). */
+function memberStatus(m: LiveModel) {
+  return (
+    <>
+      {m.online ? (
+        <span className="badge ok">online</span>
+      ) : (
+        <span className="badge err">offline</span>
+      )}
+      {m.online && m.draining && (
+        <span className="badge warn" title="No new sessions; running conversations finish">
+          draining
+        </span>
+      )}
+    </>
+  );
+}
+
+// Shared explanation for the group rows (status cell + backend cell titles).
+const POOL_HINT = 'Model group: several machines behind this name';
+
+// Composite key for "rows sharing this name AND upstream" (NUL cannot
+// occur in model names, so the parts cannot alias across fields).
+const keyTwin = (name: string, upstream: string) => `${name}\u0000${upstream}`;
+
+/** Pool row status cell: the server sends no member status on purpose
+ *  (wiring is admin-only) — claiming "offline" would be a lie, so the cell
+ *  shows a bare em-dash. */
+function poolStatus() {
+  return (
+    <span className="dim" title={POOL_HINT}>
+      —
+    </span>
+  );
+}
 
 type Metric = 'requests' | 'tokens';
 
@@ -78,7 +115,31 @@ export default function DashboardPage() {
     () => (data?.active ?? []).reduce((s, a) => s + a.count, 0),
     [data],
   );
-  const onlineCount = (data?.models ?? []).filter((m) => m.online).length;
+  // Pool rows (explicit pool marker) carry no per-row online status on
+  // purpose (member status is admin-only), so they are excluded from the
+  // online count entirely — counting them in the denominator would claim
+  // a group-only catalog is fully offline.
+  const realModels = (data?.models ?? []).filter((m) => !m.pool);
+  const onlineCount = realModels.filter((m) => m.online).length;
+  // Group rows are counted separately (a dim suffix), not hidden: the card
+  // must not under-report against a table that lists them too.
+  const groupCount = (data?.models ?? []).length - realModels.length;
+  // Twin discriminator (admins): only names carried by MORE THAN ONE row are
+  // ambiguous, so only those get a dim suffix. Upstream is used only when it
+  // is UNIQUE among that name's rows — canonical replicas share name AND
+  // upstream, and for those only the row id distinguishes.
+  const nameRowCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    const upstreamCounts = new Map<string, number>();
+    for (const m of data?.models ?? []) {
+      counts.set(m.name, (counts.get(m.name) ?? 0) + 1);
+      if (m.upstream) {
+        const k = keyTwin(m.name, m.upstream);
+        upstreamCounts.set(k, (upstreamCounts.get(k) ?? 0) + 1);
+      }
+    }
+    return { counts, upstreamCounts };
+  }, [data]);
   const hourRequests = buckets.reduce((s, b) => s + b.requests, 0);
 
   const chart = useMemo(() => {
@@ -127,7 +188,22 @@ export default function DashboardPage() {
         <Card label="Active streams" value={fmtInt(activeTotal)} accent={activeTotal > 0} />
         <Card
           label="Models online"
-          value={`${fmtInt(onlineCount)} / ${fmtInt(data?.models.length ?? 0)}`}
+          title={
+            groupCount > 0
+              ? 'Model groups have no per-row online status (member wiring is admin-only), so they are counted separately'
+              : undefined
+          }
+          value={
+            <>
+              {realModels.length > 0 ? `${fmtInt(onlineCount)} / ${fmtInt(realModels.length)}` : '—'}
+              {groupCount > 0 && (
+                <span className="dim card-value-sub">
+                  {' '}
+                  +{fmtInt(groupCount)} group{groupCount === 1 ? '' : 's'}
+                </span>
+              )}
+            </>
+          }
         />
         <Card label="Requests (hour)" value={fmtInt(hourRequests)} />
       </div>
@@ -306,21 +382,37 @@ export default function DashboardPage() {
               </thead>
               <tbody>
                 {data.models.map((m) => (
-                  <tr key={m.name}>
-                    <td className="mono">{m.name}</td>
-                    <td>{m.backend}</td>
-                    <td>
-                      {m.online ? (
-                        <span className="badge ok">online</span>
-                      ) : (
-                        <span className="badge err">offline</span>
-                      )}
-                      {m.online && m.draining && (
-                        <span className="badge warn" title="No new sessions; running conversations finish">
-                          draining
+                  // Keyed by id, not name: group members share a name by
+                  // design, and each row is one physical member with its
+                  // own (per-member) active count. For users a group is
+                  // one synthetic pool row (empty backend).
+                  <tr key={m.id}>
+                    <td className="mono">
+                      {m.name}
+                      {admin && (nameRowCounts.counts.get(m.name) ?? 0) > 1 && (
+                        // Twin discriminator: upstream only when it is unique
+                        // among this name's rows (canonical replicas share it),
+                        // else the row id — unique by construction.
+                        <span className="dim">
+                          {' · '}
+                          {m.upstream &&
+                          m.upstream !== m.name &&
+                          (nameRowCounts.upstreamCounts.get(keyTwin(m.name, m.upstream)) ?? 0) === 1
+                            ? m.upstream
+                            : `#${m.id}`}
                         </span>
                       )}
                     </td>
+                    <td>
+                      {m.pool ? (
+                        <span className="dim" title={POOL_HINT}>
+                          group
+                        </span>
+                      ) : (
+                        m.backend
+                      )}
+                    </td>
+                    <td>{m.pool ? poolStatus() : memberStatus(m)}</td>
                     <td className="num">{fmtInt(m.active)}</td>
                   </tr>
                 ))}
@@ -329,15 +421,6 @@ export default function DashboardPage() {
           </div>
         )}
       </section>
-    </div>
-  );
-}
-
-function Card({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
-  return (
-    <div className={`card${accent ? ' card-accent' : ''}`}>
-      <div className="card-label">{label}</div>
-      <div className="card-value">{value}</div>
     </div>
   );
 }
