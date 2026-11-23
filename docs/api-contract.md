@@ -218,7 +218,11 @@ null-vs-empty rule above — a section with no data never prunes); a peer
 delete removes its backend and rows; startup and role transitions purge
 all synthetic rows (they are rebuilt from live frames), and the purge also
 returns federated-group members to `public` — leaving the federation
-undoes what a federated group did to a local model. Synthetic backends are
+undoes what a federated group did to a local model. An **enabled** edit on
+a materialized model row is not durable: the next catalog push re-enables
+it (the upsert update sets `enabled=1`, since the peer still advertises
+the model) — the durable kill switches are the peer disable and the
+synthetic-backend disable. Synthetic backends are
 never HTTP-probed — their health **is** the channel — and the admin probe
 and benchmark endpoints refuse them (`400`).
 Collision policy: a shared name owned by a local group or a local

@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"llm-relay/internal/auth"
 	"llm-relay/internal/store"
@@ -450,4 +451,182 @@ func TestModelFedVisibilityPATCH(t *testing.T) {
 	if got.FedVisibility != "all" || len(got.FedPeerIDs) != 0 {
 		t.Errorf("switch to all should clear the list: %q/%v", got.FedVisibility, got.FedPeerIDs)
 	}
+}
+
+// The three thin status surfaces banked from the task-5 review: the
+// session-auth role endpoint (setup-guide gate), the spoke branch of the
+// admin federation GET, and the online stamp on the admin peer list. The
+// live-channel half drives a real dialer→hub channel between two wired
+// instances (the same Manager the ws tests exercise).
+
+func TestFedRoleEndpoint(t *testing.T) {
+	e := newTestEnv(t, http.NotFoundHandler())
+	admin := login(t, e)
+	alice := userToken(t, e, "alice")
+
+	// Session-auth: anonymous is refused (this is not a public probe).
+	if resp := e.do(t, "GET", "/api/federation/role", "", ""); resp.StatusCode != http.StatusUnauthorized {
+		bodyString(t, resp)
+		t.Errorf("anonymous role = %d, want 401", resp.StatusCode)
+	} else {
+		resp.Body.Close()
+	}
+
+	// Standalone: exactly one field, the role.
+	var out map[string]string
+	resp := e.do(t, "GET", "/api/federation/role", "", alice)
+	body := bodyString(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("role = %d %s", resp.StatusCode, body)
+	}
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out["role"] != "standalone" || len(out) != 1 {
+		t.Fatalf("standalone payload = %s, want {\"role\":\"standalone\"} only", body)
+	}
+
+	// Spoke role: still role-only — the stored hub_url/token must not ride
+	// this endpoint (it is readable by every user, the admin pair is not).
+	setFedRole(t, e, admin, "spoke", "http://127.0.0.1:1", "fed-secret-token")
+	resp = e.do(t, "GET", "/api/federation/role", "", alice)
+	body = bodyString(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("spoke role = %d %s", resp.StatusCode, body)
+	}
+	if strings.Contains(body, "127.0.0.1") || strings.Contains(body, "fed-secret-token") {
+		t.Errorf("role endpoint leaked spoke config: %s", body)
+	}
+	out = map[string]string{}
+	json.Unmarshal([]byte(body), &out)
+	if out["role"] != "spoke" || len(out) != 1 {
+		t.Errorf("spoke payload = %s", body)
+	}
+
+	// The admin GET's spoke branch while the dialer cannot reach anything:
+	// the key is present, connected=false, identity empty.
+	resp = e.do(t, "GET", "/api/admin/federation", "", admin)
+	var st struct {
+		Role  string `json:"role"`
+		Spoke *struct {
+			Connected  bool   `json:"connected"`
+			HubName    string `json:"hub_name"`
+			HubVersion string `json:"hub_version"`
+		} `json:"spoke"`
+	}
+	body = bodyString(t, resp)
+	json.Unmarshal([]byte(body), &st)
+	if st.Role != "spoke" || st.Spoke == nil || st.Spoke.Connected ||
+		st.Spoke.HubName != "" || st.Spoke.HubVersion != "" {
+		t.Errorf("disconnected spoke branch = %s", body)
+	}
+	// The role endpoint follows the stored role for admins too.
+	if resp := e.do(t, "GET", "/api/federation/role", "", admin); resp.StatusCode != http.StatusOK {
+		bodyString(t, resp)
+		t.Error("admin role read failed")
+	} else {
+		resp.Body.Close()
+	}
+}
+
+// waitFor polls cond until it holds or the deadline passes.
+func waitFor(t *testing.T, desc string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("timeout waiting for %s", desc)
+}
+
+func TestSpokeStatusAndPeerOnline(t *testing.T) {
+	hub := newTestEnv(t, http.NotFoundHandler())
+	hadmin := login(t, hub)
+	sp := newTestEnv(t, http.NotFoundHandler())
+	sadmin := login(t, sp)
+
+	_, token := createPeer(t, hub, hadmin, "home")
+	setFedRole(t, hub, hadmin, "hub", "", "")
+	setFedRole(t, sp, sadmin, "spoke", hub.srv.URL, token)
+
+	type spokeBranch struct {
+		Connected  bool   `json:"connected"`
+		HubName    string `json:"hub_name"`
+		HubVersion string `json:"hub_version"`
+	}
+	readSpoke := func() *spokeBranch {
+		resp := sp.do(t, "GET", "/api/admin/federation", "", sadmin)
+		defer resp.Body.Close()
+		var st struct {
+			Spoke *spokeBranch `json:"spoke"`
+		}
+		json.NewDecoder(resp.Body).Decode(&st)
+		return st.Spoke
+	}
+	readOnline := func() bool {
+		resp := hub.do(t, "GET", "/api/admin/peers", "", hadmin)
+		defer resp.Body.Close()
+		var list struct {
+			Peers []struct {
+				Name   string `json:"name"`
+				Online bool   `json:"online"`
+			} `json:"peers"`
+		}
+		json.NewDecoder(resp.Body).Decode(&list)
+		for _, p := range list.Peers {
+			if p.Name == "home" {
+				return p.Online
+			}
+		}
+		return false
+	}
+
+	// Connect: the spoke branch flips to connected and carries the hub's
+	// hello_ack identity (default manager version is "dev").
+	waitFor(t, "spoke channel connected", func() bool {
+		s := readSpoke()
+		return s != nil && s.Connected
+	})
+	if s := readSpoke(); s.HubName == "" || s.HubVersion != "dev" {
+		t.Errorf("hub identity = %+v, want hello_ack name + version \"dev\"", s)
+	}
+	// The hub stamps the same channel onto the peer row.
+	waitFor(t, "peer online stamp", readOnline)
+
+	// Disable the peer: the kick drops the channel, and both stamps flip
+	// back (the spoke's reconnect attempts are refused 403 while disabled).
+	pid := peerIDByName(t, hub, hadmin, "home")
+	if resp := hub.do(t, "PATCH", "/api/admin/peers/"+strconv.FormatInt(pid, 10),
+		`{"enabled":false}`, hadmin); resp.StatusCode != http.StatusOK {
+		t.Fatalf("disable = %s", bodyString(t, resp))
+	} else {
+		resp.Body.Close()
+	}
+	waitFor(t, "spoke branch flips to disconnected", func() bool {
+		s := readSpoke()
+		return s != nil && !s.Connected && s.HubName == ""
+	})
+	waitFor(t, "peer online stamp clears", func() bool { return !readOnline() })
+}
+
+// peerIDByName finds a peer's id through the admin list (tests create
+// peers by name).
+func peerIDByName(t *testing.T, e *testEnv, admin, name string) int64 {
+	t.Helper()
+	resp := e.do(t, "GET", "/api/admin/peers", "", admin)
+	defer resp.Body.Close()
+	var list struct {
+		Peers []store.Peer `json:"peers"`
+	}
+	json.NewDecoder(resp.Body).Decode(&list)
+	for _, p := range list.Peers {
+		if p.Name == name {
+			return p.ID
+		}
+	}
+	t.Fatalf("peer %q not found", name)
+	return 0
 }

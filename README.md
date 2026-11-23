@@ -6,6 +6,7 @@ Front a local LLM (any OpenAI-compatible server — llama.cpp, halogen, Ollama, 
 with friends: each user logs into the dashboard, creates one API key per app, and every request
 is metered (input / output / cache-read / cache-write tokens, per session, per client IP) and
 priced. Admins manage backends, the model catalog and prices; users see their own usage and cost.
+Several relays can also **federate** — a hub and its spokes pool model capacity across machines.
 
 - **Relay API:** `:8080` (`/v1/*`, `sk-` keys) — what friends' apps point at
 - **Dashboard + admin API:** `:8081` (JWT, embedded SPA) — the port to front with a reverse proxy
@@ -75,6 +76,39 @@ this split: non-admin keys get the advertised catalog — group rows (negative
 `id`) plus public standalones; admin keys get the physical per-machine rows
 (`docs/api-contract.md`).
 
+## Federation
+
+Two or more relays can pool their capacity: a **hub** accepts channels from
+**spokes** — other relays that dial in with a server token and share selected
+models. A spoke keeps running standalone; its opted-in models appear on the
+hub as ordinary catalog rows (and are relayed onward to the other spokes), so
+any user on any member can request them, with the same routing, affinity and
+metering as local models. The spoke always dials out — the hub never needs to
+reach into the spoke's network.
+
+**Roles** are set on the admin **Federation** page: `standalone` (default, no
+federation), `hub`, `spoke`. A spoke enters the hub URL + token there and sees
+its live channel status; every user mints their own `fed-…` server token on
+**My keys** and follows the **Connect server** guide (shown while the instance
+is a hub). What to share is a per-model switch on the admin **Models** page
+(`off` / `all` / `allowlist`) — nothing leaves the box until you opt a model
+in. Quickstart: hub → *My keys → Server token* → spoke → *Admin → Federation →
+spoke + hub URL + token* → spoke *Models* → set the models to share to `all`.
+
+**Users see models, admins see the cluster**: a federated model behaves like
+any other row (its health *is* the channel; groups may pool several peers'
+copies), while the admin **Servers** page lists every peer with its online
+state, version, shared models and the fairness ledger — served vs consumed
+per user and per server. Usage through a federated model is metered to the
+consuming user and credited to the serving account: fairness bookkeeping,
+not billing.
+
+**Security**: server tokens (`fed-…`) authenticate only the federation
+channel, never `/v1/*` (and API keys never the channel); they are hashed,
+shown once, rotatable, and disabling a peer drops its live channel at once.
+Spoke-local usernames never leave the spoke — the hub stamps its own identity
+onto forwarded traffic and is the attribution authority for the ledger.
+
 ## Supported upstream dialects
 
 | Route | Dialect | Metered |
@@ -126,6 +160,7 @@ For local dev without Docker: `make web && make run`.
 | build container | `make docker-build` |
 | start / stop local stack | `make docker-up` / `make docker-down` |
 | publish container image | `make docker-release VERSION=0.1.1` |
+| federation e2e (manual, localhost 18xxx) | `scripts/e2e-federation.sh` |
 
 ## Configuration
 
@@ -162,6 +197,7 @@ llm-relay
 ├── internal/proxy         dialect forwarder, SSE scanning, backend discovery
 ├── internal/api           dashboard JSON API (user + admin)
 ├── web/                   Vite + React + Chart.js dashboard (embedded via go:embed)
+├── scripts/               manual tools: federation e2e (two relays + mock engines)
 ├── deploy/                sample container-compose stack
 ├── docs/
 │   ├── api-contract.md    authoritative HTTP API contract
