@@ -86,6 +86,80 @@ any user on any member can request them, with the same routing, affinity and
 metering as local models. The spoke always dials out — the hub never needs to
 reach into the spoke's network.
 
+```mermaid
+---
+title: Federation setup
+config:
+  flowchart:
+    wrappingWidth: 400
+---
+flowchart LR
+    subgraph SP2["Spoke 2 — Beth"]
+        direction TB
+        U2["👤 beth<br/>👤 jon"]
+        C2["📋 available models<br/>• Qwen3.8-flash-next<br/>• Qwen3.8-27b · pool<br/>• llama-70b"]
+        LC(["llama.cpp"])
+        M2[("Qwen3.8-27b-Q4")]
+        VLLM(["vllm"])
+        M3[("llama-70b")]
+        LC --- M2
+        VLLM --- M3
+        U2 -.-> C2
+        C2 ~~~ LC
+        C2 ~~~ VLLM
+    end
+
+    subgraph SP1["Spoke 1 — Alex"]
+        direction TB
+        U1["👤 alex<br/>👤 gina<br/>👤 hugo"]
+        C1["📋 available models<br/>• Qwen3.8-flash-next<br/>• Qwen3.8-27b · pool<br/>• llama-70b<br/>• cloud-model · local"]
+        OLLA(["ollama"])
+        M1[("Qwen3.8-27b-Q4")]
+        CLOUD(["Cloud"])
+        M4[("cloud-model<br/>not shared")]
+        OLLA --- M1
+        CLOUD --- M4
+        U1 -.-> C1
+        C1 ~~~ OLLA
+        C1 ~~~ CLOUD
+    end
+
+    subgraph HUB["Hub relay"]
+        direction TB
+        HU["👤 alex<br/>👤 beth<br/>👤 carl<br/>👤 dana<br/>👤 eli"]
+        CH["📋 available models<br/>• Qwen3.8-flash-next<br/>• Qwen3.8-27b · pool<br/>• llama-70b"]
+        POOL{{"Qwen3.8-27b<br/>pool · group"}}
+        HALO(["halogen-flash"])
+        HMOD[("Qwen3.8-flash-next")]
+        HALO --- HMOD
+        POOL ~~~ HU
+        POOL ~~~ HALO
+        HU -.-> CH
+    end
+
+    SP1 ==>|"fed- token · WebSocket"| HUB
+    SP2 ==>|"fed- token · WebSocket"| HUB
+    SP1 -.->|"peer://1"| POOL
+    SP2 -.->|"peer://2"| POOL
+    SP2 -.->|"peer://2"| CH
+
+    style HUB fill:#eff6ff,stroke:#2563eb,stroke-width:2px
+    style SP1 fill:#f0fdf4,stroke:#16a34a,stroke-width:2px
+    style SP2 fill:#f0fdf4,stroke:#16a34a,stroke-width:2px
+    classDef backend fill:#e2e8f0,stroke:#475569,color:#0f172a
+    classDef model fill:#ffffff,stroke:#64748b,color:#0f172a
+    classDef local fill:#f1f5f9,stroke:#94a3b8,stroke-dasharray:5 4,color:#64748b
+    classDef pool fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#0f172a
+    classDef cat fill:#faf5ff,stroke:#9333ea,stroke-width:2px,color:#0f172a,text-align:left
+    classDef users fill:none,stroke:none,color:#0f172a,text-align:left
+    class HALO,OLLA,LC,VLLM,CLOUD backend
+    class HMOD,M1,M2,M3 model
+    class M4 local
+    class POOL pool
+    class C1,C2,CH cat
+    class HU,U1,U2 users
+```
+
 **Roles** are set on the admin **Federation** page: `standalone` (default, no
 federation), `hub`, `spoke`. A spoke enters the hub URL + token there and sees
 its live channel status; every user mints their own `fed-…` server token on
