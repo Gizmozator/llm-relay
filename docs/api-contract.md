@@ -93,12 +93,13 @@ Self-service (JWT, any user — the **My Keys** surface):
 - `DELETE /api/peers/{id}` (own only, else `404`) → `204`; a live channel is dropped too (`1008 "deleted"`)
 
 Admin (JWT, admin — the **Servers** page):
-- `GET /api/admin/peers` → all peers, same shape (owner name + `shared_models` = models visible to that peer: every `fed_visibility:"all"` model + its allowlist rows)
+- `GET /api/admin/peers` → all peers, same shape plus `online` (live WS channel at this hub; always `false` on a standalone/spoke box) (owner name + `shared_models` = models visible to that peer: every `fed_visibility:"all"` model + its allowlist rows)
 - `POST /api/admin/peers/{id}/rotate` → `{"token":"fed-…"}` · `PATCH /api/admin/peers/{id}` — `{"enabled":true|false}` → peer object (disable is the incident lever: it drops the peer's live channel at once, `1008 "disabled"`) · `DELETE /api/admin/peers/{id}` → `204` (live channel dropped too) — all `404` on unknown id
 
 Federation settings (JWT, admin):
-- `GET /api/admin/federation` → `{"role":"standalone","hub_url":"","hub_token":""}` — `role` is `standalone` (default) | `hub` | `spoke`; `hub_token` is echoed back (it is the hub's token the admin pasted, not a secret this server minted). Spoke config is plaintext-at-rest like other DB secrets here; the spoke must present it verbatim.
+- `GET /api/admin/federation` → `{"role":"standalone","hub_url":"","hub_token":""}` — `role` is `standalone` (default) | `hub` | `spoke`; `hub_token` is echoed back (it is the hub's token the admin pasted, not a secret this server minted). Spoke config is plaintext-at-rest like other DB secrets here; the spoke must present it verbatim. When the stored role is `spoke` the response carries `"spoke":{"connected":bool,"hub_name":"…","hub_version":"…"}` — the live channel state and the hub's `hello_ack` identity (empty strings while disconnected).
 - `PUT /api/admin/federation` — full replacement `{"role","hub_url","hub_token"}` → same shape. `400` when the role is not one of the three, or a spoke lacks an http(s) `hub_url` or the `hub_token`. Leaving spoke mode clears `hub_url`/`hub_token`. Live-safe: the spoke dialer starts/stops with the role, and moving away from `hub` closes every live channel (`1008 "role changed"`) — no restart needed.
+- `GET /api/federation/role` (JWT, any user) → `{"role":"hub"}` — the reconciled role only; the hub-only UI (setup guide) gates on it without needing the admin settings payload.
 
 Federation stats (plan task 4; `?days=N`, default 30, `1..365` else `400`;
 the window is the last N days, `since` echoed in the response):

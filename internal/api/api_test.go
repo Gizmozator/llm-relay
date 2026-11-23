@@ -86,6 +86,7 @@ func newTestEnv(t *testing.T, upstream http.Handler) *testEnv {
 	mux.Handle("PUT /api/admin/federation", s.Admin(s.AdminPutFederation))
 	mux.Handle("GET /api/admin/federation/stats", s.Admin(s.AdminFedStats))
 	mux.Handle("GET /api/federation/stats", s.Auth(s.FedStats))
+	mux.Handle("GET /api/federation/role", s.Auth(s.FedRole))
 	mux.Handle("GET /federation/v1/ping", s.PeerAuth(s.FederationPing))
 	// Federation channel: the real Manager (production defaults) behind
 	// the same PeerAuth + role-gate wiring main.go uses.

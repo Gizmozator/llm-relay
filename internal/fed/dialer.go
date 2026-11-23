@@ -99,13 +99,14 @@ func (d *dialer) dialOnce() error {
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", url, err)
 	}
-	if err := d.handshake(ws); err != nil {
+	ack, err := d.handshake(ws)
+	if err != nil {
 		_ = ws.Close(websocket.StatusPolicyViolation, "handshake failed")
 		return err
 	}
 	conn := NewConn(ws, d.opts)
 	d.mgr.attachChannel(conn, nil)
-	d.mgr.setSpokeConn(conn)
+	d.mgr.setSpokeConn(conn, ack.Name, ack.Version)
 	defer func() {
 		d.mgr.clearSpokeConn(conn)
 		d.mgr.mat.allOffline()
@@ -117,34 +118,35 @@ func (d *dialer) dialOnce() error {
 }
 
 // handshake sends hello and waits for a matching hello_ack (raw reads —
-// the Conn pumps start after this returns).
-func (d *dialer) handshake(ws *websocket.Conn) error {
+// the Conn pumps start after this returns). The accepted ack is returned so
+// the caller can publish the hub's identity (name/version) with the channel.
+func (d *dialer) handshake(ws *websocket.Conn) (*HelloAck, error) {
 	hello, err := Encode(&Hello{T: THello, Proto: Protocol,
 		Name: d.opts.InstanceName, Version: d.opts.Version})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	wctx, wcancel := context.WithTimeout(d.ctx, d.opts.WriteTimeout)
 	defer wcancel()
 	if err := ws.Write(wctx, websocket.MessageText, hello); err != nil {
-		return fmt.Errorf("send hello: %w", err)
+		return nil, fmt.Errorf("send hello: %w", err)
 	}
 	rctx, rcancel := context.WithTimeout(d.ctx, d.opts.HelloTimeout)
 	defer rcancel()
 	_, data, err := ws.Read(rctx)
 	if err != nil {
-		return fmt.Errorf("hello_ack: %w", err)
+		return nil, fmt.Errorf("hello_ack: %w", err)
 	}
 	f, err := Decode(data)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	ack, ok := f.(*HelloAck)
 	if !ok {
-		return errors.New("expected hello_ack")
+		return nil, errors.New("expected hello_ack")
 	}
 	if ack.Proto != Protocol {
-		return fmt.Errorf("hub proto mismatch: %d", ack.Proto)
+		return nil, fmt.Errorf("hub proto mismatch: %d", ack.Proto)
 	}
-	return nil
+	return ack, nil
 }

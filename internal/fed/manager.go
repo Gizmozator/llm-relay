@@ -45,6 +45,7 @@ type Manager struct {
 	serve     http.Handler // proxy mux for tunneled requests (AttachServe)
 
 	spoke   atomic.Pointer[Conn]          // live spoke channel (role=spoke)
+	spokeID atomic.Pointer[hubIdent]      // hub identity from its hello_ack
 	served  map[string]context.CancelFunc // tunneled requests being served
 	transit map[string]int64              // hub transit: request id → target peer
 
@@ -263,10 +264,22 @@ func (m *Manager) currentRole() string {
 	return ""
 }
 
-func (m *Manager) setSpokeConn(c *Conn) { m.spoke.Store(c) }
+// hubIdent is the hub's self-report (hello_ack name + version) that a
+// spoke's live channel shook hands with; published with the channel so the
+// admin UI can show which hub it is connected to.
+type hubIdent struct{ name, version string }
+
+// setSpokeConn publishes the live channel together with the hub identity
+// its handshake produced (the dialer reads hello_ack before the pumps run).
+func (m *Manager) setSpokeConn(c *Conn, hubName, hubVersion string) {
+	m.spokeID.Store(&hubIdent{name: hubName, version: hubVersion})
+	m.spoke.Store(c)
+}
 
 // clearSpokeConn drops the pointer only if it still names c (a replaced
-// channel must not be evicted by the old one's exit).
+// channel must not be evicted by the old one's exit). The hub identity
+// rides the same CAS: it is cleared only together with the channel it
+// belongs to, so a replacement's fresh identity is never evicted.
 func (m *Manager) clearSpokeConn(c *Conn) {
 	for {
 		cur := m.spoke.Load()
@@ -274,9 +287,23 @@ func (m *Manager) clearSpokeConn(c *Conn) {
 			return
 		}
 		if m.spoke.CompareAndSwap(cur, nil) {
+			m.spokeID.Store(nil)
 			return
 		}
 	}
+}
+
+// SpokeStatus reports the spoke-side channel for the admin UI: whether a
+// live channel to the hub exists, and the hub's hello_ack identity (empty
+// strings when disconnected or before the identity was recorded).
+func (m *Manager) SpokeStatus() (connected bool, hubName, hubVersion string) {
+	if c := m.spokeConn(); c == nil || c.Closed() {
+		return false, "", ""
+	}
+	if p := m.spokeID.Load(); p != nil {
+		return true, p.name, p.version
+	}
+	return true, "", ""
 }
 
 func (m *Manager) spokeConn() *Conn { return m.spoke.Load() }

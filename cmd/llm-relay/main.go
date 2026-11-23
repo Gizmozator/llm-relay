@@ -156,6 +156,7 @@ func main() {
 	adminMux.Handle("PUT /api/admin/federation", apiSrv.Admin(apiSrv.AdminPutFederation))
 	adminMux.Handle("GET /api/admin/federation/stats", apiSrv.Admin(apiSrv.AdminFedStats))
 	adminMux.Handle("GET /api/federation/stats", apiSrv.Auth(apiSrv.FedStats))
+	adminMux.Handle("GET /api/federation/role", apiSrv.Auth(apiSrv.FedRole))
 	adminMux.Handle("GET /api/admin/usage/summary", apiSrv.Admin(apiSrv.UsageSummary))
 	adminMux.Handle("GET /api/admin/usage/detail", apiSrv.Admin(apiSrv.UsageDetail))
 	adminMux.Handle("GET /api/admin/live", apiSrv.Admin(apiSrv.Live))

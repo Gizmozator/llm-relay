@@ -1,7 +1,9 @@
-import { useState } from 'react';
-import { NavLink, Navigate, Outlet } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import { NavLink, Navigate, Outlet, useLocation } from 'react-router-dom';
 import { useAuth } from './auth';
 import { brandName } from './brand';
+import { api } from './api';
+import { useLoad } from './useLoad';
 import { Loading } from './components/ui';
 import AccountModal from './components/AccountModal';
 import type { ReactNode } from 'react';
@@ -26,6 +28,16 @@ function navClass({ isActive }: { isActive: boolean }): string {
 export default function Layout() {
   const { user, logout } = useAuth();
   const [showAccount, setShowAccount] = useState(false);
+  const location = useLocation();
+  // The setup guide only makes sense while this instance is a hub; the nav
+  // entry follows the reconciled role (cheap session-auth endpoint). Keyed on
+  // the path so an admin flipping the role is reflected on the next click
+  // instead of at the next reload. A failure just hides the entry — the
+  // sidebar has no banner surface worth dirtying, but it must not fail silent.
+  const fedRole = useLoad(() => api.fedRole(), [location.pathname]);
+  useEffect(() => {
+    if (fedRole.error) console.warn('federation role unavailable:', fedRole.error);
+  }, [fedRole.error]);
   if (!user) return <Navigate to="/login" replace />;
   const isAdmin = user.role === 'admin';
 
@@ -50,6 +62,11 @@ export default function Layout() {
           <NavLink to="/agents" className={navClass}>
             Agent API
           </NavLink>
+          {fedRole.data?.role === 'hub' && (
+            <NavLink to="/setup" className={navClass}>
+              Connect server
+            </NavLink>
+          )}
           <NavLink to="/models" className={navClass}>
             Models
           </NavLink>
@@ -67,6 +84,12 @@ export default function Layout() {
               </NavLink>
               <NavLink to="/admin/usage" className={navClass}>
                 All usage
+              </NavLink>
+              <NavLink to="/admin/federation" className={navClass}>
+                Federation
+              </NavLink>
+              <NavLink to="/admin/servers" className={navClass}>
+                Servers
               </NavLink>
               <NavLink to="/admin/settings" className={navClass}>
                 Settings

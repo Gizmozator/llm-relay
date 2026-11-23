@@ -127,6 +127,10 @@ type Peer struct {
 	// 'all' model plus its allowlist rows. Computed at list time so the
 	// Servers page needs no per-peer round-trips.
 	SharedModels int `json:"shared_models"`
+	// Online is the live-channel flag the API layer stamps from the hub
+	// registry (list time). False on a standalone/spoke box: peers only
+	// dial a hub, so their channels never live there.
+	Online bool `json:"online"`
 }
 
 const peerCols = `p.id, p.name, p.owner_user_id, u.username, p.enabled,

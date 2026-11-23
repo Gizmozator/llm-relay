@@ -70,6 +70,12 @@ type FedController interface {
 	// Role reports the reconciled federation role ("hub"/"spoke"/
 	// "standalone"); the stats endpoints shape their payload by it.
 	Role() string
+	// Online reports whether a peer's WS channel is live at this hub
+	// (false on a standalone/spoke box — the registry is empty there).
+	Online(peerID int64) bool
+	// SpokeStatus reports the spoke's own channel: live? plus the hub's
+	// hello_ack identity (empty when disconnected).
+	SpokeStatus() (connected bool, hubName, hubVersion string)
 }
 
 // catalogChanged tells the federation manager the shareable catalog may
@@ -229,12 +235,18 @@ func (s *Server) DeleteMyPeer(w http.ResponseWriter, r *http.Request, c *auth.Cl
 // ---------------------------------------------------------------- admin
 
 // AdminListPeers serves GET /api/admin/peers: every peer, owner name and
-// shared-model count included (Servers page data).
+// shared-model count included (Servers page data), plus the live-channel
+// flag stamped from the hub registry.
 func (s *Server) AdminListPeers(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
 	peers, err := store.ListPeers(s.DB)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
+	}
+	for i := range peers {
+		if s.Fed != nil {
+			peers[i].Online = s.Fed.Online(peers[i].ID)
+		}
 	}
 	writePeerList(w, peers)
 }
@@ -322,13 +334,37 @@ func (s *Server) AdminDeletePeer(w http.ResponseWriter, r *http.Request, c *auth
 // AdminGetFederation serves GET /api/admin/federation. hub_token is echoed
 // back: it is the hub's token the admin pasted in (not a secret this server
 // minted), and the spoke admin needs to read it to verify the config.
+// For a spoke the response carries a "spoke" object with the live channel
+// state (connected? + the hub's hello_ack identity) so the Federation page
+// can show connection status without a second round-trip.
 func (s *Server) AdminGetFederation(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
 	f, err := store.GetFederationSettings(s.DB)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	writeJSON(w, http.StatusOK, f)
+	resp := map[string]any{"role": f.Role, "hub_url": f.HubURL, "hub_token": f.HubToken}
+	if f.Role == store.FedRoleSpoke {
+		connected, hubName, hubVersion := false, "", ""
+		if s.Fed != nil {
+			connected, hubName, hubVersion = s.Fed.SpokeStatus()
+		}
+		resp["spoke"] = map[string]any{
+			"connected": connected, "hub_name": hubName, "hub_version": hubVersion,
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// FedRole serves GET /api/federation/role (session auth, any user): the
+// reconciled role only — the UI surface that is hub-specific (the setup
+// guide) gates on it without needing the admin settings payload.
+func (s *Server) FedRole(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
+	role := store.FedRoleStandalone
+	if s.Fed != nil {
+		role = s.Fed.Role()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"role": role})
 }
 
 // AdminPutFederation serves PUT /api/admin/federation {role, hub_url,

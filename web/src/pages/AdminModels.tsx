@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
 import type { FormEvent } from 'react';
-import { api, errMsg, VISIBILITIES } from '../api';
-import type { CatalogModel, GroupPatch, ModelGroup, ModelPatch, Visibility } from '../api';
+import { api, errMsg, FED_VISIBILITIES, isSyntheticBackendUrl, VISIBILITIES } from '../api';
+import type { CatalogModel, FedVisibility, GroupPatch, ModelGroup, ModelPatch, Visibility } from '../api';
 import { fmtDateTime, microToPerM } from '../format';
 import { useLoad } from '../useLoad';
 import { useToast } from '../components/Toast';
@@ -48,6 +48,34 @@ export default function AdminModelsPage() {
   // badge (a model belongs to at most one group — the store rejects a
   // second membership with 409).
   const groups = useLoad(() => api.groups().then((r) => r.groups), []);
+  // Synthetic (federation-materialized) backends: base_url peer://… or
+  // hub://…. Their model rows mirror another instance's catalog, so only
+  // the federation fields and the enabled flag are editable locally.
+  const backends = useLoad(() => api.backends().then((r) => r.backends), []);
+  const fedRole = useLoad(() => api.fedRole(), []);
+  const peers = useLoad(() => api.adminPeers().then((r) => r.peers), []);
+  const syntheticBackends = useMemo(
+    () => (backends.data ?? []).filter((b) => isSyntheticBackendUrl(b.base_url)),
+    [backends.data],
+  );
+  const syntheticBackendIds = useMemo(
+    () => new Set(syntheticBackends.map((b) => b.id)),
+    [syntheticBackends],
+  );
+  const syntheticBackendNames = useMemo(
+    () => new Set(syntheticBackends.map((b) => b.name)),
+    [syntheticBackends],
+  );
+  // FAIL CLOSED: until the backend list is in (or once it has failed), every
+  // row is treated as synthetic-locked — rendering editable controls on a
+  // possibly-materialized row is worse than locking a local one for a beat.
+  const isSynthetic = (m: CatalogModel) => backends.data === null || syntheticBackendIds.has(m.backend_id);
+  // On a spoke an allowlist shares nothing (a spoke has no peer table of its
+  // own — the catalog rule), so the option needs an honest tooltip there.
+  const fedShareTitle =
+    fedRole.data?.role === 'spoke'
+      ? 'Federation sharing: off = local only, all = shared with the hub, allowlist = effectively off on a spoke (only “all” is pushed)'
+      : 'Federation sharing: off = local only, all = every peer, allowlist = the selected peers only';
   const [showGroupAdd, setShowGroupAdd] = useState(false);
   // Id of the group whose member editor is open; the group itself is looked
   // up from the fresh list so a reload never edits a stale copy.
@@ -176,6 +204,20 @@ export default function AdminModelsPage() {
         <h2>Model catalog</h2>
       </div>
 
+      {/* Auxiliary loads fail visibly, and each degrades honestly: no
+          backend list → every row stays synthetic-locked; no role → Share
+          controls hidden; no peers → the allowlist picker shows the error
+          instead of an empty list. */}
+      {backends.error && (
+        <Banner>Backend list unavailable — model rows stay locked (federation state unknown): {backends.error}</Banner>
+      )}
+      {fedRole.error && (
+        <Banner>Federation role unavailable — Share controls hidden: {fedRole.error}</Banner>
+      )}
+      {peers.error && (
+        <Banner>Peer list unavailable — allowlist editing disabled: {peers.error}</Banner>
+      )}
+
       {models.loading && !models.data ? (
         <Loading />
       ) : models.error ? (
@@ -211,71 +253,96 @@ export default function AdminModelsPage() {
                   <Fragment key={m.id}>
                     <tr className="model-main">
                       <td>
-                        <EditableText
-                          value={m.name}
-                          ariaLabel={`Public name of ${m.name}`}
-                          onCommit={(v) => patch(m.id, { name: v })}
-                        />
+                        {isSynthetic(m) ? (
+                          <span className="mono">{m.name}</span>
+                        ) : (
+                          <EditableText
+                            value={m.name}
+                            ariaLabel={`Public name of ${m.name}`}
+                            onCommit={(v) => patch(m.id, { name: v })}
+                          />
+                        )}
                         {groupOf.has(m.id) && (
                           <span className="tag" title={`Member of group “${groupOf.get(m.id)}”`}>
                             group:{groupOf.get(m.id)}
+                          </span>
+                        )}
+                        {isSynthetic(m) && (
+                          <span
+                            className="badge fed"
+                            title="Materialized from a federation peer — this row mirrors the peer’s catalog"
+                          >
+                            federation
                           </span>
                         )}
                       </td>
                       <td>{m.backend_name}</td>
                       <td className="mono">{m.upstream_model}</td>
                       <td>
-                        <select
-                          className="input input-inline"
-                          value={m.visibility}
-                          aria-label={`Visibility of ${m.name}`}
-                          title={
-                            groupOf.has(m.id)
-                              ? 'Group member: re-exposing it is allowed, but any later membership edit of the group forces members back to internal — a manual “public” here is transient'
-                              : undefined
-                          }
-                          onChange={(e) => patch(m.id, { visibility: e.target.value as Visibility })}
-                        >
-                          {VISIBILITIES.map((v) => (
-                            <option key={v} value={v}>
-                              {v}
-                            </option>
-                          ))}
-                        </select>
+                        {isSynthetic(m) ? (
+                          <span title="Set by the peer’s catalog">{m.visibility}</span>
+                        ) : (
+                          <select
+                            className="input input-inline"
+                            value={m.visibility}
+                            aria-label={`Visibility of ${m.name}`}
+                            title={
+                              groupOf.has(m.id)
+                                ? 'Group member: re-exposing it is allowed, but any later membership edit of the group forces members back to internal — a manual “public” here is transient'
+                                : undefined
+                            }
+                            onChange={(e) => patch(m.id, { visibility: e.target.value as Visibility })}
+                          >
+                            {VISIBILITIES.map((v) => (
+                              <option key={v} value={v}>
+                                {v}
+                              </option>
+                            ))}
+                          </select>
+                        )}
                       </td>
                       <td>
                         <Toggle checked={m.enabled} onChange={(v) => patch(m.id, { enabled: v })} />
                       </td>
                       <td className="num">
-                        <EditableNumber
-                          display={String(m.concurrency_limit)}
-                          ariaLabel={`Concurrency limit of ${m.name}`}
-                          onCommit={(n) => patch(m.id, { concurrency_limit: Math.round(n) })}
-                        />
+                        {isSynthetic(m) ? (
+                          String(m.concurrency_limit)
+                        ) : (
+                          <EditableNumber
+                            display={String(m.concurrency_limit)}
+                            ariaLabel={`Concurrency limit of ${m.name}`}
+                            onCommit={(n) => patch(m.id, { concurrency_limit: Math.round(n) })}
+                          />
+                        )}
                       </td>
                       <td className="num">
-                        <EditableNumber
-                          display={String(m.busy_threshold_pct)}
-                          ariaLabel={`Busy threshold (percent) of ${m.name}`}
-                          max={10000}
-                          onCommit={(n) => patch(m.id, { busy_threshold_pct: Math.round(n) })}
-                        />
+                        {isSynthetic(m) ? (
+                          String(m.busy_threshold_pct)
+                        ) : (
+                          <EditableNumber
+                            display={String(m.busy_threshold_pct)}
+                            ariaLabel={`Busy threshold (percent) of ${m.name}`}
+                            max={10000}
+                            onCommit={(n) => patch(m.id, { busy_threshold_pct: Math.round(n) })}
+                          />
+                        )}
                       </td>
                       <td className="actions">
-                        <button
-                          className="btn small"
-                          onClick={() => setCalcFor(m)}
-                        >
-                          Calc prices
-                        </button>
-                        <button
-                          className="btn small"
-                          disabled={benching !== null}
-                          onClick={() => benchmark(m)}
-                        >
-                          {benching === m.id ? 'Benching…' : 'Benchmark'}
-                        </button>
-                        <ConfirmButton label="Delete" onConfirm={() => remove(m)} />
+                        {!isSynthetic(m) && (
+                          <>
+                            <button className="btn small" onClick={() => setCalcFor(m)}>
+                              Calc prices
+                            </button>
+                            <button
+                              className="btn small"
+                              disabled={benching !== null}
+                              onClick={() => benchmark(m)}
+                            >
+                              {benching === m.id ? 'Benching…' : 'Benchmark'}
+                            </button>
+                            <ConfirmButton label="Delete" onConfirm={() => remove(m)} />
+                          </>
+                        )}
                       </td>
                     </tr>
                     <tr className="sub-row">
@@ -286,43 +353,108 @@ export default function AdminModelsPage() {
                               <span className="metric-label">
                                 {p.label} <span className="dim">{currency ? `${currency}/1M` : 'per 1M'}</span>
                               </span>
-                              <EditableNumber
-                                display={microToPerM(m[p.key])}
-                                ariaLabel={`${p.label} price of ${m.name}`}
-                                onCommit={(n) => patch(m.id, { [p.key]: Math.round(n * 1e6) } as ModelPatch)}
-                              />
+                              {isSynthetic(m) ? (
+                                <span className="mono">{microToPerM(m[p.key])}</span>
+                              ) : (
+                                <EditableNumber
+                                  display={microToPerM(m[p.key])}
+                                  ariaLabel={`${p.label} price of ${m.name}`}
+                                  onCommit={(n) => patch(m.id, { [p.key]: Math.round(n * 1e6) } as ModelPatch)}
+                                />
+                              )}
                             </span>
                           ))}
                           <span className="metric">
                             <span className="metric-label">Context</span>
-                            <EditableNumber
-                              display={String(m.context_length)}
-                              ariaLabel={`Context length of ${m.name}`}
-                              onCommit={(n) => patch(m.id, { context_length: Math.round(n) })}
-                            />
+                            {isSynthetic(m) ? (
+                              <span className="mono">{m.context_length}</span>
+                            ) : (
+                              <EditableNumber
+                                display={String(m.context_length)}
+                                ariaLabel={`Context length of ${m.name}`}
+                                onCommit={(n) => patch(m.id, { context_length: Math.round(n) })}
+                              />
+                            )}
                           </span>
                           <span
                             className="metric"
                             title={m.bench_at ? `Benchmarked ${fmtDateTime(m.bench_at)}` : 'Manual value'}
                           >
                             <span className="metric-label">TG tok/s</span>
-                            <EditableNumber
-                              display={m.bench_tok_per_s ? m.bench_tok_per_s.toFixed(1) : '0'}
-                              ariaLabel={`Generation speed (tok/s) of ${m.name}`}
-                              onCommit={(n) => patch(m.id, { bench_tok_per_s: n })}
-                            />
+                            {isSynthetic(m) ? (
+                              <span className="mono">{m.bench_tok_per_s ? m.bench_tok_per_s.toFixed(1) : '0'}</span>
+                            ) : (
+                              <EditableNumber
+                                display={m.bench_tok_per_s ? m.bench_tok_per_s.toFixed(1) : '0'}
+                                ariaLabel={`Generation speed (tok/s) of ${m.name}`}
+                                onCommit={(n) => patch(m.id, { bench_tok_per_s: n })}
+                              />
+                            )}
                           </span>
                           <span
                             className="metric"
                             title={m.bench_at ? `Benchmarked ${fmtDateTime(m.bench_at)}` : 'Manual value'}
                           >
                             <span className="metric-label">PP tok/s</span>
-                            <EditableNumber
-                              display={m.bench_pp_tok_per_s ? m.bench_pp_tok_per_s.toFixed(0) : '0'}
-                              ariaLabel={`Prompt-processing speed (tok/s) of ${m.name}`}
-                              onCommit={(n) => patch(m.id, { bench_pp_tok_per_s: n })}
-                            />
+                            {isSynthetic(m) ? (
+                              <span className="mono">{m.bench_pp_tok_per_s ? m.bench_pp_tok_per_s.toFixed(0) : '0'}</span>
+                            ) : (
+                              <EditableNumber
+                                display={m.bench_pp_tok_per_s ? m.bench_pp_tok_per_s.toFixed(0) : '0'}
+                                ariaLabel={`Prompt-processing speed (tok/s) of ${m.name}`}
+                                onCommit={(n) => patch(m.id, { bench_pp_tok_per_s: n })}
+                              />
+                            )}
                           </span>
+                          {/* Share controls: hidden on synthetic rows (the
+                              server ignores fed_visibility there — the
+                              materialization scheme decides sharing) and
+                              while the role is unknown (degrade quietly). */}
+                          {fedRole.data && !isSynthetic(m) && (
+                            <span className="metric" title={fedShareTitle}>
+                              <span className="metric-label">Share</span>
+                              <select
+                                className="input input-inline"
+                                value={m.fed_visibility}
+                                aria-label={`Federation sharing of ${m.name}`}
+                                onChange={(e) => patch(m.id, { fed_visibility: e.target.value as FedVisibility })}
+                              >
+                                {FED_VISIBILITIES.map((v) => (
+                                  <option key={v} value={v}>
+                                    {v}
+                                  </option>
+                                ))}
+                              </select>
+                            </span>
+                          )}
+                          {!isSynthetic(m) && m.fed_visibility === 'allowlist' && (
+                            <span className="metric" title="Ctrl/⌘-click to select the peers this model is shared with">
+                              <span className="metric-label">Peers</span>
+                              {peers.error ? (
+                                <span className="tag err" title={peers.error}>peers unavailable</span>
+                              ) : (peers.data ?? []).length === 0 ? (
+                                <span className="dim">no peers enrolled</span>
+                              ) : (
+                                <select
+                                  className="input fed-peer-select"
+                                  multiple
+                                  size={3}
+                                  aria-label={`Peer allowlist of ${m.name}`}
+                                  value={m.fed_peer_ids.map(String)}
+                                  onChange={(e) => {
+                                    const ids = Array.from(e.target.selectedOptions).map((o) => Number(o.value));
+                                    void patch(m.id, { fed_visibility: 'allowlist', fed_peer_ids: ids });
+                                  }}
+                                >
+                                  {(peers.data ?? []).map((p) => (
+                                    <option key={p.id} value={String(p.id)}>
+                                      {p.name} ({p.owner_name})
+                                    </option>
+                                  ))}
+                                </select>
+                              )}
+                            </span>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -389,13 +521,16 @@ export default function AdminModelsPage() {
                         ) : (
                           g.members.map((mem) => {
                             const tags = memberHealthTags(mem);
+                            const loc = syntheticBackendNames.has(mem.backend_name)
+                              ? `peer: ${mem.backend_name}`
+                              : `@ ${mem.backend_name}`;
                             return (
                               <span
                                 className="tag"
                                 key={mem.model_id}
-                                title={`${mem.model_name} @ ${mem.backend_name} · weight ${fmtWeight(mem.weight)} · position ${mem.position}`}
+                                title={`${mem.model_name} ${loc} · weight ${fmtWeight(mem.weight)} · position ${mem.position}`}
                               >
-                                {mem.model_name}@{mem.backend_name} · {fmtWeight(mem.weight)}
+                                {mem.model_name} {loc} · {fmtWeight(mem.weight)}
                                 {tags && ` (${tags})`}
                               </span>
                             );
@@ -437,6 +572,7 @@ export default function AdminModelsPage() {
           group={editGroup}
           models={rows ?? []}
           taken={takenModelIds}
+          synthetic={syntheticBackendNames}
           onClose={() => setEditGroupId(null)}
           onSaved={() => {
             toast.push('success', `Members updated for “${editGroup.name}”.`);
@@ -777,12 +913,16 @@ function GroupMembersModal({
   group,
   models,
   taken,
+  synthetic,
   onClose,
   onSaved,
 }: {
   group: ModelGroup;
   models: CatalogModel[];
   taken: Set<number>;
+  /** Backend names that belong to federation (synthetic) backends: the
+   *  member location reads “peer: <name>” instead of “@ <name>”. */
+  synthetic: Set<string>;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -812,11 +952,15 @@ function GroupMembersModal({
   // member — so the UI makes the operator confirm it explicitly.
   const [armedEmpty, setArmedEmpty] = useState(false);
 
+  // Member location: federation members are named by their peer, local
+  // ones by their backend.
+  const loc = (backendName: string) =>
+    synthetic.has(backendName) ? `peer: ${backendName}` : `@ ${backendName}`;
   const label = (id: number) => {
     const mem = group.members.find((m) => m.model_id === id);
-    if (mem) return `${mem.model_name} @ ${mem.backend_name}`;
+    if (mem) return `${mem.model_name} ${loc(mem.backend_name)}`;
     const m = models.find((x) => x.id === id);
-    return m ? `${m.name} @ ${m.backend_name}` : `model ${id}`;
+    return m ? `${m.name} ${loc(m.backend_name)}` : `model ${id}`;
   };
   // One group per model (store enforces it with 409), so models claimed by
   // another group and models already listed here are not offered.
@@ -1009,7 +1153,7 @@ function GroupMembersModal({
                 <option value="">— choose a model —</option>
                 {candidates.map((m) => (
                   <option key={m.id} value={m.id}>
-                    {m.name} @ {m.backend_name}
+                    {m.name} {loc(m.backend_name)}
                     {!m.enabled && ' (model off)'}
                   </option>
                 ))}
