@@ -21,6 +21,7 @@ import (
 	"llm-relay/internal/auth"
 	"llm-relay/internal/config"
 	"llm-relay/internal/db"
+	"llm-relay/internal/fed"
 	"llm-relay/internal/proxy"
 	"llm-relay/internal/store"
 	"llm-relay/internal/usage"
@@ -46,12 +47,28 @@ func main() {
 	rec := usage.NewRecorder(d)
 	rec.Start()
 
+	// Federation channel singleton (plan 2026-11-22-relay-federation):
+	// owns the hub registry + spoke dialer; Reload applies the stored
+	// role. Deferred below, AFTER AttachServe: a dialer started here could
+	// receive catalog frames whose tunnel would hit a mux with no frame
+	// server mounted yet.
+	fedMgr := fed.NewManager(d, nil)
+	defer fedMgr.Close()
+
 	apiSrv := &api.Server{DB: d, JWTSecret: cfg.JWTSecret, JWTTTL: 12 * time.Hour,
 		RelayURL: cfg.PublicRelayURL, DashboardURL: cfg.PublicDashboardURL}
+	apiSrv.Fed = fedMgr
 	ph := proxy.New(d, rec, cfg.TrustProxyHeaders)
 	apiSrv.Flight = ph.Flight
 	ph.RelayURL = cfg.PublicRelayURL
 	ph.DashboardURL = cfg.PublicDashboardURL
+	// Federation seams on the proxy: the scheme-dispatching transport asks
+	// the Manager to tunnel peer://hub:// backends, the health cache asks
+	// it whether a synthetic backend's channel is up, and the Manager runs
+	// tunneled requests back through this mux (its frame server refuses
+	// any path outside /v1/).
+	ph.Fed = fedMgr
+	ph.Health.Synthetic = fedMgr.SyntheticOnline
 
 	healthz := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -70,7 +87,22 @@ func main() {
 	relayMux.HandleFunc("GET /v1/models", ph.Models)
 	relayMux.HandleFunc("GET /v1/agent-guide", ph.AgentGuide)
 	relayMux.HandleFunc("GET /v1/utilization", ph.UtilizationREST)
+	// Federation channel (plan 2026-11-22-relay-federation): server-token
+	// (fed-) endpoints, machine-to-machine, on the public port beside the
+	// sk-key surface — the spoke admin points hub_url at the hub's relay
+	// URL. connect is the WS channel (task 2): PeerAuth verifies the
+	// token on the upgrade request, the Manager role-gates (404 unless
+	// hub) and runs the handshake. ping stays as the token-path probe.
+	relayMux.Handle("GET /federation/v1/ping", apiSrv.PeerAuth(apiSrv.FederationPing))
+	relayMux.Handle("GET /federation/v1/connect", apiSrv.PeerAuth(apiSrv.FederationConnect))
 	relayMux.HandleFunc("POST /mcp", ph.MCP)
+	// Tunneled (federation) requests are served from this same mux; the
+	// fed frame server restricts them to /v1/* paths (see serve.go).
+	fedMgr.AttachServe(relayMux)
+	// Start federation only now that the tunnel's target mux is complete:
+	// the stored role comes alive (spoke dialer starts, hub purges stale
+	// materialized rows) with every route in place.
+	fedMgr.Reload()
 
 	// Dashboard port: JWT API + embedded SPA. This is the port to put
 	// behind the reverse proxy.
@@ -109,6 +141,22 @@ func main() {
 	adminMux.Handle("DELETE /api/admin/groups/{id}", apiSrv.Admin(apiSrv.AdminDeleteGroup))
 	adminMux.Handle("GET /api/admin/settings", apiSrv.Admin(apiSrv.AdminGetSettings))
 	adminMux.Handle("PUT /api/admin/settings", apiSrv.Admin(apiSrv.AdminPutSettings))
+	// Federation (plan 2026-11-22-relay-federation): self-service server
+	// tokens (any user, My Keys page) + admin Servers-page management +
+	// the instance role pair.
+	adminMux.Handle("GET /api/peers", apiSrv.Auth(apiSrv.ListPeers))
+	adminMux.Handle("POST /api/peers", apiSrv.Auth(apiSrv.CreatePeer))
+	adminMux.Handle("POST /api/peers/{id}/rotate", apiSrv.Auth(apiSrv.RotateMyPeer))
+	adminMux.Handle("DELETE /api/peers/{id}", apiSrv.Auth(apiSrv.DeleteMyPeer))
+	adminMux.Handle("GET /api/admin/peers", apiSrv.Admin(apiSrv.AdminListPeers))
+	adminMux.Handle("POST /api/admin/peers/{id}/rotate", apiSrv.Admin(apiSrv.AdminRotatePeer))
+	adminMux.Handle("PATCH /api/admin/peers/{id}", apiSrv.Admin(apiSrv.AdminUpdatePeer))
+	adminMux.Handle("DELETE /api/admin/peers/{id}", apiSrv.Admin(apiSrv.AdminDeletePeer))
+	adminMux.Handle("GET /api/admin/federation", apiSrv.Admin(apiSrv.AdminGetFederation))
+	adminMux.Handle("PUT /api/admin/federation", apiSrv.Admin(apiSrv.AdminPutFederation))
+	adminMux.Handle("GET /api/admin/federation/stats", apiSrv.Admin(apiSrv.AdminFedStats))
+	adminMux.Handle("GET /api/federation/stats", apiSrv.Auth(apiSrv.FedStats))
+	adminMux.Handle("GET /api/federation/role", apiSrv.Auth(apiSrv.FedRole))
 	adminMux.Handle("GET /api/admin/usage/summary", apiSrv.Admin(apiSrv.UsageSummary))
 	adminMux.Handle("GET /api/admin/usage/detail", apiSrv.Admin(apiSrv.UsageDetail))
 	adminMux.Handle("GET /api/admin/live", apiSrv.Admin(apiSrv.Live))

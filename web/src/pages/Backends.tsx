@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { FormEvent } from 'react';
-import { api, errMsg } from '../api';
+import { api, errMsg, isSyntheticBackendUrl } from '../api';
 import type { Backend, CatalogModel, ProbeResult } from '../api';
 import { fmtDateTime } from '../format';
 import { useLoad } from '../useLoad';
@@ -82,9 +82,21 @@ export default function BackendsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {list.map((b) => (
+                  {list.map((b) => {
+                    // Synthetic (federation-materialized) backends: their
+                    // health IS the channel (no HTTP to probe), and their
+                    // rows are owned by the catalog sync, not by sync/edit.
+                    const fed = isSyntheticBackendUrl(b.base_url);
+                    return (
                     <tr key={b.id}>
-                      <td>{b.name}</td>
+                      <td>
+                        {b.name}
+                        {fed && (
+                          <span className="badge fed" title="Materialized by federation — health is the peer channel">
+                            federation
+                          </span>
+                        )}
+                      </td>
                       <td className="mono">{b.base_url}</td>
                       <td>
                         <Toggle checked={b.enabled} onChange={(v) => patch(b.id, { enabled: v })} />
@@ -112,16 +124,27 @@ export default function BackendsPage() {
                       </td>
                       <td className="num">{b.model_count}</td>
                       <td className="actions">
-                        <button className="btn small" onClick={() => setSyncTarget(b)}>
-                          Sync models
-                        </button>
-                        <button className="btn small" onClick={() => setEditTarget(b)}>
-                          Edit
-                        </button>
-                        <ConfirmButton label="Delete" onConfirm={() => remove(b.id)} />
+                        {/* Synthetic backends expose nothing editable: sync
+                            and probe have nothing to talk to, an Edit would
+                            repoint the base_url the materializer keys on
+                            (validation failure or a detached federation),
+                            and Delete 409s — the rows re-materialize
+                            anyway on the next catalog frame. */}
+                        {!fed && (
+                          <>
+                            <button className="btn small" onClick={() => setSyncTarget(b)}>
+                              Sync models
+                            </button>
+                            <button className="btn small" onClick={() => setEditTarget(b)}>
+                              Edit
+                            </button>
+                            <ConfirmButton label="Delete" onConfirm={() => remove(b.id)} />
+                          </>
+                        )}
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

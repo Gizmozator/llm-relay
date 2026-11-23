@@ -308,8 +308,26 @@ export default function UsagePage({ admin }: { admin: boolean }) {
                 {detail.data.rows.map((r) => (
                   <tr key={r.id}>
                     <td className="nowrap">{fmtDateTime(r.ts)}</td>
-                    {admin && <td>{r.username ?? '—'}</td>}
-                    <td>{r.key_name}</td>
+                    {admin && (
+                      <td>
+                        {r.username || (
+                          <span className="badge fed" title="Served to a hub user — this box’s own federation row">
+                            federation
+                          </span>
+                        )}
+                      </td>
+                    )}
+                    {/* The federation marker is the missing user (user_id 0
+                        rows never join one). key_name is empty for a deleted
+                        key too, so it must not decide the label. */}
+                    <td>
+                      {r.key_name ||
+                        (r.username ? (
+                          <span className="dim">deleted key</span>
+                        ) : (
+                          <span className="dim">federation</span>
+                        ))}
+                    </td>
                     <td className="mono">
                       {r.model_requested}
                       {admin && r.model_upstream && r.model_upstream !== r.model_requested && (

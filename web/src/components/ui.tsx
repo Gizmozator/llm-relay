@@ -196,6 +196,31 @@ export function Field({
   );
 }
 
+/** Stats-window choices for the federation pages (the API accepts 1..365;
+ *  these are the presets the UI offers). */
+export const STATS_DAY_CHOICES = [7, 30, 90, 365];
+
+/** "Stats window" select (last N days), shared by the federation pages. */
+export function StatsWindowSelect({
+  value,
+  onChange,
+}: {
+  value: number;
+  onChange: (days: number) => void;
+}) {
+  return (
+    <Field label="Stats window">
+      <select className="input" value={value} onChange={(e) => onChange(Number(e.target.value))}>
+        {STATS_DAY_CHOICES.map((d) => (
+          <option key={d} value={d}>
+            last {d} days
+          </option>
+        ))}
+      </select>
+    </Field>
+  );
+}
+
 /**
  * Parse free-typed numeric input with ONE strict rule shared by every
  * numeric editor: ^\d+([.,]\d*)?$ | ^[.,]\d+$ — digits with at most ONE

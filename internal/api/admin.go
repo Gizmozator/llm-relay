@@ -262,6 +262,8 @@ func (s *Server) AdminUpdateBackend(w http.ResponseWriter, r *http.Request, c *a
 		writeErr(w, http.StatusInternalServerError, "backend update failed")
 		return
 	}
+	// Enabled state gates what the catalog shares (both roles push).
+	s.catalogChanged()
 	writeJSON(w, http.StatusOK, b)
 }
 
@@ -280,6 +282,7 @@ func (s *Server) AdminDeleteBackend(w http.ResponseWriter, r *http.Request, c *a
 	case err != nil:
 		writeErr(w, http.StatusInternalServerError, "backend delete failed")
 	default:
+		s.catalogChanged()
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
@@ -299,6 +302,13 @@ func (s *Server) AdminProbeBackend(w http.ResponseWriter, r *http.Request, c *au
 	}
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if _, _, syn := store.SyntheticBaseURL(b.BaseURL); syn {
+		// peer://hub:// backends have no HTTP endpoint: their health IS the
+		// federation channel, and their model list arrives via catalog
+		// frames. Probing one would dial a fake hostname.
+		writeErr(w, http.StatusBadRequest, "federation backends are served over the peer channel, not HTTP")
 		return
 	}
 	res := proxy.Probe(r.Context(), b.BaseURL, b.APIKey)
@@ -407,6 +417,11 @@ func (s *Server) AdminUpdateModel(w http.ResponseWriter, r *http.Request, c *aut
 		BusyThresholdPct *int64   `json:"busy_threshold_pct"`
 		BenchTokPerS     *float64 `json:"bench_tok_per_s"`
 		BenchPPTokPerS   *float64 `json:"bench_pp_tok_per_s"`
+		// Federation sharing (plan 2026-11-22-relay-federation): the
+		// per-model switch + allowlist. fed_peer_ids replaces the allowlist
+		// wholesale and must ride together with fed_visibility="allowlist".
+		FedVisibility *string  `json:"fed_visibility"`
+		FedPeerIDs    *[]int64 `json:"fed_peer_ids"`
 	}
 	if err := decode(r, &in); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON")
@@ -450,6 +465,38 @@ func (s *Server) AdminUpdateModel(w http.ResponseWriter, r *http.Request, c *aut
 		writeErr(w, http.StatusBadRequest, "visibility must be public or internal")
 		return
 	}
+	// Federation sharing fields validate here, with every other field: a
+	// PATCH that also renames the model must not commit the rename before
+	// discovering fed_visibility is bogus (validate-then-mutate).
+	fedVis := ""
+	if in.FedVisibility != nil {
+		fedVis = *in.FedVisibility
+		if fedVis != store.FedVisOff && fedVis != store.FedVisAll && fedVis != store.FedVisAllowlist {
+			writeErr(w, http.StatusBadRequest, "fed_visibility must be off, all or allowlist")
+			return
+		}
+	}
+	// The allowlist only means something together with the allowlist
+	// mode; requiring both in one call keeps the pair unambiguous (an
+	// id-only PATCH could silently retarget a list the model no longer
+	// uses).
+	if in.FedPeerIDs != nil && fedVis != store.FedVisAllowlist {
+		writeErr(w, http.StatusBadRequest, "fed_peer_ids requires fed_visibility=allowlist")
+		return
+	}
+	// Unknown peer ids are a client mistake, not a 404 about the model:
+	// check them here so the store's ErrNotFound stays model-only.
+	if in.FedPeerIDs != nil {
+		for _, pid := range *in.FedPeerIDs {
+			if _, perr := store.PeerByID(s.DB, pid); errors.Is(perr, store.ErrNotFound) {
+				writeErr(w, http.StatusBadRequest, "fed_peer_ids contains an unknown peer")
+				return
+			} else if perr != nil {
+				writeErr(w, http.StatusInternalServerError, "internal error")
+				return
+			}
+		}
+	}
 	m, err := store.UpdateModel(s.DB, id, in.Name, in.Enabled,
 		[4]*int64{in.PriceIn, in.PriceOut, in.PriceCacheRead, in.PriceCacheWrite})
 	if err == nil && in.Visibility != nil {
@@ -465,6 +512,27 @@ func (s *Server) AdminUpdateModel(w http.ResponseWriter, r *http.Request, c *aut
 			m, err = store.ModelByID(s.DB, id)
 		}
 	}
+	if err == nil && (in.FedVisibility != nil || in.FedPeerIDs != nil) {
+		// The pair rules were validated up front; only the PATCH semantics
+		// remain: an unmentioned field does not change, so switching to
+		// allowlist without naming a list keeps the stored one (it may
+		// still hold the previous allowlist). Switching to off/all clears
+		// the list on purpose: those modes share with nobody/everybody, so
+		// a stale list would be a lie the UI could later re-apply.
+		var ids []int64
+		switch {
+		case in.FedPeerIDs != nil:
+			ids = *in.FedPeerIDs
+		case fedVis == store.FedVisAllowlist:
+			if ids, err = store.ModelFedAllowlist(s.DB, id); err != nil {
+				writeErr(w, http.StatusInternalServerError, "internal error")
+				return
+			}
+		}
+		if err = store.SetModelFedVisibility(s.DB, id, fedVis, ids); err == nil {
+			m, err = store.ModelByID(s.DB, id)
+		}
+	}
 	switch {
 	case err == store.ErrNotFound:
 		writeErr(w, http.StatusNotFound, "model not found")
@@ -474,9 +542,12 @@ func (s *Server) AdminUpdateModel(w http.ResponseWriter, r *http.Request, c *aut
 		// Rename onto a group-owned name (assertNoGroupName). Fixed
 		// string: the store error text is an internal detail.
 		writeErr(w, http.StatusConflict, "model name already in use")
+	case errors.Is(err, store.ErrFedConfig):
+		writeErr(w, http.StatusBadRequest, "fed_visibility must be off, all or allowlist")
 	case err != nil:
 		writeErr(w, http.StatusInternalServerError, "model update failed")
 	default:
+		s.catalogChanged()
 		writeJSON(w, http.StatusOK, m)
 	}
 }
@@ -625,6 +696,13 @@ func (s *Server) AdminBenchmarkModel(w http.ResponseWriter, r *http.Request, c *
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	// A synthetic backend is a peer's relay, not an engine (same guard the
+	// health probe uses): benchmarking it would time a tunnel, not a
+	// model, and burn a peer's upstream for an admin click.
+	if _, _, syn := store.SyntheticBaseURL(b.BaseURL); syn {
+		writeErr(w, http.StatusBadRequest, "cannot benchmark a federated model")
+		return
+	}
 	if !benchMu.TryLock() {
 		writeErr(w, http.StatusConflict, "a benchmark is already running")
 		return
@@ -713,6 +791,9 @@ func (s *Server) AdminBenchmarkModel(w http.ResponseWriter, r *http.Request, c *
 		writeErr(w, http.StatusInternalServerError, "benchmark save failed")
 		return
 	}
+	// Bench numbers ride the federation catalog: peers advertising this
+	// model must see the fresh score, not the one from before the run.
+	s.catalogChanged()
 	res := map[string]any{
 		"bench_tok_per_s":   tokPerS,
 		"completion_tokens": tg.completion,
@@ -742,6 +823,7 @@ func (s *Server) AdminDeleteModel(w http.ResponseWriter, r *http.Request, c *aut
 		writeErr(w, http.StatusInternalServerError, "model delete failed")
 		return
 	}
+	s.catalogChanged()
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -849,6 +931,7 @@ func (s *Server) AdminCreateGroup(w http.ResponseWriter, r *http.Request, c *aut
 	// CreateGroup already re-reads the row; a born-empty group provably has
 	// no members, so no second fetch (GetGroup would add a query + join
 	// that can only return empty).
+	s.catalogChanged()
 	writeJSON(w, http.StatusCreated, groupViewOf(g, nil))
 }
 
@@ -979,6 +1062,7 @@ func (s *Server) AdminUpdateGroup(w http.ResponseWriter, r *http.Request, c *aut
 		writeGroupErr(w, err, "group updated; read-back failed")
 		return
 	}
+	s.catalogChanged()
 	writeJSON(w, http.StatusOK, groupViewOf(g, members2))
 }
 
@@ -992,6 +1076,7 @@ func (s *Server) AdminDeleteGroup(w http.ResponseWriter, r *http.Request, c *aut
 		writeGroupErr(w, err, "group delete failed")
 		return
 	}
+	s.catalogChanged()
 	w.WriteHeader(http.StatusNoContent)
 }
 

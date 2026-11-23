@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"llm-relay/internal/api"
 	"llm-relay/internal/auth"
 	"llm-relay/internal/db"
+	"llm-relay/internal/fed"
 	"llm-relay/internal/store"
 )
 
@@ -72,6 +74,26 @@ func newTestEnv(t *testing.T, upstream http.Handler) *testEnv {
 	mux.Handle("GET /api/admin/groups/{id}", s.Admin(s.AdminGetGroup))
 	mux.Handle("PATCH /api/admin/groups/{id}", s.Admin(s.AdminUpdateGroup))
 	mux.Handle("DELETE /api/admin/groups/{id}", s.Admin(s.AdminDeleteGroup))
+	mux.Handle("GET /api/peers", s.Auth(s.ListPeers))
+	mux.Handle("POST /api/peers", s.Auth(s.CreatePeer))
+	mux.Handle("POST /api/peers/{id}/rotate", s.Auth(s.RotateMyPeer))
+	mux.Handle("DELETE /api/peers/{id}", s.Auth(s.DeleteMyPeer))
+	mux.Handle("GET /api/admin/peers", s.Admin(s.AdminListPeers))
+	mux.Handle("POST /api/admin/peers/{id}/rotate", s.Admin(s.AdminRotatePeer))
+	mux.Handle("PATCH /api/admin/peers/{id}", s.Admin(s.AdminUpdatePeer))
+	mux.Handle("DELETE /api/admin/peers/{id}", s.Admin(s.AdminDeletePeer))
+	mux.Handle("GET /api/admin/federation", s.Admin(s.AdminGetFederation))
+	mux.Handle("PUT /api/admin/federation", s.Admin(s.AdminPutFederation))
+	mux.Handle("GET /api/admin/federation/stats", s.Admin(s.AdminFedStats))
+	mux.Handle("GET /api/federation/stats", s.Auth(s.FedStats))
+	mux.Handle("GET /api/federation/role", s.Auth(s.FedRole))
+	mux.Handle("GET /federation/v1/ping", s.PeerAuth(s.FederationPing))
+	// Federation channel: the real Manager (production defaults) behind
+	// the same PeerAuth + role-gate wiring main.go uses.
+	fedMgr := fed.NewManager(d, &fed.Options{Log: log.New(io.Discard, "", 0)})
+	t.Cleanup(fedMgr.Close)
+	s.Fed = fedMgr
+	mux.Handle("GET /federation/v1/connect", s.PeerAuth(s.FederationConnect))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return &testEnv{db: d, srv: srv}

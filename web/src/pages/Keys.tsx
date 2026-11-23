@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import type { FormEvent } from 'react';
+import { Link } from 'react-router-dom';
 import { api, errMsg } from '../api';
-import type { CreatedKey } from '../api';
-import { copyToClipboard, fmtDateTime } from '../format';
+import { copyToClipboard, fmtAgo, fmtDateTime } from '../format';
 import { useLoad } from '../useLoad';
 import { useToast } from '../components/Toast';
 import {
@@ -15,14 +15,37 @@ import {
   Modal,
 } from '../components/ui';
 
+/** A secret shown exactly once (API key or server token share this modal). */
+interface ShownSecret {
+  title: string;
+  secret: string;
+}
+
+type CredType = 'key' | 'peer';
+
 export default function KeysPage() {
   const toast = useToast();
   const keys = useLoad(() => api.keys().then((r) => r.keys), []);
+  const peers = useLoad(() => api.myPeers().then((r) => r.peers), []);
   const info = useLoad(() => api.info(), []);
+  // Server tokens only mean something while this instance is a hub (only a
+  // hub accepts federation channels), so the choice follows the role.
+  const fedRole = useLoad(() => api.fedRole(), []);
+  const isHub = fedRole.data?.role === 'hub';
+
+  const [credType, setCredType] = useState<CredType>('key');
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
-  const [created, setCreated] = useState<CreatedKey | null>(null);
+  const [shown, setShown] = useState<ShownSecret | null>(null);
   const [copied, setCopied] = useState(false);
+
+  const effectiveType: CredType = isHub ? credType : 'key';
+  const submitLabel =
+    busy
+      ? 'Creating…'
+      : effectiveType === 'peer'
+        ? 'Create server token'
+        : 'Create key';
 
   const create = async (e: FormEvent) => {
     e.preventDefault();
@@ -30,11 +53,17 @@ export default function KeysPage() {
     if (!trimmed) return;
     setBusy(true);
     try {
-      const k = await api.createKey(trimmed);
-      setCreated(k);
+      if (effectiveType === 'peer') {
+        const r = await api.createPeer(trimmed);
+        setShown({ title: `Server token created — ${r.peer.name}`, secret: r.token });
+        peers.reload();
+      } else {
+        const k = await api.createKey(trimmed);
+        setShown({ title: `Key created — ${k.name}`, secret: k.key });
+        keys.reload();
+      }
       setCopied(false);
       setName('');
-      keys.reload();
     } catch (err: unknown) {
       toast.push('error', errMsg(err));
     } finally {
@@ -52,11 +81,32 @@ export default function KeysPage() {
     }
   };
 
+  const rotatePeer = async (id: number, peerName: string) => {
+    try {
+      const r = await api.rotateMyPeer(id);
+      setShown({ title: `Token rotated — ${peerName}`, secret: r.token });
+      setCopied(false);
+      peers.reload();
+    } catch (err: unknown) {
+      toast.push('error', errMsg(err));
+    }
+  };
+
+  const deletePeer = async (id: number) => {
+    try {
+      await api.deleteMyPeer(id);
+      toast.push('success', 'Server removed.');
+      peers.reload();
+    } catch (err: unknown) {
+      toast.push('error', errMsg(err));
+    }
+  };
+
   const copy = async () => {
-    if (!created) return;
-    const ok = await copyToClipboard(created.key);
+    if (!shown) return;
+    const ok = await copyToClipboard(shown.secret);
     setCopied(ok);
-    toast.push(ok ? 'success' : 'error', ok ? 'Key copied to clipboard.' : 'Copy failed — select the key manually.');
+    toast.push(ok ? 'success' : 'error', ok ? 'Copied to clipboard.' : 'Copy failed — select the value manually.');
   };
 
   return (
@@ -80,18 +130,36 @@ export default function KeysPage() {
       </section>
 
       <form className="panel form-row" onSubmit={create}>
-        <Field label="New key name">
+        {isHub && (
+          <Field label="Credential type">
+            <select
+              className="input"
+              value={effectiveType}
+              onChange={(e) => setCredType(e.target.value as CredType)}
+            >
+              <option value="key">API key (sk-…)</option>
+              <option value="peer">Server token (fed-…)</option>
+            </select>
+          </Field>
+        )}
+        <Field label={effectiveType === 'peer' ? 'New server name' : 'New key name'}>
           <input
             className="input"
-            placeholder="e.g. laptop"
+            placeholder={effectiveType === 'peer' ? 'e.g. home-server' : 'e.g. laptop'}
             value={name}
             onChange={(e) => setName(e.target.value)}
           />
         </Field>
         <button className="btn primary" type="submit" disabled={busy || !name.trim()}>
-          {busy ? 'Creating…' : 'Create key'}
+          {submitLabel}
         </button>
       </form>
+      {isHub && effectiveType === 'peer' && (
+        <p className="dim">
+          A server token lets one of your relays (a spoke) connect to this hub —
+          see the <Link to="/setup">setup guide</Link>. It cannot be used for inference.
+        </p>
+      )}
 
       <section className="panel">
         {keys.loading && !keys.data ? (
@@ -142,19 +210,71 @@ export default function KeysPage() {
         )}
       </section>
 
-      {created && (
-        <Modal title={`Key created — ${created.name}`} onClose={() => setCreated(null)}>
+      {(isHub || (peers.data?.length ?? 0) > 0) && (
+        <section className="panel">
+          <h3>My servers</h3>
+          {peers.loading && !peers.data ? (
+            <Loading />
+          ) : peers.error ? (
+            <Banner>{peers.error}</Banner>
+          ) : !peers.data || peers.data.length === 0 ? (
+            <Empty label="No server tokens yet. Create one above (type: Server token)." />
+          ) : (
+            <div className="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Created</th>
+                    <th>Last seen</th>
+                    <th>Spoke version</th>
+                    <th>Status</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {peers.data.map((p) => (
+                    <tr key={p.id}>
+                      <td>{p.name}</td>
+                      <td className="nowrap">{fmtDateTime(p.created_at)}</td>
+                      <td className="nowrap">{p.last_seen ? fmtAgo(p.last_seen) : 'never'}</td>
+                      <td className="mono">{p.version || '—'}</td>
+                      <td>
+                        {p.enabled ? (
+                          <span className="badge ok">enabled</span>
+                        ) : (
+                          <span className="badge err">disabled</span>
+                        )}
+                      </td>
+                      <td className="actions">
+                        <button className="btn small" onClick={() => rotatePeer(p.id, p.name)}>
+                          Rotate token
+                        </button>
+                        <ConfirmButton label="Delete" onConfirm={() => deletePeer(p.id)} />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      )}
+
+      {shown && (
+        <Modal title={shown.title} onClose={() => setShown(null)}>
           <Banner kind="info">
-            This is the only time the full key is shown. Copy it now and store it safely.
+            This is the only time the full value is shown. Copy it now and store it
+            safely.
           </Banner>
           <div className="key-box">
-            <code className="key-text mono">{created.key}</code>
+            <code className="key-text mono">{shown.secret}</code>
             <button className="btn" onClick={copy}>
               {copied ? 'Copied ✓' : 'Copy'}
             </button>
           </div>
           <div className="modal-actions">
-            <button className="btn primary" onClick={() => setCreated(null)}>
+            <button className="btn primary" onClick={() => setShown(null)}>
               Done
             </button>
           </div>

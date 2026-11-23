@@ -587,6 +587,30 @@ tr.sub-row > td {
   margin-left: 6px;
 }
 
+/* Federation marker: materialized rows/backends and federation-owned usage
+   rows. A violet of its own — never rides on ok/new/group semantics. */
+.badge.fed {
+  color: #c084fc;
+  border-color: rgba(192, 132, 252, 0.45);
+  background: rgba(192, 132, 252, 0.1);
+  margin-left: 6px;
+}
+
+/* Peer allowlist picker in the model metrics row: compact, sits where an
+   inline editor would. */
+.fed-peer-select {
+  min-width: 170px;
+  font-size: 12px;
+  padding: 2px 4px;
+}
+
+/* Explanatory line under a table (the owner-level marker on the Servers
+   ledger). */
+.footnote {
+  margin: 8px 0 0;
+  font-size: 12px;
+}
+
 .tag {
   display: inline-block;
   font-size: 10.5px;

@@ -153,6 +153,10 @@ export type ModelPatch = Partial<{
   busy_threshold_pct: number;
   bench_tok_per_s: number;
   bench_pp_tok_per_s: number;
+  fed_visibility: FedVisibility;
+  /** Replaces the allowlist wholesale; only accepted together with
+   *  fed_visibility 'allowlist' (server rule). */
+  fed_peer_ids: number[];
 }>;
 
 export interface CatalogModel {
@@ -175,6 +179,11 @@ export interface CatalogModel {
   bench_tok_per_s: number;
   bench_pp_tok_per_s: number;
   bench_at: string;
+  /** Federation sharing switch ('off' | 'all' | 'allowlist'); fed_peer_ids
+   *  is the allowlist side (peer ids, empty unless fed_visibility is
+   *  'allowlist'). */
+  fed_visibility: FedVisibility;
+  fed_peer_ids: number[];
 }
 
 /** Result of POST /api/admin/models/{id}/benchmark. The prefill pass can
@@ -253,6 +262,118 @@ export interface PublicModel {
 
 export interface Settings {
   currency: string;
+}
+
+// ---------- federation ----------
+
+/** Instance role; mirrors store.FedRole*. */
+export const FED_ROLES = ['standalone', 'hub', 'spoke'] as const;
+export type FedRole = (typeof FED_ROLES)[number];
+
+/** GET/PUT /api/admin/federation. hub_token is echoed back by the server
+ *  (it is the hub's token the admin pasted, not a secret this server minted). */
+export interface FedSettings {
+  role: FedRole;
+  hub_url: string;
+  hub_token: string;
+  /** Spoke role only: the live channel state from the dialer's point of
+   *  view, with the hub's hello_ack identity (empty while disconnected). */
+  spoke?: { connected: boolean; hub_name: string; hub_version: string };
+}
+
+/** One peer row on both list surfaces (self-service + admin). `online` is
+ *  only ever true on the admin surface (the hub stamps it from its live
+ *  registry); the self-service list leaves it false. */
+export interface FedPeer {
+  id: number;
+  name: string;
+  owner_user_id: number;
+  owner_name: string;
+  enabled: boolean;
+  last_seen: string;
+  version: string;
+  created_at: string;
+  /** Models this peer may see: every fed_visibility 'all' model + its
+   *  allowlist rows (computed server-side at list time). */
+  shared_models: number;
+  online: boolean;
+}
+
+/** POST /api/peers — the raw fed- token appears exactly here (and in the
+ *  rotate responses), same shown-once contract as API keys. */
+export interface CreatedPeer {
+  peer: FedPeer;
+  token: string;
+}
+
+/** One served/consumed bucket; same six counters as UsageTotals. */
+export interface FedCounts {
+  requests: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cached_tokens: number;
+  cache_write_tokens: number;
+  cost_micro: number;
+}
+
+/** Hub ledger row per user (keyed by user_id: deleted users share the
+ *  '(deleted user)' label but stay distinct entries). */
+export interface FedUserTotals {
+  user_id: number;
+  user: string;
+  served: FedCounts;
+  consumed: FedCounts;
+}
+
+/** Hub ledger row per peer. served sums the rows naming it as host;
+ *  consumed is OWNER-LEVEL (every consumed row of the peer's owner — an
+ *  owner with several peers carries the same total under each), so it must
+ *  never be summed across rows. */
+export interface FedPeerTotals {
+  peer_id: number;
+  peer: string;
+  served: FedCounts;
+  consumed: FedCounts;
+}
+
+/** Spoke: what this box served to one hub-stamped identity. */
+export interface FedSourceEntry {
+  fed_user: string;
+  counts: FedCounts;
+}
+
+/** Spoke: what one local user spent on federated models. */
+export interface FedConsumedEntry {
+  user_id: number;
+  user: string;
+  counts: FedCounts;
+}
+
+export type FedAdminStats =
+  | { role: 'hub'; since: string; users: FedUserTotals[]; peers: FedPeerTotals[] }
+  | { role: 'spoke'; since: string; served_by_source: FedSourceEntry[]; consumed: FedConsumedEntry[] }
+  | { role: 'standalone' };
+
+export type FedMyStats =
+  | { role: 'hub'; since: string; totals: FedUserTotals[] }
+  | { role: 'spoke'; since: string; consumed: FedConsumedEntry[] }
+  | { role: 'standalone' };
+
+/** Per-model federation sharing switch; mirrors the store CHECK: 'off'
+ *  (default) | 'all' | 'allowlist' (fed_peer_ids names this instance's
+ *  peers; on a spoke allowlist is effectively off — a spoke shares only
+ *  'all', it has no peer table of its own). */
+export const FED_VISIBILITIES = ['off', 'all', 'allowlist'] as const;
+export type FedVisibility = (typeof FED_VISIBILITIES)[number];
+
+/** Canonical synthetic-backend predicate: mirrors the store's SQL rule
+ *  (`syntheticWhere` in internal/store/fedmaterialize.go) — the spoke's
+ *  hub:// backends, or a peer://<id> backend on the hub. The SQL is the
+ *  broader `LIKE 'peer://%'`; the digit-bound form here covers every row
+ *  federation actually writes (`PeerBackendURL` is `peer://` + digits).
+ *  Keep the two in lockstep. */
+export function isSyntheticBackendUrl(baseUrl: string): boolean {
+  return /^peer:\/\/\d+$/.test(baseUrl) || baseUrl === 'hub://federation' || baseUrl === 'hub://';
 }
 
 /** One minute of the live dashboard window (GET /api/live). */
@@ -554,4 +675,27 @@ export const api = {
   settings: () => request<Settings>('GET', '/api/admin/settings'),
   putSettings: (currency: string) =>
     request<Settings>('PUT', '/api/admin/settings', { body: { currency } }),
+
+  // federation — role + stats (session auth, any user)
+  fedRole: () => request<{ role: FedRole }>('GET', '/api/federation/role'),
+  fedMyStats: (days: number) =>
+    request<FedMyStats>('GET', '/api/federation/stats', { query: { days } }),
+
+  // federation — own servers (the My Keys surface; token shown once)
+  myPeers: () => request<{ peers: FedPeer[] }>('GET', '/api/peers'),
+  createPeer: (name: string) => request<CreatedPeer>('POST', '/api/peers', { body: { name } }),
+  rotateMyPeer: (id: number) => request<{ token: string }>('POST', `/api/peers/${id}/rotate`),
+  deleteMyPeer: (id: number) => request<void>('DELETE', `/api/peers/${id}`),
+
+  // federation — admin: settings pair, peer registry, ledger
+  fedSettings: () => request<FedSettings>('GET', '/api/admin/federation'),
+  putFedSettings: (role: FedRole, hub_url: string, hub_token: string) =>
+    request<FedSettings>('PUT', '/api/admin/federation', { body: { role, hub_url, hub_token } }),
+  adminPeers: () => request<{ peers: FedPeer[] }>('GET', '/api/admin/peers'),
+  adminRotatePeer: (id: number) => request<{ token: string }>('POST', `/api/admin/peers/${id}/rotate`),
+  adminPatchPeer: (id: number, enabled: boolean) =>
+    request<FedPeer>('PATCH', `/api/admin/peers/${id}`, { body: { enabled } }),
+  adminDeletePeer: (id: number) => request<void>('DELETE', `/api/admin/peers/${id}`),
+  fedAdminStats: (days: number) =>
+    request<FedAdminStats>('GET', '/api/admin/federation/stats', { query: { days } }),
 };

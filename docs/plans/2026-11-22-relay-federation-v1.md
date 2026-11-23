@@ -1,6 +1,6 @@
 # Plan: Relay federation — hub-and-spoke model sharing between relays
 
-- **Status:** active
+- **Status:** complete
 - **Owner:** maintainer
 - **Started:** 2026-11-22
 - **Issue:** #2 (blocked by #1 / model-groups plan)
@@ -94,26 +94,36 @@ Usage tracking is fairness bookkeeping (served vs consumed per user), not billin
 
 | # | task | blocked by | done |
 |---|---|---|---|
-| 1 | settings + peers store/migrations + token auth + admin/self-service API | #1 done | ☐ |
-| 2 | WS channel + protocol + liveness + version negotiation (hub+spoke) | 1 | ☐ |
-| 3 | catalog sync + materialization + RoundTripper tunnel + loop guard | 2 | ☐ |
-| 4 | metering/attribution + served-vs-consumed aggregation | 3 | ☐ |
-| 5 | UI: Federation control, Servers, My Keys, setup guide, spoke panel | 3,4 | ☐ |
-| 6 | e2e (two local instances + mock engine) + docs + plan update | 5 | ☐ |
+| 1 | settings + peers store/migrations + token auth + admin/self-service API | #1 done | ☑ |
+| 2 | WS channel + protocol + liveness + version negotiation (hub+spoke) | 1 | ☑ |
+| 3 | catalog sync + materialization + RoundTripper tunnel + loop guard | 2 | ☑ |
+| 4 | metering/attribution + served-vs-consumed aggregation | 3 | ☑ |
+| 5 | UI: Federation control, Servers, My Keys, setup guide, spoke panel | 3,4 | ☑ |
+| 6 | e2e (two local instances + mock engine) + docs + plan update | 5 | ☑ |
 
 ## Verification
 
-- [ ] `make ci` green at every commit
-- [ ] unit: token create/rotate/disable; type-scoped auth (server token rejected
-      on `/v1`, API key rejected on `/federation`)
-- [ ] unit: protocol version mismatch refused; frame codec round-trip incl.
-      streaming chunks
-- [ ] e2e (local, ports 18xxx, never touching production): hub+spoke up → spoke models
+- [x] `make ci` green at every commit
+- [x] unit: token create/rotate/disable; type-scoped auth (server token rejected
+      on `/v1`, API key rejected on `/federation`) — `internal/api/federation_test.go`:
+      `TestPeerSelfService`, `TestAdminPeerManagement`, `TestFederationAuthMatrix`,
+      `TestPeerAuthRevokedOnUserDisable`
+- [x] unit: protocol version mismatch refused; frame codec round-trip incl.
+      streaming chunks — `internal/fed/hub_test.go` `TestProtoMismatch`,
+      `internal/fed/frames_test.go` `TestCodecRoundTrip`/`TestCodecBinaryIsBase64`
+- [x] e2e (local, ports 18xxx, never touching production): hub+spoke up → spoke models
       appear in hub catalog; user on hub runs spoke model (stream + non-stream);
       same session → same member; spoke offline → models vanish; disable peer →
-      channel drops; loop guard holds; served/consumed rows on both sides
-- [ ] UI smoke: role switch standalone↔hub↔spoke; guide hidden off-hub; My Keys
-      creates both token types
+      channel drops; loop guard holds; served/consumed rows on both sides —
+      `scripts/e2e-federation.sh` checks a–h (27 assertions, all PASS);
+      frame-level loop guard + churn also unit-proven in `internal/fed/federation_test.go`
+      (`TestLoopGuard`, `TestDisconnectVanishReconnectReturn`, `TestSpokeToSpokeTransit`)
+- [x] UI smoke: role switch standalone↔hub↔spoke; guide hidden off-hub; My Keys
+      creates both token types — role switch driven live through the API by the
+      e2e script (PUT /api/admin/federation, live-safe), guide gate unit-tested
+      (`TestFedRoleEndpoint`), both token types covered by `TestPeerSelfService`
+      + `TestFederationAuthMatrix`; browser-level click-through not separately
+      recorded
 
 ## Decisions
 
@@ -134,3 +144,10 @@ Usage tracking is fairness bookkeeping (served vs consumed per user), not billin
 ## Changelog
 
 - 2026-11-22 — plan created from Gitea #2 design.
+- 2026-11-23 — task 4 ocr triage: `FedUserTotals`/`FedConsumedSlice` now key by `user_id` (deleted users shared the `(deleted user)` label and collapsed, overwriting buckets) and emit `user_id` in the payloads; `fed_peer_id` adopts a UNIFORM convention — always the HOSTING peer, NULL when hub hardware served: spoke→hub-local consumed rows stamp NULL (was origin), mirror and transit served rows stamp the host (was origin), and `FedPeerTotals` redefines consumed as owner-level (every consumed row of the peer's owner; multi-peer owners carry the same total under each peer).
+- 2026-11-23 — task 4 correction (C6 reversal): the task-3 guard rejecting synthetic members in admin groups (`assertNoSyntheticMembers`/`ErrSyntheticMember` → 400) contradicted the materialization design — a federated group IS a group whose members live on other relays — and is removed; admin groups accept `peer://` members. The FK hazard was already owned by the materializer (`DeleteFedModelsNotIn`/`PurgeSynthetic` clear memberships before deleting rows); a peer disconnect only disables the backend, so the group serves on from its remaining members. The spoke→synthetic-member double-entry now runs through a real admin group in the tests.
+- 2026-11-23 — task 4 follow-up ruling: full double-entry on the hub — every hub row whose resolved member lives on a synthetic `peer://` backend (not just transit) mirrors a `served` row crediting the backend's owner (same counts, synthetic key); the consumed row's `fed_peer_id` names the hosting peer (fix for spoke→synthetic-member serves), the mirror's names the origin peer (NULL for hub-direct consumers). Written in the normal metering path (`proxy.fedOf`/`record`); transit keeps its manual pair (different code path, cannot double-write).
+- 2026-11-23 — task 4 shipped: `usage_log` gains `fed_direction`/`fed_peer_id`/`fed_user` (migration 0013); hub stamps `consumed` on direct→synthetic and spoke→hub-local rows and writes the transit double-entry pair (counts parsed from the pumped frames); spokes meter `served` rows with the hub-stamped `fed_user` (the `req` frame gained the field; the hub is the only stamper). `internal/store/fedstats.go` adds the four rollups; `GET /api/admin/federation/stats` + `GET /api/federation/stats` serve them (role-dependent payload). Spoke-local consumption of federated models stays unstamped — the synthetic-backend scheme identifies that slice.
+- 2026-11-23 — task 5 shipped (UI): new pages `AdminFederation` (role switch + spoke dial-in config with masked-but-editable token, live spoke channel status polled with the settings, spoke panels: shared models / served-by-source / my consumed; hub panel links to Servers), `Servers` (peer registry: online badge stamped from the hub registry, last-seen, version, expandable shared-model list derived from `fed_visibility`+allowlists, enable toggle, rotate shown-once, delete; ledger = per-user fairness table + per-peer rollup where the consumed columns carry the owner-level footnote and are never summed), `SetupGuide` (route `/setup`, all logged-in users, rendered only while role=hub via the new `GET /api/federation/role`). My Keys gained the credential-type choice (API key | server token, the choice shown on hubs) and the own-servers list with rotate/delete. Admin Models gained the per-model Share select (`off|all|allowlist` + peer multi-select; spoke tooltip says allowlist is effectively off), the `federation` badge on synthetic rows (only fed fields + enabled editable), and `peer: <name>` member locations in the group editors; the Backends page marks synthetic backends and hides their probe (Sync models). Usage: spoke-served rows (empty username/key on the wire) are filtered from the personal view and labelled `federation` in the admin detail. Go delta kept minimal: `GET /api/federation/role`, `spoke:{connected,hub_name,hub_version}` on `GET /api/admin/federation` (hello_ack identity published with the spoke channel via `Manager.SpokeStatus`), and `online` on `GET /api/admin/peers` (`Manager.Online`); contract updated. Deviation: the spoke status carries the hub hello_ack identity instead of a `last_seen` timestamp (the spoke has no peer row; last_seen is a hub-side field).
+- 2026-11-23 — task 5 ocr triage (21 findings): every auxiliary load surfaces its failure instead of rendering as “no data” (transient poll failures keep the last-good payload + banner; AdminModels fails closed — rows stay synthetic-locked until the backend list loads); the spoke shared-list filters match the server (model+backend enabled, synthetic rows excluded on the hub side); the spoke consumed panel renders the admin-stats `consumed` rollup (all local users) instead of the caller-scoped `/api/federation/stats` round-trip; Share/allowlist controls are hidden on synthetic rows (the server ignores `fed_visibility` there); synthetic backends expose no Edit/Delete (base_url is the materializer key, delete 409s anyway); the dead personal-usage client filter is gone (the endpoint scopes by user; a client filter would desync the pager) and the admin `federation` label keys on the missing user, not the empty key name (deleted keys also yield ''); one canonical `isSyntheticBackendUrl` predicate mirrors `syntheticWhere`; stats-window select, spoke counts tables and form fields deduplicated; the sidebar role check refreshes on navigation.
+- 2026-11-23 — task 6 shipped (close-out): `scripts/e2e-federation.sh` + `scripts/mock-engine.py` — a self-contained operator e2e that builds the real binary, boots two real relays and two mock OpenAI engines on 127.0.0.1:18xxx and asserts the full lifecycle (a: materialization in `/v1/models`; b: non-stream + SSE through the tunnel with usage counted; c: HRW stability — one session pins one member across 5 calls of a two-synthetic-member group; d/e: spoke kill → models vanish, restart → return, admin peer disable → channel drops, re-enable → reconnects; f: loop guard — spoke-origin traffic for spoke-hosted content never bounces (local serve / fast 404, no hang); g: served/consumed ledger on both sides incl. the hub mirror rows; h: plain local traffic stays out of the ledger) — 27/27 PASS, transcript `~/.cache/llm-relay/fed-e2e.log`; deliberately NOT wired into `make ci` (manual tool, boots real instances). New API tests for the thin status surfaces: `TestFedRoleEndpoint` (session-auth, role-only payload, no spoke-config leak, disconnected spoke branch) and `TestSpokeStatusAndPeerOnline` (real dialer→hub channel between two wired instances: connected + hello_ack identity on the spoke branch, `online` stamp on the admin peer list, both flip on disable). Docs: README Federation section + scripts/ layout + e2e task row; contract records the materialized-row enabled semantics (the next catalog push re-enables a per-model disable — the durable kill switch is the peer/backend disable). Task rows 1–3 retro-checked (shipped in 70ad909 / 3f773cd / 3afb99a — hygiene miss). Plan complete; the close-out lands on `feature/federation` and merges to `main` with the final gates.
