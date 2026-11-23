@@ -67,6 +67,11 @@ func newTestEnv(t *testing.T, upstream http.Handler) *testEnv {
 	mux.Handle("PATCH /api/admin/backends/{id}", s.Admin(s.AdminUpdateBackend))
 	mux.Handle("POST /api/admin/backends/{id}/probe", s.Admin(s.AdminProbeBackend))
 	mux.Handle("POST /api/admin/backends/{id}/models", s.Admin(s.AdminAddBackendModels))
+	mux.Handle("GET /api/admin/groups", s.Admin(s.AdminListGroups))
+	mux.Handle("POST /api/admin/groups", s.Admin(s.AdminCreateGroup))
+	mux.Handle("GET /api/admin/groups/{id}", s.Admin(s.AdminGetGroup))
+	mux.Handle("PATCH /api/admin/groups/{id}", s.Admin(s.AdminUpdateGroup))
+	mux.Handle("DELETE /api/admin/groups/{id}", s.Admin(s.AdminDeleteGroup))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return &testEnv{db: d, srv: srv}
@@ -568,6 +573,69 @@ func TestUsageScopingPerUser(t *testing.T) {
 	}
 }
 
+// model_upstream is internal wiring (the engine-side model id that tells
+// group members apart): it must never reach a non-admin usage view, so the
+// handler zeroes it on the personal route instead of relying on the UI.
+func TestUsageDetailUpstreamAdminOnly(t *testing.T) {
+	e := newTestEnv(t, http.NotFoundHandler())
+	admin := login(t, e)
+	resp := e.do(t, "POST", "/api/admin/users",
+		`{"username":"alice","password":"pass123456","role":"user"}`, admin)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create alice = %d, want 201", resp.StatusCode)
+	}
+	var users struct {
+		Users []store.User `json:"users"`
+	}
+	resp = e.do(t, "GET", "/api/admin/users", "", admin)
+	json.NewDecoder(resp.Body).Decode(&users)
+	resp.Body.Close()
+	var aliceID int64
+	for _, u := range users.Users {
+		if u.Username == "alice" {
+			aliceID = u.ID
+		}
+	}
+	if aliceID == 0 {
+		t.Fatal("alice not found")
+	}
+	if err := store.InsertUsage(e.db, &store.UsageEvent{
+		TS: "2026-11-20T10:00:00Z", UserID: aliceID, KeyID: 99, Endpoint: "chat",
+		ModelRequ: "pool-x", ModelUpstream: "engine-variant-b",
+		Prompt: 10, Completion: 5, CostTotal: 7, Status: 200,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	type detail struct {
+		Total int `json:"total"`
+		Rows  []struct {
+			ModelRequested string  `json:"model_requested"`
+			ModelUpstream  *string `json:"model_upstream"`
+		} `json:"rows"`
+	}
+	decode := func(resp *http.Response) detail {
+		t.Helper()
+		var d detail
+		json.NewDecoder(resp.Body).Decode(&d)
+		resp.Body.Close()
+		if d.Total != 1 || len(d.Rows) != 1 {
+			t.Fatalf("detail = %+v, want one row", d)
+		}
+		return d
+	}
+
+	alice := loginAs(t, e, "alice", "pass123456")
+	if d := decode(e.do(t, "GET", "/api/usage/detail", "", alice)); d.Rows[0].ModelUpstream != nil {
+		t.Errorf("user sees model_upstream = %q, want absent", *d.Rows[0].ModelUpstream)
+	}
+	d := decode(e.do(t, "GET", "/api/admin/usage/detail", "", admin))
+	if d.Rows[0].ModelUpstream == nil || *d.Rows[0].ModelUpstream != "engine-variant-b" {
+		t.Errorf("admin sees model_upstream = %v, want engine-variant-b", d.Rows[0].ModelUpstream)
+	}
+}
+
 func TestUserMultiplierAndModelMeta(t *testing.T) {
 	e := newTestEnv(t, http.NotFoundHandler())
 	admin := login(t, e)
@@ -928,7 +996,8 @@ func TestBulkAddReportsSkipped(t *testing.T) {
 	if _, err := store.CreateModel(e.db, 1, "gpt-4o", ""); err != nil {
 		t.Fatal(err)
 	}
-	// gpt-4o is taken globally (backend A); new-m must be created on B.
+	// Names are unique per backend since 0010: backend B may take gpt-4o too
+	// (the import-collision fix), so both ids are created, nothing skipped.
 	resp := e.do(t, "POST", "/api/admin/backends/2/models", `{"model_ids":["gpt-4o","new-m"]}`, admin)
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("bulk add: %d", resp.StatusCode)
@@ -939,11 +1008,24 @@ func TestBulkAddReportsSkipped(t *testing.T) {
 	}
 	json.NewDecoder(resp.Body).Decode(&out)
 	resp.Body.Close()
-	if len(out.Created) != 1 || out.Created[0].Name != "new-m" {
-		t.Errorf("created = %+v, want [new-m]", out.Created)
+	if len(out.Created) != 2 || out.Created[0].Name != "gpt-4o" || out.Created[1].Name != "new-m" {
+		t.Errorf("created = %+v, want [gpt-4o new-m]", out.Created)
 	}
-	if len(out.Skipped) != 1 || out.Skipped[0] != "gpt-4o" {
-		t.Errorf("skipped = %v, want [gpt-4o]", out.Skipped)
+	if len(out.Skipped) != 0 {
+		t.Errorf("skipped = %v, want []", out.Skipped)
+	}
+	// Re-adding on the same backend is still reported as skipped, never
+	// silently swallowed.
+	resp = e.do(t, "POST", "/api/admin/backends/2/models", `{"model_ids":["new-m"]}`, admin)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("re-bulk add: %d", resp.StatusCode)
+	}
+	out.Created = nil
+	out.Skipped = nil
+	json.NewDecoder(resp.Body).Decode(&out)
+	resp.Body.Close()
+	if len(out.Created) != 0 || len(out.Skipped) != 1 || out.Skipped[0] != "new-m" {
+		t.Errorf("re-add: created = %+v skipped = %v, want []/[new-m]", out.Created, out.Skipped)
 	}
 	// Batch cap.
 	big := `{"model_ids":[`

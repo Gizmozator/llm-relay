@@ -7,6 +7,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"log"
 	"math"
 	"net/http"
@@ -25,8 +26,12 @@ const utilWindowMinutes = 5
 // reached; a model's busy_threshold_pct (0 = unset) overrides it.
 const busyPctThreshold = 80.0
 
-// ModelStatus is one model's delegation-readiness snapshot.
+// ModelStatus is one model's delegation-readiness snapshot. ID keys the
+// row: group members share a name by design, so two same-name rows can
+// legitimately report different status (different backends) and the
+// consumer needs the physical row id to tell them apart.
 type ModelStatus struct {
+	ID               int64   `json:"id"`
 	Name             string  `json:"name"`
 	Online           bool    `json:"online"`
 	Draining         bool    `json:"draining"`
@@ -40,9 +45,32 @@ type ModelStatus struct {
 	Status string `json:"status"`
 }
 
+// deriveStatus is the verdict switch shared by physical and pool rows:
+// offline (backend unreachable) beats draining (nothing accepting new
+// sessions) beats busy-by-slots, busy-by-mean-busy, else free.
+func deriveStatus(online, draining bool, active int, limit int64, pct, thr float64) string {
+	switch {
+	case !online:
+		return "offline"
+	case draining:
+		return "draining"
+	case limit > 0 && int64(active) >= limit:
+		return "busy"
+	case pct >= thr:
+		return "busy"
+	default:
+		return "free"
+	}
+}
+
 // Utilization builds the payload shared by GET /v1/utilization and the MCP
-// check_utilization tool.
-func (h *Handler) Utilization(ctx context.Context) (map[string]any, error) {
+// check_utilization tool. adminView selects the row list: admins get the
+// physical rows (internal wiring included); non-admin keys get the
+// ADVERTISED catalog — synthetic pool rows for enabled groups (negative
+// ids, same convention as the dashboard live view) plus the public rows
+// /v1/models actually serves. The busy/series math is always global, so a
+// public model's numbers never depend on the caller's role.
+func (h *Handler) Utilization(ctx context.Context, adminView bool) (map[string]any, error) {
 	backends, err := store.ListBackends(h.DB)
 	if err != nil {
 		return nil, err
@@ -95,41 +123,180 @@ func (h *Handler) Utilization(ctx context.Context) (map[string]any, error) {
 	for _, b := range backends {
 		draining[b.ID] = b.Draining
 	}
-	active := h.Flight.Snapshot(0)
+	// Keyed by physical row id: with same-name group members a name-keyed
+	// count would show the whole pool total on every member row and the
+	// per-row busy check below (Active >= ConcurrencyLimit) would fire
+	// spuriously.
+	active := h.Flight.SnapshotByModel(0)
 
 	out := []ModelStatus{}
-	for _, m := range models {
-		if !m.Enabled {
-			continue
+	if adminView {
+		// Admin: physical rows, unchanged (IDs, per-row wiring, sort).
+		for _, m := range models {
+			if !m.Enabled {
+				continue
+			}
+			ms := ModelStatus{
+				ID:               m.ID,
+				Name:             m.Name,
+				Active:           active[m.ID],
+				ConcurrencyLimit: m.ConcurrencyLimit,
+				UtilizationPct:   math.Round(busyPct[m.Name]*10) / 10,
+			}
+			ms.Online = status[m.BackendID].Online
+			ms.Draining = draining[m.BackendID]
+			// Mean-busy threshold: per-model admin setting, 0 = default.
+			thr := m.BusyThresholdPct
+			if thr <= 0 {
+				thr = int64(busyPctThreshold)
+			}
+			ms.Status = deriveStatus(ms.Online, ms.Draining, ms.Active,
+				m.ConcurrencyLimit, ms.UtilizationPct, float64(thr))
+			out = append(out, ms)
 		}
-		ms := ModelStatus{
-			Name:             m.Name,
-			Active:           active[m.Name],
-			ConcurrencyLimit: m.ConcurrencyLimit,
-			UtilizationPct:   math.Round(busyPct[m.Name]*10) / 10,
+	} else {
+		// Non-admin keys get the ADVERTISED catalog — the names /v1/models
+		// actually serves (ListPublicCatalog) — because the agent guide
+		// tells agents to check_utilization before delegating to a listed
+		// name, and group membership forces every member row internal:
+		// filtering physical rows alone would answer zero rows for every
+		// group name. Mirrors the dashboard live view's synthesis.
+		backendOn := map[int64]bool{}
+		for _, b := range backends {
+			backendOn[b.ID] = b.Enabled
 		}
-		ms.Online = status[m.BackendID].Online
-		ms.Draining = draining[m.BackendID]
-		// Mean-busy threshold: per-model admin setting, 0 = default.
-		thr := m.BusyThresholdPct
-		if thr <= 0 {
-			thr = int64(busyPctThreshold)
+		groups, err := store.ListGroups(h.DB)
+		if err != nil {
+			return nil, err
 		}
-		switch {
-		case !ms.Online:
-			ms.Status = "offline"
-		case ms.Draining:
-			ms.Status = "draining"
-		case m.ConcurrencyLimit > 0 && int64(ms.Active) >= m.ConcurrencyLimit:
-			ms.Status = "busy"
-		case ms.UtilizationPct >= float64(thr):
-			ms.Status = "busy"
-		default:
-			ms.Status = "free"
+		poolNames := map[string]bool{}
+		for _, g := range groups {
+			if !g.Enabled {
+				continue // a disabled group is not advertised
+			}
+			_, members, err := store.GetGroup(h.DB, g.ID)
+			if errors.Is(err, store.ErrNotFound) {
+				continue // deleted between ListGroups and GetGroup
+			}
+			if err != nil {
+				return nil, err
+			}
+			var limit int64
+			unknown := false
+			servable := false
+			online := false
+			accepting := false // a servable member actually taking new sessions
+			thr := int64(0)
+			poolActive := 0
+			// Group sessions log model_requested = the group name, so the
+			// group key carries them; member-name-keyed busy (members are
+			// requestable by name via the ResolveTarget fallthrough) folds
+			// in too — mirror of the live view's util fold.
+			poolPct := busyPct[g.Name]
+			for _, mem := range members {
+				if mem.Model == nil || mem.Backend == nil {
+					continue
+				}
+				memServable := mem.Model.Enabled && backendOn[mem.Backend.ID]
+				if mem.Model.Name != g.Name &&
+					(mem.Model.Visibility == "internal" || memServable) {
+					poolPct += busyPct[mem.Model.Name]
+				}
+				if !memServable {
+					continue
+				}
+				servable = true
+				poolActive += active[mem.Model.ID]
+				limit += mem.Model.ConcurrencyLimit
+				if mem.Model.ConcurrencyLimit == 0 {
+					unknown = true
+				}
+				if status[mem.Backend.ID].Online {
+					online = true
+					if !draining[mem.Backend.ID] {
+						accepting = true
+					}
+				}
+				// Threshold aggregate: the STRICTEST member threshold. The
+				// pool pct is one number, and "any member below its own
+				// threshold ⇒ not busy" (one free member means the name
+				// can take work) reduces to pct >= max(thresholds).
+				mthr := mem.Model.BusyThresholdPct
+				if mthr <= 0 {
+					mthr = int64(busyPctThreshold)
+				}
+				if mthr > thr {
+					thr = mthr
+				}
+			}
+			if !servable {
+				continue // nothing servable: the catalog does not advertise it either
+			}
+			if unknown {
+				limit = 0 // any-unset ⇒ unknown, same rule as the live view
+			}
+			poolNames[g.Name] = true
+			pct := math.Round(poolPct*10) / 10
+			ms := ModelStatus{
+				ID:               -g.ID, // negative = synthetic, same convention as the live view
+				Name:             g.Name,
+				Online:           online,
+				Draining:         !accepting, // nothing servable is actually accepting
+				Active:           poolActive,
+				ConcurrencyLimit: limit,
+				UtilizationPct:   pct,
+			}
+			ms.Status = deriveStatus(ms.Online, ms.Draining, ms.Active, limit, pct, float64(thr))
+			out = append(out, ms)
 		}
-		out = append(out, ms)
+		// Public standalone rows, same rules as ListPublicModels: enabled
+		// model on an enabled backend, public visibility, same-name dedupe
+		// keeping the ResolveTarget winner (all rows here are public, so
+		// lowest id wins) — minus rows whose name an emitted pool row
+		// carries (the group shadows them; the standalone cannot serve it).
+		best := map[string]int64{}
+		for _, m := range models {
+			if !m.Enabled || m.Visibility != "public" || !backendOn[m.BackendID] {
+				continue
+			}
+			if id, ok := best[m.Name]; !ok || m.ID < id {
+				best[m.Name] = m.ID
+			}
+		}
+		for _, m := range models {
+			if !m.Enabled || m.Visibility != "public" || !backendOn[m.BackendID] {
+				continue
+			}
+			if poolNames[m.Name] || best[m.Name] != m.ID {
+				continue
+			}
+			ms := ModelStatus{
+				ID:               m.ID,
+				Name:             m.Name,
+				Active:           active[m.ID],
+				ConcurrencyLimit: m.ConcurrencyLimit,
+				UtilizationPct:   math.Round(busyPct[m.Name]*10) / 10,
+			}
+			ms.Online = status[m.BackendID].Online
+			ms.Draining = draining[m.BackendID]
+			thr := m.BusyThresholdPct
+			if thr <= 0 {
+				thr = int64(busyPctThreshold)
+			}
+			ms.Status = deriveStatus(ms.Online, ms.Draining, ms.Active,
+				m.ConcurrencyLimit, ms.UtilizationPct, float64(thr))
+			out = append(out, ms)
+		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	// Name order with an id tie-break: same-name group members otherwise
+	// land in an unspecified order (ListModels guarantees only ORDER BY
+	// name), which would make the row list unstable across calls.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
+		}
+		return out[i].ID < out[j].ID
+	})
 
 	return map[string]any{
 		"window_minutes": utilWindowMinutes,
@@ -139,11 +306,12 @@ func (h *Handler) Utilization(ctx context.Context) (map[string]any, error) {
 
 // UtilizationREST serves GET /v1/utilization (relay port, sk-key auth).
 func (h *Handler) UtilizationREST(w http.ResponseWriter, r *http.Request) {
-	if _, _, err := h.authKey(r); err != nil {
+	_, user, err := h.authKey(r)
+	if err != nil {
 		writeError(w, http.StatusUnauthorized, "invalid API key")
 		return
 	}
-	payload, err := h.Utilization(r.Context())
+	payload, err := h.Utilization(r.Context(), user.Role == "admin")
 	if err != nil {
 		log.Printf("relay: /v1/utilization failed: %v", err)
 		writeError(w, http.StatusInternalServerError, "internal error")

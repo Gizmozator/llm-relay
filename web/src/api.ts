@@ -64,6 +64,9 @@ export interface UsageRow {
   session_id: string | null;
   endpoint: string;
   model_requested: string;
+  /** Upstream id the chosen member served; for a group this tells the
+   *  members apart when their upstream ids differ. */
+  model_upstream?: string | null;
   prompt_tokens: number;
   completion_tokens: number;
   cached_tokens: number;
@@ -123,12 +126,44 @@ export interface ProbeResult {
   models: ProbeModel[] | null;
 }
 
+// The models.visibility column is CHECK-constrained to exactly these two
+// values (migration 0010); the union is derived FROM the array so a future
+// third value is a single-point change.
+export const VISIBILITIES = ['public', 'internal'] as const;
+export type Visibility = (typeof VISIBILITIES)[number];
+
+/** Catalog row kind on GET /api/models: a plain model row or a model group.
+ *  Derived from the array — same single-point convention as Visibility.
+ *  (No runtime consumer: the const exists only to derive the union.) */
+const CATALOG_KINDS = ['model', 'group'] as const;
+export type CatalogKind = (typeof CATALOG_KINDS)[number];
+
+/** Body of PATCH /api/admin/models/{id}: every field is optional (partial
+ *  merge). Exported so callers and the api method share one shape. */
+export type ModelPatch = Partial<{
+  name: string;
+  enabled: boolean;
+  visibility: Visibility;
+  price_in: number;
+  price_out: number;
+  price_cache_read: number;
+  price_cache_write: number;
+  context_length: number;
+  concurrency_limit: number;
+  busy_threshold_pct: number;
+  bench_tok_per_s: number;
+  bench_pp_tok_per_s: number;
+}>;
+
 export interface CatalogModel {
   id: number;
   name: string;
   backend_id: number;
   backend_name: string;
   upstream_model: string;
+  /** 'public' | 'internal' — internal members are requestable but hidden
+   *  from /v1/models (group members are set internal by the store). */
+  visibility: Visibility;
   enabled: boolean;
   price_in: number;
   price_out: number;
@@ -156,8 +191,54 @@ export interface BenchmarkResult {
   bench_at: string;
 }
 
+/** Model group as returned by the admin group endpoints: the row plus its
+ *  members flattened with the display fields the editor needs. These types
+ *  mirror the server response shape, not a render list — fields the UI
+ *  never reads (member_count, upstream_model, visibility) stay so the
+ *  decoder matches the wire. */
+export interface GroupMember {
+  model_id: number;
+  weight: number;
+  position: number;
+  model_name: string;
+  backend_name: string;
+  upstream_model: string;
+  visibility: Visibility;
+  model_enabled: boolean;
+  backend_enabled: boolean;
+  backend_draining: boolean;
+}
+
+export interface ModelGroup {
+  id: number;
+  name: string;
+  enabled: boolean;
+  member_count: number;
+  members: GroupMember[];
+}
+
+/** One member in a group PATCH: the full member list replaces the stored
+ *  one. Omitted weight (or ≤0) seeds from the model's bench_tok_per_s —
+ *  the UI leaves the field out for a blank input. */
+export interface GroupMemberInput {
+  model_id: number;
+  weight?: number;
+  position: number;
+}
+
+/** Body of PATCH /api/admin/groups/{id}: every field is optional (partial
+ *  merge; `members` replaces the whole member list). Exported so callers
+ *  and the api method share one shape (same convention as ModelPatch). */
+export type GroupPatch = Partial<{
+  name: string;
+  enabled: boolean;
+  members: GroupMemberInput[];
+}>;
+
 /** Model as exposed to all users on GET /api/models (no internal wiring). */
 export interface PublicModel {
+  /** Always set by the server; group rows carry no per-member fields (all zero). */
+  kind: CatalogKind;
   name: string;
   price_in: number;
   price_out: number;
@@ -185,11 +266,25 @@ export interface LiveBucket {
 }
 
 export interface LiveModel {
+  /** Physical model row id: group members share a name, so rows key on id.
+   *  On the personal route a group is one pool row with a synthetic
+   *  id = -groupId (never collides with a real row id). */
+  id: number;
   name: string;
+  /** Empty on synthetic pool rows (member wiring is admin-only). */
   backend: string;
+  /** Engine-side model id — admin responses only, absent for users. */
+  upstream?: string;
   online: boolean;
   draining: boolean;
   active: number;
+  /** True on synthetic pool rows (explicit marker; do not re-derive it
+   *  from the negative id or the empty backend). Mirrors the wire. */
+  pool?: boolean;
+  /** Per-member limit for admins; summed pool limit on pool rows
+   *  (0 = unknown/auto-scale). Mirrors the wire — the dashboard axis
+   *  scales off LiveUtil.concurrency_limit, not this field. */
+  concurrency_limit: number;
 }
 
 export interface LiveUtil {
@@ -441,26 +536,19 @@ export const api = {
 
   // admin — models
   models: () => request<{ models: CatalogModel[] }>('GET', '/api/admin/models'),
-  patchModel: (
-    id: number,
-    patch: Partial<{
-      name: string;
-      enabled: boolean;
-      price_in: number;
-      price_out: number;
-      price_cache_read: number;
-      price_cache_write: number;
-      context_length: number;
-      concurrency_limit: number;
-      busy_threshold_pct: number;
-      bench_tok_per_s: number;
-      bench_pp_tok_per_s: number;
-    }>,
-  ) => request<CatalogModel>('PATCH', `/api/admin/models/${id}`, { body: patch }),
+  patchModel: (id: number, patch: ModelPatch) =>
+    request<CatalogModel>('PATCH', `/api/admin/models/${id}`, { body: patch }),
   deleteModel: (id: number) => request<void>('DELETE', `/api/admin/models/${id}`),
   /** Runs a timed generation upstream; can take minutes (409 if one is running). */
   benchmarkModel: (id: number) =>
     request<BenchmarkResult>('POST', `/api/admin/models/${id}/benchmark`),
+
+  // admin — model groups
+  groups: () => request<{ groups: ModelGroup[] }>('GET', '/api/admin/groups'),
+  createGroup: (name: string) => request<ModelGroup>('POST', '/api/admin/groups', { body: { name } }),
+  patchGroup: (id: number, patch: GroupPatch) =>
+    request<ModelGroup>('PATCH', `/api/admin/groups/${id}`, { body: patch }),
+  deleteGroup: (id: number) => request<void>('DELETE', `/api/admin/groups/${id}`),
 
   // admin — settings
   settings: () => request<Settings>('GET', '/api/admin/settings'),

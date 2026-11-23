@@ -55,7 +55,15 @@ VERDICT: CHANGES_REQUESTED
 | CHANGES_REQUESTED | send the numbered findings back to the implementer, re-review. Max 3 rounds. |
 | 3 failed rounds | stop, stash the work, record the blockers in the plan file, ask the human |
 
-## 5. Extra defects found during review
+## 5. OCR gate
+
+After the reviewer returns `APPROVE`, run **one** `ocr` pass on the diff
+(`ocr review --concurrency 1 --audience agent -f json`). Fix the adopted
+findings, then have the reviewer re-verify the amended diff and commit.
+No `ocr` re-runs per task; a whole-repo `ocr scan` runs once at the end
+of a feature epic.
+
+## 6. Extra defects found during review
 
 Do **not** fix them in the current change. Dedupe and file them as new `bug`
 tickets per the **`gitea-issues`** skill, *Dedupe baseline + filing new bug

@@ -37,6 +37,7 @@ func agentGet(t *testing.T, url, key string) *http.Response {
 type utilResp struct {
 	WindowMinutes int `json:"window_minutes"`
 	Models        []struct {
+		ID               int64   `json:"id"`
 		Name             string  `json:"name"`
 		Online           bool    `json:"online"`
 		Active           int     `json:"active"`
@@ -89,14 +90,19 @@ func TestUtilizationREST(t *testing.T) {
 		t.Errorf("after full-window load: pct=%.1f status=%s, want >=80 busy", m.UtilizationPct, m.Status)
 	}
 
-	// Disabled backend → offline (beats the busy verdict).
+	// Disabled backend → offline (beats the busy verdict). Non-admin keys
+	// no longer see the row at all (a disabled backend is not advertised),
+	// so the verdict is asserted on the admin physical view.
 	off := false
 	if _, err := store.UpdateBackend(h.db, 1, nil, nil, nil, &off, nil); err != nil {
 		t.Fatal(err)
 	}
-	resp = agentGet(t, h.server.URL+"/v1/utilization", h.key)
+	resp = agentGet(t, h.server.URL+"/v1/utilization", adminKey(t, h))
 	json.NewDecoder(resp.Body).Decode(&r)
 	resp.Body.Close()
+	if len(r.Models) != 1 {
+		t.Fatalf("admin models = %+v, want the physical row", r.Models)
+	}
 	if m = r.Models[0]; m.Online || m.Status != "offline" {
 		t.Errorf("disabled backend: %+v, want offline", m)
 	}
@@ -111,7 +117,7 @@ func TestUtilizationConcurrencyBusy(t *testing.T) {
 	// Fill all 4 slots in the tracker (as the proxy hook would).
 	var ids []int64
 	for i := 0; i < 4; i++ {
-		ids = append(ids, h.ph.Flight.Enter(proxy.Stream{UserID: 1, Model: "pub-model"}))
+		ids = append(ids, h.ph.Flight.Enter(proxy.Stream{UserID: 1, Model: "pub-model", ModelID: 1}))
 	}
 	defer func() {
 		for _, id := range ids {
@@ -134,7 +140,7 @@ func TestUtilizationBusyThreshold(t *testing.T) {
 	h := newHarness(t, agentUpstream())
 	// A stream running for 2 minutes → 40–50 % mean busy over the elapsed
 	// 4–5 min window: under the default 80 (free), at or above 30 (busy).
-	id := h.ph.Flight.EnterAt(proxy.Stream{UserID: 1, Model: "pub-model"}, time.Now().Add(-2*time.Minute))
+	id := h.ph.Flight.EnterAt(proxy.Stream{UserID: 1, Model: "pub-model", ModelID: 1}, time.Now().Add(-2*time.Minute))
 	defer h.ph.Flight.Leave(id)
 
 	resp := agentGet(t, h.server.URL+"/v1/utilization", h.key)
@@ -178,7 +184,7 @@ func TestUtilizationInFlightBusy(t *testing.T) {
 	// written at completion) must already count as busy: busy = 120 s
 	// over an elapsed window of 4–5 min → 40–50 %. Before the in-flight
 	// overlay this read 0 % ("free") until the request finished.
-	id := h.ph.Flight.EnterAt(proxy.Stream{UserID: 1, Model: "pub-model"}, time.Now().Add(-2*time.Minute))
+	id := h.ph.Flight.EnterAt(proxy.Stream{UserID: 1, Model: "pub-model", ModelID: 1}, time.Now().Add(-2*time.Minute))
 	defer h.ph.Flight.Leave(id)
 
 	resp := agentGet(t, h.server.URL+"/v1/utilization", h.key)
@@ -395,4 +401,59 @@ func TestHandlerHealthCacheWired(t *testing.T) {
 		t.Fatal("proxy.New must create a HealthCache")
 	}
 	var _ *proxy.HealthCache = h.ph.Health
+}
+
+// Same-name model rows (group members): each row's Active must count only
+// its own streams. A name-keyed snapshot showed the pool total on every
+// member row, and the per-row busy check (Active >= ConcurrencyLimit)
+// fired spuriously once the pool total crossed one member's limit.
+func TestUtilizationSameNameRows(t *testing.T) {
+	h := newHarness(t, agentUpstream())
+	var id1 int64
+	if err := h.db.QueryRow(`SELECT id FROM models WHERE name='pub-model'`).Scan(&id1); err != nil {
+		t.Fatal(err)
+	}
+	b2, err := store.CreateBackend(h.db, "fake2", "http://127.0.0.1:1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m2, err := store.CreateModel(h.db, b2.ID, "u", "pub-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := h.ph.Flight.Enter(proxy.Stream{UserID: 1, Model: "pub-model", ModelID: id1})
+	defer h.ph.Flight.Leave(a)
+	b := h.ph.Flight.Enter(proxy.Stream{UserID: 1, Model: "pub-model", ModelID: m2.ID})
+	defer h.ph.Flight.Leave(b)
+
+	// Non-admin keys get the advertised catalog: same-name public rows
+	// collapse to the ResolveTarget winner (lowest id), matching /v1/models.
+	resp := agentGet(t, h.server.URL+"/v1/utilization", h.key)
+	var r utilResp
+	json.NewDecoder(resp.Body).Decode(&r)
+	resp.Body.Close()
+	if len(r.Models) != 1 || r.Models[0].ID != id1 {
+		t.Fatalf("non-admin rows = %+v, want only the lowest-id winner %d", r.Models, id1)
+	}
+
+	// Admin: both physical rows, each carrying its OWN stream count (not
+	// the name total), keyed by physical id, in (name, id) order.
+	resp = agentGet(t, h.server.URL+"/v1/utilization", adminKey(t, h))
+	var ar utilResp
+	json.NewDecoder(resp.Body).Decode(&ar)
+	resp.Body.Close()
+	if len(ar.Models) != 2 {
+		t.Fatalf("admin rows = %d, want 2 same-name rows", len(ar.Models))
+	}
+	for _, m := range ar.Models {
+		if m.Active != 1 {
+			t.Errorf("row %q active = %d, want 1 (per-member count, not pool total)", m.Name, m.Active)
+		}
+	}
+	// Rows carry the physical id (same disambiguation LiveModel.ID got)
+	// and land in deterministic (name, id) order.
+	if ar.Models[0].ID != id1 || ar.Models[1].ID != m2.ID {
+		t.Errorf("row ids = %d,%d, want %d,%d (id tie-break, distinct per member)",
+			ar.Models[0].ID, ar.Models[1].ID, id1, m2.ID)
+	}
 }

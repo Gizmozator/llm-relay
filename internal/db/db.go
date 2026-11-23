@@ -25,7 +25,16 @@ func Open(path string) (*sql.DB, error) {
 			return nil, fmt.Errorf("db dir %s: %w", dir, err)
 		}
 	}
-	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
+	// _txlock=immediate: every Begin() starts BEGIN IMMEDIATE, taking the
+	// write lock up front so busy_timeout(5000) waits out contention. With
+	// the default deferred mode a tx that reads before writing (all guard
+	// checks here) takes a read snapshot first; a commit on another
+	// connection — the relay writes usage rows on every request — then
+	// fails the write with SQLITE_BUSY_SNAPSHOT, which the busy handler
+	// does NOT wait out. All Begin() users are write paths; plain
+	// Query/QueryRow calls outside txs are unaffected and keep WAL
+	// read concurrency.
+	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("db open: %w", err)

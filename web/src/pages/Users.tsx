@@ -1,11 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import type { FormEvent } from 'react';
 import { api, errMsg } from '../api';
 import type { Role } from '../api';
 import { fmtDateTime } from '../format';
 import { useLoad } from '../useLoad';
 import { useToast } from '../components/Toast';
-import { Banner, EditableText, Empty, Field, Loading, Modal, parseNumInput } from '../components/ui';
+import { Banner, EditableNumber, EditableText, Empty, Field, Loading, Modal } from '../components/ui';
 import { useAuth } from '../auth';
 
 export default function UsersPage() {
@@ -42,13 +42,17 @@ export default function UsersPage() {
   const patch = async (
     id: number,
     p: { disabled?: boolean; role?: Role; display_name?: string; price_multiplier?: number },
-  ) => {
+  ): Promise<boolean> => {
     try {
       await api.patchUser(id, p);
+      // Reload only on success: the revert contract already restores the
+      // input on failure, and a failed refetch would replace the whole
+      // table (users.error) in the middle of someone's edit.
       users.reload();
+      return true;
     } catch (e: unknown) {
       toast.push('error', errMsg(e));
-      users.reload();
+      return false;
     }
   };
 
@@ -152,9 +156,10 @@ export default function UsersPage() {
                         </select>
                       </td>
                       <td className="num">
-                        <MultiplierInput
-                          value={u.price_multiplier ?? 1}
-                          username={u.username}
+                        <EditableNumber
+                          display={String(u.price_multiplier ?? 1)}
+                          max={1000}
+                          ariaLabel={`Price multiplier of ${u.username}`}
                           onCommit={(n) => patch(u.id, { price_multiplier: n })}
                         />
                       </td>
@@ -196,48 +201,6 @@ export default function UsersPage() {
         />
       )}
     </div>
-  );
-}
-
-/** Inline price-multiplier input; commits on blur or Enter, reverts on invalid. */
-function MultiplierInput({
-  value,
-  username,
-  onCommit,
-}: {
-  value: number;
-  username: string;
-  onCommit: (n: number) => void;
-}) {
-  const display = String(value);
-  const [v, setV] = useState(display);
-  useEffect(() => setV(display), [display]);
-
-  const commit = () => {
-    const n = parseNumInput(v, true);
-    if (n === null || n < 0.01) {
-      setV(display);
-      return;
-    }
-    if (n !== value) onCommit(n);
-    else setV(display);
-  };
-
-  return (
-    <input
-      className="input input-inline input-num"
-      type="number"
-      step={0.1}
-      min={0.01}
-      value={v}
-      aria-label={`Price multiplier of ${username}`}
-      onChange={(e) => setV(e.target.value)}
-      onBlur={commit}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-        if (e.key === 'Escape') setV(display);
-      }}
-    />
   );
 }
 

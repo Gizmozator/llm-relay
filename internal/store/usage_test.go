@@ -200,3 +200,79 @@ func TestLiveBucketsScoping(t *testing.T) {
 		t.Errorf("scoped requests = %d, want 1", reqs)
 	}
 }
+
+// The "model" group-by aggregates by model_requested (COALESCE), so a
+// model group's usage rolls up across its members automatically: rows
+// served by different member rows (model_id) under one requested name
+// must land in ONE bucket. This pins the Usage-page pool rollup — the
+// dashboard needs no group-aware query, only the group name in
+// model_requested (plan 2026-11-22, task 4).
+func TestSummarizeUsageModelGroupRollup(t *testing.T) {
+	d, err := db.Open(t.TempDir() + "/rollup.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Migrate(d); err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	seed := func(modelID int64, requested, upstream string, prompt, cost int64) {
+		err := store.InsertUsage(d, &store.UsageEvent{
+			TS: "2026-11-21T12:00:00Z", Endpoint: "chat",
+			ModelID: modelID, ModelRequ: requested, ModelUpstream: upstream,
+			Prompt: prompt, CostTotal: cost, Status: 200,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Two members of group "pool" (same requested name, different member
+	// rows and upstream ids) plus one standalone model row.
+	seed(10, "pool", "qwen:fast", 100, 10)
+	seed(11, "pool", "qwen:slow", 50, 5)
+	seed(12, "solo", "other:1", 7, 7)
+
+	totals, groups, err := store.SummarizeUsage(d, &store.UsageFilter{}, "model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if totals.Requests != 3 {
+		t.Errorf("totals = %+v, want 3 requests", totals)
+	}
+	if len(groups) != 2 {
+		t.Fatalf("groups = %+v, want pool + solo", groups)
+	}
+	var pool *store.UsageGroup
+	for i := range groups {
+		if groups[i].Key == "pool" {
+			pool = &groups[i]
+		}
+	}
+	if pool == nil || pool.Requests != 2 || pool.Prompt != 150 || pool.CostMicro != 15 {
+		t.Errorf("pool group = %+v, want 2 requests / 150 prompt / 15 cost", pool)
+	}
+
+	// The detail rows keep the per-request identity: the group name as
+	// requested, the member's upstream id for distinguishing members.
+	total, rows, err := store.UsageDetail(d, &store.UsageFilter{}, 1, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 3 || len(rows) != 3 {
+		t.Fatalf("detail = %d/%d, want 3/3", total, len(rows))
+	}
+	upstreams := map[string]bool{}
+	for _, r := range rows {
+		if r.ModelRequ != nil && *r.ModelRequ == "pool" {
+			if r.ModelUpstream == nil {
+				t.Errorf("pool row %d has no model_upstream", r.ID)
+			} else {
+				upstreams[*r.ModelUpstream] = true
+			}
+		}
+	}
+	if !upstreams["qwen:fast"] || !upstreams["qwen:slow"] {
+		t.Errorf("member upstream ids not surfaced: %v", upstreams)
+	}
+}

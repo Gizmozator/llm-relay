@@ -52,7 +52,9 @@ are visible in the dashboard.
   shared name). Group names must not collide with any public model name or
   another group (checked in store).
 - **Member pick** (`internal/proxy`, new `groups.go`): rendezvous (HRW) hash —
-  `u = fnv/xxh(session+"\x1f"+backend_id) normalized to (0,1]`,
+  `u = fnv/xxh(session+"\x1f"+member_model_id) normalized to (0,1]` (keyed on
+  the member row, not `backend_id`: two members sharing a backend would get
+  byte-identical `u` and the lower-weight one would starve at 0%),
   `score = weight / -ln(u)`; walk the ranked list, skipping hard exclusions:
   disabled member/backend, backend draining, backend failing `HealthCache`.
   Empty session id → least-loaded member by `InFlight` count. All members
@@ -65,7 +67,7 @@ are visible in the dashboard.
   requests only).
 - **`/v1/models`**: enabled groups + enabled `public` models; `internal`
   members hidden but requestable.
-- **Admin API**: `GET/POST /api/admin/groups`, `GET/PUT /api/admin/groups/{id}`
+- **Admin API**: `GET/POST /api/admin/groups`, `GET/PATCH /api/admin/groups/{id}`
   (members: model_id, weight, position; weight seeded from `bench_tok_per_s`),
   `DELETE /api/admin/groups/{id}`, `PATCH /api/admin/models/{id}` gains
   `visibility`. Adding a model to a group sets it `internal` (admin may re-expose).
@@ -79,23 +81,23 @@ are visible in the dashboard.
 
 | # | task | blocked by | done |
 |---|---|---|---|
-| 1 | migration 0010 + store CRUD + resolution + unit tests | — | ☐ |
-| 2 | proxy HRW pick + exclusions + retry + tests | 1 | ☐ |
-| 3 | admin API (groups CRUD, visibility) + tests | 1 | ☐ |
-| 4 | web UI (groups editor, visibility, usage aggregation) | 3 | ☐ |
-| 5 | docs + plan update + live smoke | 2,4 | ☐ |
+| 1 | migration 0010 + store CRUD + resolution + unit tests | — | ☑ |
+| 2 | proxy HRW pick + exclusions + retry + tests | 1 | ☑ |
+| 3 | admin API (groups CRUD, visibility) + tests | 1 | ☑ |
+| 4 | web UI (groups editor, visibility, usage aggregation) | 3 | ☑ |
+| 5 | docs + plan update + live smoke | 2,4 | ☑ |
 
 ## Verification
 
-- [ ] `make ci` green at every commit
-- [ ] unit: two backends, same model name, import without collision; group
+- [x] `make ci` green at every commit
+- [x] unit: two backends, same model name, import without collision; group
       routes across both; same session → same member across N requests;
       different sessions spread ~proportional to weights
-- [ ] unit: draining/unhealthy/disabled member skipped; all-draining → 503
-- [ ] unit: `/v1/models` shows group, hides internal members; member name still
+- [x] unit: draining/unhealthy/disabled member skipped; all-draining → 503
+- [x] unit: `/v1/models` shows group, hides internal members; member name still
       resolves directly
-- [ ] unit: usage row has member `model_id` + group `model_requested`
-- [ ] live smoke: binary + two mock engines (httptest or `nc`), curl with
+- [x] unit: usage row has member `model_id` + group `model_requested`
+- [x] live smoke: binary + two mock engines (httptest or `nc`), curl with
       `X-Session-Id`, verify affinity + dashboard rows
 
 ## Decisions
@@ -112,7 +114,60 @@ are visible in the dashboard.
 
 - None blocking. (Live-view member display already works: in-flight `Stream.Model`
   is the resolved member name.)
+- ~~Live page keys active counts and `concurrency_limit` by model **name**~~
+  **Resolved (task 4)**: the name-keyed views stay name-keyed on purpose —
+  the active list and the utilization series aggregate a group's members
+  into one pool row (streams carry the resolved member name — equal to
+  the group name in the canonical same-name setup; completed-work busy
+  keys on `model_requested`, in-flight credit on the member name, so a
+  renamed member shows under its own name in those two places).
+  The per-row model list is keyed by the
+  physical row **id** (`LiveModel.id`, frontend keys rows by it) and shows
+  each member's own stream count (`InFlight.SnapshotByModel`), so
+  same-name members no longer double-display the pool total. The util
+  `concurrency_limit` for a name is the **sum** of the rows' limits; if
+  any row has no limit set the pool limit reports 0 (unknown → frontend
+  auto-scales). Pinned by `TestLiveSameNamePool`.
+- Admin model list (`store.ListModels`) deliberately returns **every** row
+  (replicas are per-backend admin state; dedupe would hide them) — the web UI
+  must key model rows by id, not name. (AdminModels already keyed rows by
+  `m.id`; the live Models table now keys by the new `LiveModel.id` too.)
+- Group drain semantics are stricter than the single-model gate: a draining
+  member is a hard exclusion even for a recently-active session, while the
+  model-path drain gate lets such sessions finish. A session pinned to a
+  member that starts draining migrates (cold cache) instead of finishing
+  there. Follows the plan's hard-exclusion wording; owner may want
+  session-rescue parity for groups.
+- Health probes sit on the group routing path: a request whose members'
+  cache entries are all TTL-stale serializes up to N probes (2 s each,
+  process-wide mutex) before any bytes flow — worst case N×2 s once per
+  60 s TTL window when the whole cluster is down. Accepted for v1 (retry
+  loop covers transient gaps); revisit if it ever bites real traffic.
 
 ## Changelog
 
 - 2026-11-22 — plan created from Gitea #1 design.
+- 2026-11-22 — task 3: group update endpoint is `PATCH /api/admin/groups/{id}`
+  (partial merge), not `PUT` — repo convention reserves `PUT` for full
+  replacement (settings); every sibling partial-update admin route uses PATCH.
+- 2026-11-22 — task 4 (web UI): admin Models page gains the groups section
+  (create / rename / enable / delete, member editor with weights — blank
+  weight seeds from bench, row order = position) and model rows gain a
+  visibility editor + group badge. User Models page lists groups via
+  `ListPublicCatalog` (`/api/models` rows carry `kind`). Usage page:
+  per-pool rollup verified (model group-by keys on `model_requested`);
+  detail rows now also surface `model_upstream`. Live page pool-aggregation
+  decision recorded under Open questions (name-keyed pool views, id-keyed
+  member rows, summed util limits).
+- 2026-11-23 — tasks 1–5 shipped on `feature/model-groups`: 2ff9a17 (schema +
+  store), 3c136d2 (proxy routing), 618ef49 (admin API), d7a10e0 (web UI +
+  utilization advertised catalog) + task 5 (docs + live smoke; transcript
+  `~/.cache/llm-relay/task5-smoke.log`). Shipped beyond plan: the
+  `/v1/utilization` + MCP `check_utilization` row list splits by key role —
+  non-admin keys get the **advertised catalog** (synthetic group rows with
+  negative ids, member busy folded into the pool, deduped public rows),
+  admin keys get the physical rows; the dashboard live view synthesizes one
+  pool row per enabled group (member series folded in, per-row counts keyed
+  by physical id); the review protocol gained an **OCR gate** section (one
+  `ocr` pass per diff after reviewer APPROVE, no per-task re-runs; whole-repo
+  scan once per epic).

@@ -40,6 +40,29 @@ func TestInFlightTracker(t *testing.T) {
 	}
 }
 
+// SnapshotByModel is the id-keyed twin of Snapshot: group members share a
+// name, so per-member rows count on ModelID.
+func TestInFlightSnapshotByModel(t *testing.T) {
+	f := NewInFlight()
+	id1 := f.Enter(Stream{UserID: 1, ModelID: 10, Model: "pool"})
+	f.Enter(Stream{UserID: 1, ModelID: 11, Model: "pool"})
+	f.Enter(Stream{UserID: 2, ModelID: 10, Model: "pool"})
+	if got := f.SnapshotByModel(0); got[10] != 2 || got[11] != 1 {
+		t.Fatalf("global = %v, want 10:2 11:1", got)
+	}
+	if got := f.SnapshotByModel(2); len(got) != 1 || got[10] != 1 {
+		t.Fatalf("user 2 = %v, want 10:1", got)
+	}
+	f.Leave(id1)
+	if got := f.SnapshotByModel(1); got[10] != 0 || got[11] != 1 {
+		t.Fatalf("user 1 after Leave = %v, want 11:1", got)
+	}
+	var nilF *InFlight
+	if nilF.SnapshotByModel(0) == nil {
+		t.Fatal("nil SnapshotByModel must return an empty map, not nil")
+	}
+}
+
 func TestInFlightBusySince(t *testing.T) {
 	f := NewInFlight()
 	t0 := time.Now().Add(-2 * time.Minute)

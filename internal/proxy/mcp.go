@@ -45,7 +45,8 @@ func mcpResult(id json.RawMessage, result any) map[string]any {
 // MCP serves POST /mcp (relay port, sk-key auth — MCP HTTP auth failures
 // surface as plain HTTP 401, per spec).
 func (h *Handler) MCP(w http.ResponseWriter, r *http.Request) {
-	if _, _, err := h.authKey(r); err != nil {
+	_, user, err := h.authKey(r)
+	if err != nil {
 		writeError(w, http.StatusUnauthorized, "invalid API key")
 		return
 	}
@@ -119,13 +120,15 @@ func (h *Handler) MCP(w http.ResponseWriter, r *http.Request) {
 			}},
 		}))
 	case "tools/call":
-		h.mcpToolCall(w, r.Context(), req)
+		// Same visibility rule as the REST sibling: non-admin keys get the
+		// advertised catalog, privilege comes from the key's owner.
+		h.mcpToolCall(w, r.Context(), req, user.Role == "admin")
 	default:
 		writeJSON(w, http.StatusOK, mcpError(req.ID, -32601, "method not found: "+req.Method))
 	}
 }
 
-func (h *Handler) mcpToolCall(w http.ResponseWriter, ctx context.Context, req jsonrpcRequest) {
+func (h *Handler) mcpToolCall(w http.ResponseWriter, ctx context.Context, req jsonrpcRequest, adminView bool) {
 	var params struct {
 		Name      string         `json:"name"`
 		Arguments map[string]any `json:"arguments"`
@@ -151,7 +154,7 @@ func (h *Handler) mcpToolCall(w http.ResponseWriter, ctx context.Context, req js
 		filter = s
 	}
 
-	payload, err := h.Utilization(ctx)
+	payload, err := h.Utilization(ctx, adminView)
 	if err != nil {
 		// In-band so the agent sees the failure, but the raw error stays
 		// server-side: it can carry SQLite/driver text (the REST sibling
