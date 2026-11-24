@@ -370,6 +370,16 @@ func BackendByID(db *sql.DB, id int64) (*Backend, error) {
 	return b, err
 }
 
+// BackendByName resolves a backend by its unique name (the headless
+// bootstrap's idempotent upsert key). ErrNotFound when absent.
+func BackendByName(db *sql.DB, name string) (*Backend, error) {
+	b, err := scanBackend(db.QueryRow(`SELECT `+backendCols+` FROM backends WHERE name=?`, name))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return b, err
+}
+
 func ListBackends(db *sql.DB) ([]Backend, error) {
 	rows, err := db.Query(`SELECT ` + backendCols + `,
 		(SELECT COUNT(*) FROM models m WHERE m.backend_id = backends.id)
@@ -621,6 +631,24 @@ func ModelByID(db *sql.DB, id int64) (*Model, error) {
 		return nil, ErrNotFound
 	}
 	return m, err
+}
+
+// ModelNameTakenOnOtherBackend reports whether a model row owned by a
+// DIFFERENT backend already carries this display name. Names are unique per
+// backend (0010), so a cross-backend clash is legal SQL but an ambiguous
+// catalog: the headless bootstrap uses this to refuse to shadow a row it
+// does not own.
+func ModelNameTakenOnOtherBackend(db *sql.DB, backendID int64, name string) (bool, error) {
+	var one int
+	err := db.QueryRow(`SELECT 1 FROM models WHERE name=? AND backend_id<>? LIMIT 1`,
+		name, backendID).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // ModelByName resolves an enabled catalog model together with its enabled

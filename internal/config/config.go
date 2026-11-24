@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/caarlos0/env/v11"
 )
@@ -27,6 +28,24 @@ type Config struct {
 	// root.
 	PublicRelayURL     string `env:"PUBLIC_RELAY_URL"`
 	PublicDashboardURL string `env:"PUBLIC_DASHBOARD_URL"`
+
+	// Headless spoke (plan 2026-11-24-headless-spoke): boot fully configured
+	// by env — one backend, exactly one model, one hub, zero dashboard
+	// interaction. When HEADLESS=true, BACKEND_URL, MODEL_NAME, HUB_URL and
+	// HUB_TOKEN are required (fail-fast like JWT_SECRET); when false (the
+	// default) every var in this block is ignored and behavior is unchanged.
+	Headless     bool   `env:"HEADLESS" envDefault:"false"`
+	BackendURL   string `env:"BACKEND_URL"`
+	BackendToken string `env:"BACKEND_TOKEN"`
+	ModelName    string `env:"MODEL_NAME"`
+	HubURL       string `env:"HUB_URL"`
+	HubToken     string `env:"HUB_TOKEN"`
+	// Prices for the single model row, integer micro-units per 1M tokens
+	// (same unit as the dashboard price fields); 0 = free.
+	PriceIn         int64 `env:"PRICE_IN" envDefault:"0"`
+	PriceOut        int64 `env:"PRICE_OUT" envDefault:"0"`
+	PriceCacheRead  int64 `env:"PRICE_CACHE_READ" envDefault:"0"`
+	PriceCacheWrite int64 `env:"PRICE_CACHE_WRITE" envDefault:"0"`
 }
 
 // Load parses the environment and resolves the effective listen addresses.
@@ -46,6 +65,19 @@ func Load() (*Config, error) {
 	// 32 bytes; anything less is not a real secret for this algorithm.
 	if len(c.JWTSecret) < 32 {
 		return nil, fmt.Errorf("config: JWT_SECRET must be at least 32 characters (openssl rand -hex 32)")
+	}
+	// A headless box has no dashboard to fix a typo in: every var the
+	// bootstrap needs must be present and non-empty at parse time, or the
+	// relay would boot into a half-configured state it can never escape.
+	if c.Headless {
+		for _, req := range []struct{ key, val string }{
+			{"BACKEND_URL", c.BackendURL}, {"MODEL_NAME", c.ModelName},
+			{"HUB_URL", c.HubURL}, {"HUB_TOKEN", c.HubToken},
+		} {
+			if strings.TrimSpace(req.val) == "" {
+				return nil, fmt.Errorf("config: %s is required when HEADLESS=true", req.key)
+			}
+		}
 	}
 	if c.ListenAddr == c.AdminListenAddr {
 		return nil, fmt.Errorf("config: relay and admin listeners must not share an address (%s)", c.ListenAddr)
