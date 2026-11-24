@@ -17,10 +17,11 @@ Env reference: README **Headless spoke** section + `.env.example`.
    dial, i.e. the relay port, not the admin port).
 2. **Spoke side**: copy `deploy/headless-spoke/docker-compose.yml` and
    `deploy/headless-spoke/.env.example` (rename the latter to `.env`) onto the
-   machine that runs your engine, and fill in `.env`: `JWT_SECRET` (≥32 chars),
-   `BACKEND_URL`, `MODEL_NAME`, `HUB_URL` and `HUB_TOKEN`. The hub's
-   **Connect your server** page shows these same two files ready to copy, with
-   `HUB_URL` already filled in.
+   machine that runs your engine, and fill in `.env`: `BACKEND_URL`,
+   `MODEL_NAME`, `HUB_URL` and `HUB_TOKEN`. No `JWT_SECRET` is needed — a
+   headless box never serves the dashboard/admin. The hub's **Connect your
+   server** page shows these same two files ready to copy, with `HUB_URL`
+   already filled in.
 
    Missing/empty `BACKEND_URL`, `MODEL_NAME`, `HUB_URL` or `HUB_TOKEN` =
    the relay refuses to start (`config: X is required when HEADLESS=true`).

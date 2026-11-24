@@ -19,6 +19,38 @@ func TestLoadValidatesSecret(t *testing.T) {
 	}
 }
 
+// A full server signs dashboard/admin session JWTs, so it must have a real
+// secret; an unset one is refused.
+func TestLoadRequiresJWTForServer(t *testing.T) {
+	t.Setenv("JWT_SECRET", "")
+	if _, err := Load(); err == nil {
+		t.Fatal("JWT_SECRET must be required when HEADLESS=false")
+	}
+}
+
+// A headless box never binds the admin listener, so it never signs or parses a
+// JWT — JWT_SECRET is not required there.
+func TestLoadHeadlessNoJWTNeeded(t *testing.T) {
+	headlessEnv(t) // deliberately sets no JWT_SECRET
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("headless config without JWT_SECRET rejected: %v", err)
+	}
+	if c.JWTSecret != "" {
+		t.Errorf("JWTSecret = %q, want empty", c.JWTSecret)
+	}
+}
+
+// If a headless box DOES set JWT_SECRET it must still clear the HS256 floor —
+// a short secret is never acceptable, even if it happens to go unused.
+func TestLoadHeadlessRejectsShortJWT(t *testing.T) {
+	headlessEnv(t)
+	t.Setenv("JWT_SECRET", "tooshort")
+	if _, err := Load(); err == nil {
+		t.Fatal("short JWT_SECRET must be rejected even when HEADLESS=true")
+	}
+}
+
 func TestLoadRejectsSharedAddr(t *testing.T) {
 	t.Setenv("JWT_SECRET", "0123456789abcdef0123456789abcdef")
 	t.Setenv("LISTEN_ADDR", ":9000")
@@ -29,10 +61,10 @@ func TestLoadRejectsSharedAddr(t *testing.T) {
 }
 
 // headlessEnv is a complete, valid HEADLESS=true environment; each
-// subtest breaks one required var.
+// subtest breaks one required var. Note it sets NO JWT_SECRET: a headless
+// box never serves the admin surface, so it needs none (see below).
 func headlessEnv(t *testing.T) {
 	t.Helper()
-	t.Setenv("JWT_SECRET", "0123456789abcdef0123456789abcdef")
 	t.Setenv("HEADLESS", "true")
 	t.Setenv("BACKEND_URL", "http://backend.example.fi:8080")
 	t.Setenv("MODEL_NAME", "qwen3-coder")

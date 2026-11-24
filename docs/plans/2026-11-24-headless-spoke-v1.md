@@ -47,8 +47,11 @@ while the relay port still serves `/v1/*` and the federation tunnel.
   `BACKEND_TOKEN`, `MODEL_NAME`, `HUB_URL`, `HUB_TOKEN`, `PRICE_IN`,
   `PRICE_OUT`, `PRICE_CACHE_READ`, `PRICE_CACHE_WRITE`. With `HEADLESS=true`,
   `BACKEND_URL`/`MODEL_NAME`/`HUB_URL`/`HUB_TOKEN` are required (empty =
-  `config.Load` error, JWT_SECRET style). With `HEADLESS=false` (default)
-  the whole block is ignored — zero behavior change.
+  `config.Load` error). With `HEADLESS=false` (default) the whole block is
+  ignored — zero behavior change. A headless box needs **no `JWT_SECRET`**:
+  it never binds the admin listener, so no JWT is ever signed or parsed; the
+  secret stays required for a full server and, if set at all, must clear the
+  32-char floor.
 - New package `internal/headless`: `Bootstrap(db, cfg, logf)` runs at startup
   after `db.Migrate` and **before** `fedMgr.Reload()`, in order:
   1. upsert backend named `headless` (fixed constant; UNIQUE name makes it
@@ -129,3 +132,12 @@ None open. (Hub-side price overrides: out of scope, Decision 2.)
   page can never drift from them; the live hub URL is interpolated into
   `HUB_URL` when the hub advertises `PUBLIC_RELAY_URL`. The runbook and README
   now point at these files instead of repeating the env block.
+- 2026-11-24 — the Connect page also offers a copyable **full relay server**
+  (`deploy/full-server/`) alongside the headless pair, so a machine with no
+  relay yet can start the dashboard server and then follow steps 2–3 to point
+  it at the hub. The Dockerfile web stage now stages the whole `deploy/` tree
+  (not one subdir) so new templates resolve without another edit.
+- 2026-11-24 — `JWT_SECRET` is no longer required when `HEADLESS=true`: a
+  headless box never binds the admin listener, so it never signs or parses a
+  JWT. It stays required for a full server, and if set in any mode must still
+  clear the 32-char HS256 floor. Dropped from the headless `.env.example`.

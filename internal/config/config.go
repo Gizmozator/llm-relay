@@ -14,7 +14,7 @@ type Config struct {
 	AdminListenAddr   string `env:"ADMIN_ADDR"`
 	AdminPort         string `env:"ADMIN_PORT" envDefault:"8081"`
 	DBPath            string `env:"DB_PATH" envDefault:"/data/llm-relay.db"`
-	JWTSecret         string `env:"JWT_SECRET,required"`
+	JWTSecret         string `env:"JWT_SECRET"`
 	AdminUsername     string `env:"ADMIN_USERNAME"`
 	AdminPassword     string `env:"ADMIN_PASSWORD"`
 	TrustProxyHeaders bool   `env:"TRUST_PROXY_HEADERS" envDefault:"false"`
@@ -32,8 +32,9 @@ type Config struct {
 	// Headless spoke (plan 2026-11-24-headless-spoke): boot fully configured
 	// by env — one backend, exactly one model, one hub, zero dashboard
 	// interaction. When HEADLESS=true, BACKEND_URL, MODEL_NAME, HUB_URL and
-	// HUB_TOKEN are required (fail-fast like JWT_SECRET); when false (the
+	// HUB_TOKEN are required (fail-fast at config.Load); when false (the
 	// default) every var in this block is ignored and behavior is unchanged.
+	// A headless box needs no JWT_SECRET — it never serves the admin surface.
 	Headless     bool   `env:"HEADLESS" envDefault:"false"`
 	BackendURL   string `env:"BACKEND_URL"`
 	BackendToken string `env:"BACKEND_TOKEN"`
@@ -60,11 +61,16 @@ func Load() (*Config, error) {
 	if c.AdminListenAddr == "" {
 		c.AdminListenAddr = ":" + c.AdminPort
 	}
-	// A short or empty HS256 secret makes tokens offline-bruteforceable.
-	// HS256 (RFC 7518) wants a key at least as long as the hash output —
-	// 32 bytes; anything less is not a real secret for this algorithm.
-	if len(c.JWTSecret) < 32 {
+	// JWT_SECRET signs the dashboard/admin session tokens. A headless box
+	// never binds the admin listener, so it never signs or parses a JWT and
+	// needs no secret at all; a full server must have a real one. When set in
+	// any mode it must clear the HS256 floor (RFC 7518: key ≥ hash output =
+	// 32 bytes) — a short secret is offline-bruteforceable.
+	if c.JWTSecret != "" && len(c.JWTSecret) < 32 {
 		return nil, fmt.Errorf("config: JWT_SECRET must be at least 32 characters (openssl rand -hex 32)")
+	}
+	if !c.Headless && c.JWTSecret == "" {
+		return nil, fmt.Errorf("config: JWT_SECRET is required (openssl rand -hex 32)")
 	}
 	// A headless box has no dashboard to fix a typo in: every var the
 	// bootstrap needs must be present and non-empty at parse time, or the

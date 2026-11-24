@@ -8,6 +8,10 @@ import { Banner, CodeBlock, CopyField, Loading } from '../components/ui';
 // page can never drift from them — edit the file, rebuild the web, it updates.
 import composeRaw from '../../../deploy/headless-spoke/docker-compose.yml?raw';
 import spokeEnvRaw from '../../../deploy/headless-spoke/.env.example?raw';
+// The full-server pair (dashboard + admin), same build-time import, for a
+// machine that has no relay yet and wants the whole thing rather than headless.
+import fullComposeRaw from '../../../deploy/full-server/docker-compose.yml?raw';
+import fullEnvRaw from '../../../deploy/full-server/.env.example?raw';
 
 /**
  * Setup guide ("set up your home server"): how a user enrolls their own
@@ -117,6 +121,20 @@ export default function SetupGuidePage() {
           private backends simply stay <code className="mono">local</code> and
           never appear on the hub.
         </p>
+      </section>
+
+      <section className="panel">
+        <h3>Or: start a full relay server (dashboard, many models)</h3>
+        <p className="dim">
+          If that machine does not run a relay yet and you want the full server
+          — a dashboard, several models, your own users and keys — start it with
+          these two files. Fill in <code className="mono">.env</code>, run{' '}
+          <code className="mono">docker compose up -d</code>, open the dashboard
+          on port 8081, then come back to steps 2–3 above to point it at this
+          hub.
+        </p>
+        <CodeBlock title="docker-compose.yml" text={fullComposeRaw} />
+        <CodeBlock title=".env" text={fullEnvRaw} />
       </section>
 
       <section className="panel">

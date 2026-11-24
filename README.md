@@ -216,25 +216,8 @@ rows, so changing anything means editing the env and restarting.
 
 Ready-made copies live in `deploy/headless-spoke/` (`docker-compose.yml` +
 `.env.example`), and a hub shows both on its **Connect your server** page ready
-to copy with `HUB_URL` pre-filled. Equivalent compose-style example (generic
-hosts; the hub token comes from the hub's *My keys → Server token*):
-
-```yaml
-services:
-  llm-relay:
-    image: gitea.rantaeskola.fi/gizmoz/llm-relay:latest
-    ports: ["8080:8080"]   # relay port only — headless never binds the admin port
-    environment:
-      JWT_SECRET: "…openssl rand -hex 32…"
-      HEADLESS: "true"
-      BACKEND_URL: "http://engine.example.fi:8080"
-      MODEL_NAME: "qwen3-coder"
-      HUB_URL: "https://relay.example.fi"
-      HUB_TOKEN: "fed-…"
-      PRICE_IN: "100"
-      PRICE_OUT: "200"
-    volumes: ["./data:/data"]
-```
+to copy with `HUB_URL` pre-filled. A headless box needs no `JWT_SECRET` — it
+never serves the dashboard — and only exposes the relay port.
 
 Bring-up steps, how to verify on the hub and common failures:
 `docs/workflows/headless-spoke.md`.
@@ -301,7 +284,7 @@ Environment (or `.env`, see `.env.example`):
 | `PORT` / `LISTEN_ADDR` | `8080` | relay API port (host mapping) |
 | `ADMIN_PORT` / `ADMIN_ADDR` | `8081` | dashboard + `/api/*` port |
 | `DB_PATH` | `/data/llm-relay.db` | SQLite file (parent dir auto-created) |
-| `JWT_SECRET` | — **required** | dashboard JWT signing key (≥32 chars, HS256 floor; `openssl rand -hex 32`) |
+| `JWT_SECRET` | — **required** | dashboard JWT signing key (≥32 chars, HS256 floor; `openssl rand -hex 32`); **not needed when `HEADLESS=true`** — no dashboard to sign into |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | — | bootstrap admin, first run on empty DB only |
 | `TRUST_PROXY_HEADERS` | `false` | trust `X-Forwarded-For` on the relay port (set behind a reverse proxy); the login rate limiter always keys on the peer address |
 | `PUBLIC_RELAY_URL` / `PUBLIC_DASHBOARD_URL` | — | URLs shown in the dashboard copy buttons and interpolated into the agent guide; **include the scheme**, and a hostname or a plain IP:port both work (LAN hosting: `http://192.0.2.10:8080`); relay is the **root** (no `/v1` — the dashboard appends `/v1` for the OpenAI base) |
