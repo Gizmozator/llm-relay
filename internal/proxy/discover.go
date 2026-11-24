@@ -23,7 +23,16 @@ type ProbeResult struct {
 // Probe checks reachability via /health (open even when a key is required)
 // and lists model ids via /v1/models.
 func Probe(ctx context.Context, baseURL, apiKey string) ProbeResult {
-	client := &http.Client{Timeout: 8 * time.Second}
+	// Redirects are refused, not followed: the probe carries the backend's
+	// API key, and a redirect target is attacker- (or misconfiguration-)
+	// chosen — following it would hand the key to an arbitrary host. The
+	// 3xx surfaces as a plain "returned HTTP 30x" probe error instead.
+	client := &http.Client{
+		Timeout: 8 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	res := ProbeResult{Models: []string{}}
 
 	base := strings.TrimRight(baseURL, "/")

@@ -99,6 +99,12 @@ func (d *dialer) dialOnce() error {
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", url, err)
 	}
+	// Bound the socket BEFORE the handshake reads: the hub is untrusted
+	// input at this point (hello_ack has authenticated nothing), and the
+	// Conn's own SetReadLimit only lands after the handshake — the
+	// library default must not be the only cap on what a hostile hub can
+	// push into this process.
+	ws.SetReadLimit(ReadLimit)
 	ack, err := d.handshake(ws)
 	if err != nil {
 		_ = ws.Close(websocket.StatusPolicyViolation, "handshake failed")

@@ -2,7 +2,11 @@
 // All money is integer micro-units; prices are micro-units per 1M tokens.
 package pricing
 
-import "llm-relay/internal/store"
+import (
+	"math"
+
+	"llm-relay/internal/store"
+)
 
 // Tokens are the normalized token counts of one request:
 // Prompt is the TOTAL input (cached/cache-write included), matching the
@@ -25,12 +29,38 @@ type Costs struct {
 
 const million = 1_000_000
 
-// mulDiv computes tokens*price/million with round-half-up, all in int64.
+// maxComponent bounds one cost line item: four of them still sum into
+// Costs.Total without overflowing int64. Reaching it means the input was
+// absurd (hostile or corrupt token counts), not a billable request.
+const maxComponent = math.MaxInt64 / 4
+
+// mulDiv computes tokens*price/million with round-half-up. A hostile or
+// corrupt token count (upstream-reported, peer-forwarded) near int64 max
+// would wrap tokens*price into a NEGATIVE cost — free tokens and a
+// corrupted ledger sum — so the multiply is overflow-guarded in the
+// quotient domain and saturates at maxComponent instead.
 func mulDiv(tokens, price int64) int64 {
 	if tokens <= 0 || price <= 0 {
 		return 0
 	}
-	return (tokens*price + million/2) / million
+	whole, rem := tokens/million, tokens%million
+	if price > maxComponent/(whole+1) {
+		return maxComponent
+	}
+	cost := whole * price
+	if rem > 0 {
+		// rem < million, but price is admin-set and unbounded: guard the
+		// second product the same way (the +million/2 rounding term fits
+		// under the bound by construction).
+		if price > (maxComponent-cost)/(rem+1) {
+			return maxComponent
+		}
+		cost += (rem*price + million/2) / million
+	}
+	if cost > maxComponent {
+		return maxComponent
+	}
+	return cost
 }
 
 // Compute returns the cost of tok under model m's prices.

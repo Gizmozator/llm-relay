@@ -53,6 +53,18 @@ func Open(path string) (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("db chmod %s: %w", path, err)
 	}
+	// The WAL sidecars carry the same secrets as the main file (uncommitted
+	// and un-checkpointed transactions ride in -wal; -shm indexes it), so
+	// they get the same owner-only mode. They may not exist yet on a fresh
+	// database — that is not an error; a sidecar created after startup
+	// inherits the process umask, which a deployment running 0077 must fix
+	// itself.
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if err := os.Chmod(path+suffix, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
+			db.Close()
+			return nil, fmt.Errorf("db chmod %s: %w", path+suffix, err)
+		}
+	}
 	return db, nil
 }
 

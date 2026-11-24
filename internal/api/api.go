@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -139,6 +140,14 @@ func (s *Server) Login(w http.ResponseWriter, r *http.Request) {
 	}
 	user, hash, err := store.UserByName(s.DB, in.Username)
 	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			// A DB failure is not a bad password: collapsing it into 401
+			// hides an outage behind "invalid credentials" and leaves no
+			// trace in the log.
+			log.Printf("api: login user lookup failed (%q): %v", in.Username, err)
+			writeErr(w, http.StatusInternalServerError, "login unavailable")
+			return
+		}
 		// Constant-ish time: still run a bcrypt compare so a missing username
 		// cannot be distinguished by response timing.
 		_ = auth.CheckPassword(dummyHash, in.Password)
@@ -373,7 +382,9 @@ func (s *Server) RevokeKey(w http.ResponseWriter, r *http.Request, c *auth.Claim
 const maxPage = 10_000_000
 
 func usageFilter(r *http.Request, scopeUserID int64) (*store.UsageFilter, error) {
-	f := &store.UsageFilter{UserID: scopeUserID}
+	// scopeUserID == 0 is the admin all-users view (see usageScope): say so
+	// explicitly, the store refuses a silent zero scope.
+	f := &store.UsageFilter{UserID: scopeUserID, AllUsers: scopeUserID == 0}
 	// Contract default: last 30 days when a bound is omitted.
 	if v := r.URL.Query().Get("from"); v != "" {
 		if _, err := time.Parse("2006-01-02", v); err != nil {

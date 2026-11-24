@@ -104,30 +104,9 @@ func (s *Server) AdminUpdateUser(w http.ResponseWriter, r *http.Request, c *auth
 		writeErr(w, http.StatusBadRequest, "you cannot disable or demote your own account")
 		return
 	}
-	// Nor may any edit leave the system with zero enabled admins: that locks
-	// every /api/admin/* route and is unrecoverable without DB surgery.
-	if (in.Disabled != nil && *in.Disabled) || (in.Role != nil && *in.Role != "admin") {
-		target, err := store.UserByID(s.DB, id)
-		if errors.Is(err, store.ErrNotFound) {
-			writeErr(w, http.StatusNotFound, "user not found")
-			return
-		}
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "internal error")
-			return
-		}
-		if target.Role == "admin" && !target.Disabled {
-			others, err := store.CountEnabledAdminsExcept(s.DB, id)
-			if err != nil {
-				writeErr(w, http.StatusInternalServerError, "internal error")
-				return
-			}
-			if others == 0 {
-				writeErr(w, http.StatusBadRequest, "this is the last enabled admin account")
-				return
-			}
-		}
-	}
+	// The "never zero enabled admins" rule lives inside store.UpdateUser's
+	// transaction: counting here would race a concurrent demote of the only
+	// other admin (both checks pass, both edits land, no admin is left).
 	var hash *string
 	if in.Password != nil {
 		if len(*in.Password) < 8 {
@@ -150,11 +129,14 @@ func (s *Server) AdminUpdateUser(w http.ResponseWriter, r *http.Request, c *auth
 		return
 	}
 	user, err := store.UpdateUser(s.DB, id, hash, in.Disabled, in.Role, in.DisplayName, in.PriceMultiplier)
-	if err == store.ErrNotFound {
+	switch {
+	case errors.Is(err, store.ErrNotFound):
 		writeErr(w, http.StatusNotFound, "user not found")
 		return
-	}
-	if err != nil {
+	case errors.Is(err, store.ErrLastAdmin):
+		writeErr(w, http.StatusBadRequest, "this is the last enabled admin account")
+		return
+	case err != nil:
 		writeErr(w, http.StatusInternalServerError, "user update failed")
 		return
 	}
@@ -384,6 +366,7 @@ func (s *Server) AdminAddBackendModels(w http.ResponseWriter, r *http.Request, c
 		writeErr(w, http.StatusInternalServerError, "model create failed")
 		return
 	}
+	s.catalogChanged()
 	writeJSON(w, http.StatusCreated, map[string]any{"created": created, "skipped": skipped})
 }
 
@@ -497,44 +480,31 @@ func (s *Server) AdminUpdateModel(w http.ResponseWriter, r *http.Request, c *aut
 			}
 		}
 	}
-	m, err := store.UpdateModel(s.DB, id, in.Name, in.Enabled,
-		[4]*int64{in.PriceIn, in.PriceOut, in.PriceCacheRead, in.PriceCacheWrite})
-	if err == nil && in.Visibility != nil {
+	// One store transaction for the whole PATCH: the four independent calls
+	// this replaces could commit the early fields and fail on a later one,
+	// leaving a half-applied edit behind a "failed" response.
+	m, err := store.UpdateModelPatch(s.DB, id, store.ModelPatch{
+		Name:    in.Name,
+		Enabled: in.Enabled,
+		Prices:  [4]*int64{in.PriceIn, in.PriceOut, in.PriceCacheRead, in.PriceCacheWrite},
 		// Manual visibility edit (group members included: re-exposing a
 		// member is allowed, the resolution layer keeps the group in front
 		// while it serves).
-		m, err = store.UpdateModelVisibility(s.DB, id, *in.Visibility)
-	}
-	if err == nil && (in.ContextLength != nil || in.ConcurrencyLimit != nil ||
-		in.BusyThresholdPct != nil || in.BenchTokPerS != nil || in.BenchPPTokPerS != nil) {
-		if err = store.UpdateModelMeta(s.DB, id, in.ContextLength, in.ConcurrencyLimit,
-			in.BusyThresholdPct, in.BenchTokPerS, in.BenchPPTokPerS); err == nil {
-			m, err = store.ModelByID(s.DB, id)
-		}
-	}
-	if err == nil && (in.FedVisibility != nil || in.FedPeerIDs != nil) {
-		// The pair rules were validated up front; only the PATCH semantics
-		// remain: an unmentioned field does not change, so switching to
-		// allowlist without naming a list keeps the stored one (it may
-		// still hold the previous allowlist). Switching to off/all clears
-		// the list on purpose: those modes share with nobody/everybody, so
-		// a stale list would be a lie the UI could later re-apply.
-		var ids []int64
-		switch {
-		case in.FedPeerIDs != nil:
-			ids = *in.FedPeerIDs
-		case fedVis == store.FedVisAllowlist:
-			if ids, err = store.ModelFedAllowlist(s.DB, id); err != nil {
-				writeErr(w, http.StatusInternalServerError, "internal error")
-				return
-			}
-		}
-		if err = store.SetModelFedVisibility(s.DB, id, fedVis, ids); err == nil {
-			m, err = store.ModelByID(s.DB, id)
-		}
-	}
+		Visibility:       in.Visibility,
+		ContextLength:    in.ContextLength,
+		ConcurrencyLimit: in.ConcurrencyLimit,
+		BusyThresholdPct: in.BusyThresholdPct,
+		BenchTokPerS:     in.BenchTokPerS,
+		BenchPPTokPerS:   in.BenchPPTokPerS,
+		// The fed pair was validated up front; the store keeps the PATCH
+		// semantics: an unmentioned list does not change (switching to
+		// allowlist keeps the stored one), switching to off/all clears it
+		// on purpose.
+		FedVisibility: fedVis,
+		FedPeerIDs:    in.FedPeerIDs,
+	})
 	switch {
-	case err == store.ErrNotFound:
+	case errors.Is(err, store.ErrNotFound):
 		writeErr(w, http.StatusNotFound, "model not found")
 	case errors.Is(err, store.ErrConflict):
 		writeErr(w, http.StatusConflict, "model name taken")
@@ -882,6 +852,8 @@ func writeGroupErr(w http.ResponseWriter, err error, fallback string) {
 		writeErr(w, http.StatusBadRequest, "invalid group name")
 	case errors.Is(err, store.ErrExists):
 		writeErr(w, http.StatusConflict, "group name taken")
+	case errors.Is(err, store.ErrNoEligibleMember):
+		writeErr(w, http.StatusConflict, "cannot enable a group with no eligible members")
 	case errors.Is(err, store.ErrConflict):
 		writeErr(w, http.StatusConflict, "model already belongs to a group")
 	case errors.Is(err, store.ErrNotFound):
@@ -1034,10 +1006,12 @@ func (s *Server) AdminUpdateGroup(w http.ResponseWriter, r *http.Request, c *aut
 			})
 		}
 	}
-	// Mirror the store's enable rule (writing enabled=1 requires ≥1 member,
-	// regardless of the previous state) so the rejection carries its own
-	// fixed string instead of the generic conflict one. Checking only the
-	// transition would let an already-enabled empty group echo
+	// Mirror the store's enable rule (writing enabled=1 requires at least
+	// one member, regardless of the previous state) so the empty case
+	// carries its own fixed string. A group with members that all fail the
+	// store's stricter eligibility rule (model and backend enabled) is
+	// rejected by the store's ErrNoEligibleMember instead. Checking only
+	// the transition would let an already-enabled empty group echo
 	// {"enabled":true} through to the store and surface the wrong message.
 	if in.Enabled != nil && *in.Enabled {
 		n := cur.MemberCount
@@ -1053,6 +1027,10 @@ func (s *Server) AdminUpdateGroup(w http.ResponseWriter, r *http.Request, c *aut
 		writeGroupErr(w, err, "group update failed")
 		return
 	}
+	// The write is durable from here on: announce it before the read-back,
+	// so a read-back failure cannot swallow the catalog change (peers must
+	// learn the new group state even when the echo fails).
+	s.catalogChanged()
 	g, members2, err := store.GetGroup(s.DB, id)
 	if err != nil {
 		// The mutation already committed: a read-back failure must not be
@@ -1062,7 +1040,6 @@ func (s *Server) AdminUpdateGroup(w http.ResponseWriter, r *http.Request, c *aut
 		writeGroupErr(w, err, "group updated; read-back failed")
 		return
 	}
-	s.catalogChanged()
 	writeJSON(w, http.StatusOK, groupViewOf(g, members2))
 }
 

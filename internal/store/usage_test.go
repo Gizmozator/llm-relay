@@ -38,7 +38,7 @@ func TestLiveBucketsFixedClock(t *testing.T) {
 	seed("2026-11-21T14:03:59Z", 7, 2, 50)   // last bucket
 	seed("2026-11-21T14:04:00Z", 9, 9, 9)    // future minute, outside labels
 
-	buckets, err := store.LiveBuckets(d, &store.UsageFilter{}, now, 5)
+	buckets, err := store.LiveBuckets(d, &store.UsageFilter{AllUsers: true}, now, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +95,7 @@ func TestBusyByModelFixedClock(t *testing.T) {
 	seed("2026-11-21T14:01:00Z", 0, "m-a")       // zero latency contributes nothing
 	seed("2026-11-21T14:02:30Z", 30_000, "m-b")  // fully inside 14:02
 
-	busy, err := store.BusyByModel(d, &store.UsageFilter{}, now, 5)
+	busy, err := store.BusyByModel(d, &store.UsageFilter{AllUsers: true}, now, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +233,7 @@ func TestSummarizeUsageModelGroupRollup(t *testing.T) {
 	seed(11, "pool", "qwen:slow", 50, 5)
 	seed(12, "solo", "other:1", 7, 7)
 
-	totals, groups, err := store.SummarizeUsage(d, &store.UsageFilter{}, "model")
+	totals, groups, err := store.SummarizeUsage(d, &store.UsageFilter{AllUsers: true}, "model")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +255,7 @@ func TestSummarizeUsageModelGroupRollup(t *testing.T) {
 
 	// The detail rows keep the per-request identity: the group name as
 	// requested, the member's upstream id for distinguishing members.
-	total, rows, err := store.UsageDetail(d, &store.UsageFilter{}, 1, 10)
+	total, rows, err := store.UsageDetail(d, &store.UsageFilter{AllUsers: true}, 1, 10)
 	if err != nil {
 		t.Fatal(err)
 	}

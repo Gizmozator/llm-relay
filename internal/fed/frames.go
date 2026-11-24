@@ -38,9 +38,10 @@ const (
 
 // MaxBody caps the raw bytes of one tunneled body frame: a request body
 // (Req) or one response chunk (ResBody). The wire form is base64 (~4/3 of
-// raw), and base64 of 3 MiB is exactly the 4 MiB ReadLimit, so the cap sits
-// a page below 3 MiB to leave room for the JSON envelope — a peer that
-// honors MaxBody can never produce a frame the read pump refuses.
+// raw), so base64(MaxBody) lands just under 4 MiB; ReadLimit (see conn.go)
+// leaves room on top for the JSON envelope and a full head of forwarded
+// headers — a peer that honors MaxBody can never produce a frame the read
+// pump refuses.
 const MaxBody = 3<<20 - 4<<10
 
 // Frame is a decoded protocol frame. Every type carries its tag so a

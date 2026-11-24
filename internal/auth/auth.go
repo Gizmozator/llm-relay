@@ -67,6 +67,9 @@ type Claims struct {
 
 // SignToken issues an HS256 JWT valid for the given duration.
 func SignToken(secret string, userID int64, role string, ttl time.Duration) (string, error) {
+	if len(secret) < minSecretLen {
+		return "", ErrWeakSecret
+	}
 	claims := Claims{
 		UserID: userID,
 		Role:   role,
@@ -80,8 +83,22 @@ func SignToken(secret string, userID int64, role string, ttl time.Duration) (str
 
 var ErrBadToken = errors.New("bad token")
 
+// ErrWeakSecret refuses to sign or verify with a secret below the HS256
+// floor. The config boundary enforces the same length, but the auth
+// package is the last line: a short secret makes tokens offline-
+// bruteforceable, and no caller should be able to bypass the check by
+// constructing a Server (or a test) directly.
+var ErrWeakSecret = fmt.Errorf("jwt secret must be at least %d bytes", minSecretLen)
+
+// minSecretLen is RFC 7518's floor for HS256: the key must be at least as
+// long as the hash output (32 bytes).
+const minSecretLen = 32
+
 // ParseToken verifies a dashboard JWT and returns its claims.
 func ParseToken(secret, token string) (*Claims, error) {
+	if len(secret) < minSecretLen {
+		return nil, ErrWeakSecret
+	}
 	claims := &Claims{}
 	parsed, err := jwt.ParseWithClaims(token, claims, func(t *jwt.Token) (any, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {

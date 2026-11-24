@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"llm-relay/internal/auth"
 	"llm-relay/internal/proxy"
@@ -263,5 +264,86 @@ func TestUtilizationAdvertisedCatalogEdges(t *testing.T) {
 	}
 	if len(adm["m-three"]) != 1 {
 		t.Errorf("admin missing the disabled group's member: %v", adm)
+	}
+}
+
+// Pool verdict is per SERVABLE MEMBER, not a sum of name-keyed busy pcts.
+// The old math summed the group-name and member-name pcts against one
+// per-model threshold, so a 4-member pool at 25 % each read 4×25 = 100 %
+// ≥ 80 → busy while every member was free. New rule: busy iff EVERY
+// servable member sits at or above its own threshold (HRW routes new
+// sessions to the quiet members), and UtilizationPct reports the MAX
+// per-member load (group-name busy split equally across servable members
+// plus each member's own-name busy).
+func TestUtilizationPoolVerdictPerMember(t *testing.T) {
+	h := newHarness(t, agentUpstream())
+	yes := true
+	g, err := store.CreateGroup(h.db, "pool4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := []string{"p-one", "p-two", "p-three", "p-four"}
+	var inputs []store.GroupMemberInput
+	for i, n := range names {
+		m, err := store.CreateModel(h.db, 1, "up-"+n, n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		inputs = append(inputs, store.GroupMemberInput{ModelID: m.ID, Position: i})
+	}
+	if _, err := store.UpdateGroup(h.db, g.ID, nil, &yes, inputs); err != nil {
+		t.Fatal(err)
+	}
+	pool := func() proxy.ModelStatus {
+		rows := utilNames(t, h, h.key)["pool4"]
+		if len(rows) != 1 {
+			t.Fatalf("pool4 rows = %v, want exactly one", rows)
+		}
+		return rows[0]
+	}
+	// One completed stream of the given duration (busy ms) under a name,
+	// inside the 5-minute window: 75 s ≈ 25 %, 270 s ≈ 90 %, 30 s ≈ 10 %.
+	busyRow := func(name string, ms int64) {
+		if err := store.InsertUsage(h.db, &store.UsageEvent{
+			TS: time.Now().UTC().Format(time.RFC3339), UserID: 1, KeyID: 1,
+			Endpoint: "/v1/chat/completions", ModelRequ: name,
+			LatencyMS: ms, Status: 200,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	clearUsage := func() {
+		if _, err := h.db.Exec(`DELETE FROM usage_log`); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// 1. Every member 25 % busy: all free ⇒ the pool takes sessions.
+	// (Old math: 4×25 = 100 ≥ 80 → busy.)
+	for _, n := range names {
+		busyRow(n, 75_000)
+	}
+	if p := pool(); p.Status != "free" || p.UtilizationPct >= 80 {
+		t.Errorf("every member 25%%: pool = %+v, want free with max-member pct < 80", p)
+	}
+
+	// 2. One member 90 %, the rest 10 %: the quiet members can still take
+	// the session → free; the hot member's load is still reported.
+	clearUsage()
+	busyRow(names[0], 270_000)
+	for _, n := range names[1:] {
+		busyRow(n, 30_000)
+	}
+	if p := pool(); p.Status != "free" || p.UtilizationPct < 90 {
+		t.Errorf("one member 90%%: pool = %+v, want free with pct >= 90 (max member)", p)
+	}
+
+	// 3. Every member at or above the threshold: nowhere to route → busy.
+	clearUsage()
+	for _, n := range names {
+		busyRow(n, 270_000)
+	}
+	if p := pool(); p.Status != "busy" {
+		t.Errorf("every member 90%%: pool = %+v, want busy", p)
 	}
 }

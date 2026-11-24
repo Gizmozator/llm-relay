@@ -167,14 +167,26 @@ func CreatePeer(db *sql.DB, name string, ownerUserID int64) (*Peer, string, erro
 	if err != nil {
 		return nil, "", err
 	}
-	res, err := db.Exec(`INSERT INTO peers(name, owner_user_id, key_hash, created_at) VALUES(?,?,?,?)`,
+	// INSERT and read-back in ONE transaction: with separate statements a
+	// transient read-back error returned "failure" to the caller after the
+	// row was already durable — the retry created a second peer. Inside the
+	// tx a failed read-back rolls the insert back too.
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, "", err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`INSERT INTO peers(name, owner_user_id, key_hash, created_at) VALUES(?,?,?,?)`,
 		name, ownerUserID, hash, now())
 	if err != nil {
 		return nil, "", err
 	}
 	id, _ := res.LastInsertId()
-	p, err := PeerByID(db, id)
+	p, err := peerByIDQ(tx, id)
 	if err != nil {
+		return nil, "", err
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, "", err
 	}
 	// The raw token is returned exactly once (create/rotate responses);
@@ -182,13 +194,22 @@ func CreatePeer(db *sql.DB, name string, ownerUserID int64) (*Peer, string, erro
 	return p, plain, nil
 }
 
-func PeerByID(db *sql.DB, id int64) (*Peer, error) {
-	p, err := scanPeer(db.QueryRow(`SELECT `+peerCols+`, `+sharedModelsExpr+`
+// queryRower lets a peer read run on the db or on an open tx.
+type queryRower interface {
+	QueryRow(string, ...any) *sql.Row
+}
+
+func peerByIDQ(q queryRower, id int64) (*Peer, error) {
+	p, err := scanPeer(q.QueryRow(`SELECT `+peerCols+`, `+sharedModelsExpr+`
 		FROM peers p JOIN users u ON u.id=p.owner_user_id WHERE p.id=?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	return p, err
+}
+
+func PeerByID(db *sql.DB, id int64) (*Peer, error) {
+	return peerByIDQ(db, id)
 }
 
 // GetPeerByKeyHash resolves a server token for auth. Same contract as
@@ -343,6 +364,13 @@ func SetModelFedVisibility(db *sql.DB, modelID int64, visibility string, peerIDs
 		return err
 	}
 	defer tx.Rollback()
+	if err := setModelFedVisibilityTx(tx, modelID, visibility, peerIDs); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func setModelFedVisibilityTx(tx *sql.Tx, modelID int64, visibility string, peerIDs []int64) error {
 	res, err := tx.Exec(`UPDATE models SET fed_visibility=? WHERE id=?`, visibility, modelID)
 	if err != nil {
 		return err
@@ -370,13 +398,21 @@ func SetModelFedVisibility(db *sql.DB, modelID int64, visibility string, peerIDs
 			}
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 // ModelFedAllowlist returns the peer ids a model is shared with (the
 // allowlist side; empty for 'off'/'all').
 func ModelFedAllowlist(db *sql.DB, modelID int64) ([]int64, error) {
-	rows, err := db.Query(`SELECT peer_id FROM fed_allowlist WHERE model_id=? ORDER BY peer_id`, modelID)
+	return modelFedAllowlistTx(db, modelID)
+}
+
+// modelFedAllowlistTx reads the allowlist on any query executor (db or tx),
+// so UpdateModelPatch can pick up the stored list inside its transaction.
+func modelFedAllowlistTx(q interface {
+	Query(string, ...any) (*sql.Rows, error)
+}, modelID int64) ([]int64, error) {
+	rows, err := q.Query(`SELECT peer_id FROM fed_allowlist WHERE model_id=? ORDER BY peer_id`, modelID)
 	if err != nil {
 		return nil, err
 	}

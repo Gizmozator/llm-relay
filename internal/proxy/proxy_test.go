@@ -98,7 +98,7 @@ func (h *harness) usageRow(t *testing.T) store.UsageRow {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		_, rows, err := store.UsageDetail(h.db, &store.UsageFilter{}, 1, 10)
+		_, rows, err := store.UsageDetail(h.db, &store.UsageFilter{AllUsers: true}, 1, 10)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -297,7 +297,7 @@ func TestProxyCountTokensNotLogged(t *testing.T) {
 	resp := h.post(t, "/v1/messages/count_tokens", `{"model":"pub-model","messages":[]}`, nil)
 	resp.Body.Close()
 	h.rec.Close(2 * time.Second)
-	_, rows, _ := store.UsageDetail(h.db, &store.UsageFilter{}, 1, 10)
+	_, rows, _ := store.UsageDetail(h.db, &store.UsageFilter{AllUsers: true}, 1, 10)
 	if len(rows) != 0 {
 		t.Errorf("count_tokens must not log usage, got %d rows", len(rows))
 	}
@@ -350,7 +350,7 @@ func TestProxyStreamingCapturesUsage(t *testing.T) {
 	var rows []store.UsageRow
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		_, rows, _ = store.UsageDetail(d, &store.UsageFilter{}, 1, 10)
+		_, rows, _ = store.UsageDetail(d, &store.UsageFilter{AllUsers: true}, 1, 10)
 		if len(rows) == 1 || time.Now().After(deadline) {
 			break
 		}

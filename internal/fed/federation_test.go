@@ -1092,3 +1092,78 @@ func TestFederatedGroupLocalFirst(t *testing.T) {
 }
 
 func ptrBool(b bool) *bool { return &b }
+
+// The transit pump must watch the TARGET's channel too, not just the
+// requester's: the response channel lives on the target's Conn, and a
+// request channel receives no sentinel when its Conn dies (OpenRequest
+// contract). Before the fix a target channel death mid-stream left the
+// pump blocked on <-ch forever — leaked goroutine, leaked in-flight slot,
+// leaked transit registration, and the requester hanging with it. Now the
+// pump notices, closes the requester's stream with an error, and releases
+// its slot/registration on the way out.
+func TestTransitTargetDeathUnblocksRequester(t *testing.T) {
+	hub := newRelay(t, "hub")
+	hub.becomeHub()
+	pa, tokA := hub.enroll("spoke-a")
+	pb, tokB := hub.enroll("spoke-b")
+	hub.serveConnect()
+
+	spokeB := newRelay(t, "spoke-b")
+	e := newEngine(t, "spoke-b", 3*time.Second) // slow: holds the transit open
+	spokeB.shareLocalEngine("slowgamma", e)
+	spokeB.becomeSpoke(hub.srv.URL, tokB)
+	poll(t, "B online", func() bool { return hub.mgr.Online(pb.ID) })
+
+	spokeA := newRelay(t, "spoke-a")
+	spokeA.becomeSpoke(hub.srv.URL, tokA)
+	poll(t, "A online", func() bool { return hub.mgr.Online(pa.ID) })
+	poll(t, "slowgamma relayed to A", func() bool {
+		return countRows(spokeA.db, `SELECT COUNT(*) FROM models m JOIN backends b ON b.id=m.backend_id
+			WHERE m.name='slowgamma' AND b.base_url=?`, store.PeerBackendURL(pb.ID)) == 1
+	})
+
+	// Fire A→hub→B off the test goroutine: before the fix this request
+	// never returns, so the test bounds it with a select instead of
+	// letting the suite hang.
+	type res struct {
+		status int
+		body   string
+		err    error
+	}
+	done := make(chan res, 1)
+	go func() {
+		req, _ := http.NewRequest("POST", spokeA.srv.URL+"/v1/chat/completions",
+			strings.NewReader(`{"model":"slowgamma","messages":[{"role":"user","content":"hello"}]}`))
+		req.Header.Set("Authorization", "Bearer "+spokeA.key)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			done <- res{err: err}
+			return
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		done <- res{resp.StatusCode, string(b), nil}
+	}()
+
+	// The request is mid-generation on B when the hub drops B's channel.
+	poll(t, "B engine hit", func() bool { return spokeB.engineHits("slowgamma") == 1 })
+	hub.mgr.KickPeer(pb.ID, "test-target-death")
+
+	select {
+	case r := <-done:
+		if r.err != nil {
+			t.Fatalf("requester request errored: %v", r.err)
+		}
+		if r.status == 200 {
+			t.Fatalf("transit returned 200 after target death, want an error: %s", r.body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("requester still hanging: the transit pump did not notice the target channel death")
+	}
+	// The aborted transit must not be metered on the hub (no double-entry
+	// pair for a request that never completed).
+	if n := countRows(hub.db, `SELECT COUNT(*) FROM usage_log WHERE model_requested='slowgamma'`); n != 0 {
+		t.Errorf("hub metered %d rows for the aborted transit, want 0", n)
+	}
+}

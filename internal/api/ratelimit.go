@@ -4,8 +4,8 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"sort"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 )
@@ -17,7 +17,6 @@ import (
 type loginLimiter struct {
 	mu      sync.Mutex
 	buckets map[string]*bucket
-	lastGC  time.Time
 }
 
 type bucket struct {
@@ -28,12 +27,11 @@ type bucket struct {
 const (
 	burstTokens    = 10              // allowed consecutive failures
 	refillInterval = 5 * time.Second // one retry credit per interval
-	maxBuckets     = 1024            // GC threshold
-	gcInterval     = 10 * time.Minute
+	maxBuckets     = 1024            // hard cap on live buckets (GC-driven)
 )
 
 func newLoginLimiter() *loginLimiter {
-	return &loginLimiter{buckets: make(map[string]*bucket), lastGC: time.Now()}
+	return &loginLimiter{buckets: make(map[string]*bucket)}
 }
 
 // allow consumes one token for key, reporting whether the attempt may run
@@ -41,13 +39,35 @@ func newLoginLimiter() *loginLimiter {
 func (l *loginLimiter) allow(key string, now time.Time) (bool, time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if len(l.buckets) > maxBuckets && now.Sub(l.lastGC) > gcInterval {
+	// Size-driven GC. The old condition also required a minimum interval,
+	// so between sweeps the map could grow far past the cap (every new
+	// client address leaves a bucket). Expired buckets — idle longer than
+	// the full refill window, so they can no longer hold credits — go
+	// first; if live ones alone still exceed the cap, evict the
+	// least-recently-seen until it fits. That makes maxBuckets a hard
+	// bound: a wave of distinct addresses cannot balloon the map.
+	if len(l.buckets) > maxBuckets {
 		for k, b := range l.buckets {
 			if now.Sub(b.last) > burstTokens*refillInterval {
 				delete(l.buckets, k)
 			}
 		}
-		l.lastGC = now
+		// Evict down to maxBuckets-1 so the bucket this call is about to
+		// create still fits: maxBuckets stays a hard bound.
+		if over := len(l.buckets) - maxBuckets + 1; over > 0 {
+			type keyed struct {
+				key string
+				b   *bucket
+			}
+			all := make([]keyed, 0, len(l.buckets))
+			for k, b := range l.buckets {
+				all = append(all, keyed{k, b})
+			}
+			sort.Slice(all, func(i, j int) bool { return all[i].b.last.Before(all[j].b.last) })
+			for _, e := range all[:over] {
+				delete(l.buckets, e.key)
+			}
+		}
 	}
 	b := l.buckets[key]
 	if b == nil {
@@ -74,8 +94,8 @@ func (l *loginLimiter) reset(key string) {
 }
 
 // RateLimitLogin wraps a login handler with the per-client limiter.
-// X-Forwarded-For is trusted here on purpose: the dashboard runs behind a
-// reverse proxy, and without it every user would share one bucket.
+// The client is identified by the peer address only — see clientKey for
+// why X-Forwarded-For is deliberately not consulted here.
 func (s *Server) RateLimitLogin(next func(http.ResponseWriter, *http.Request)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		key := clientKey(r)
@@ -93,14 +113,17 @@ func (s *Server) RateLimitLogin(next func(http.ResponseWriter, *http.Request)) h
 	})
 }
 
-// clientKey extracts the client address: first XFF entry (trusted proxy) or
-// the peer host.
+// clientKey extracts the client address for the login limiter: the peer
+// host only. X-Forwarded-For is deliberately NOT consulted: the admin
+// listener has no trusted-proxy setting (unlike the /v1 relay side, which
+// gates XFF behind TrustProxyHeaders), so any XFF header here is
+// client-forgeable — trusting it let an attacker mint one fresh bucket per
+// spoofed value, defeating the password-guessing/bcrypt-amplification
+// guard and growing the bucket map at will. If the dashboard is ever put
+// behind a reverse proxy, add a trusted-proxy setting first; do not
+// re-enable XFF parsing here. (Trade-off accepted: behind an unconfigured
+// proxy all users share one bucket.)
 func clientKey(r *http.Request) string {
-	if xf := r.Header.Get("X-Forwarded-For"); xf != "" {
-		if first, _, _ := strings.Cut(xf, ","); first != "" {
-			return strings.TrimSpace(first)
-		}
-	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr

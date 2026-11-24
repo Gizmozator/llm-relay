@@ -23,6 +23,9 @@ var (
 	// shape) — the caller's request was malformed, nothing clashed.
 	// Handlers map it to 400.
 	ErrInvalid = errors.New("invalid input")
+	// ErrLastAdmin marks a user update that would leave the system with no
+	// enabled admin (UpdateUser). Handlers map it to 400.
+	ErrLastAdmin = errors.New("last enabled admin")
 )
 
 func now() string { return time.Now().UTC().Format(time.RFC3339) }
@@ -118,15 +121,23 @@ func ListUsers(db *sql.DB) ([]User, error) {
 	return out, rows.Err()
 }
 
-// isUniqueErr reports whether err is a UNIQUE constraint violation. The
-// typed driver check is primary; the substring match stays as a fallback so
-// wrapped or driver-agnostic errors are still classified.
+// isUniqueErr reports whether err is a UNIQUE (or PRIMARY KEY) constraint
+// violation. The typed driver check is primary; the substring match stays as
+// a fallback so wrapped or driver-agnostic errors are still classified.
+// The driver reports EXTENDED codes: FK (787), CHECK (275) and NOT NULL
+// (1299) violations share the primary code 19 with UNIQUE (2067) and PK
+// (1555), so a bare-19 match would misread them as "name taken" — only the
+// two unique-flavoured extended codes count, and any other 19-family code is
+// decided by its message instead.
 func isUniqueErr(err error) bool {
 	var serr *sqlite.Error
 	if errors.As(err, &serr) {
 		switch serr.Code() {
-		case 19, 2067: // SQLITE_CONSTRAINT, SQLITE_CONSTRAINT_UNIQUE
+		case 2067, 1555: // SQLITE_CONSTRAINT_UNIQUE, SQLITE_CONSTRAINT_PRIMARYKEY
 			return true
+		}
+		if serr.Code()&0xff == 19 { // SQLITE_CONSTRAINT family, not unique
+			return false
 		}
 	}
 	return strings.Contains(err.Error(), "UNIQUE")
@@ -139,6 +150,30 @@ func UpdateUser(db *sql.DB, id int64, passwordHash *string, disabled *bool, role
 		return nil, err
 	}
 	defer tx.Rollback()
+	// Last-admin guard inside this transaction: a count taken outside could
+	// pass while a concurrent request demotes the only other enabled admin
+	// (TOCTOU), and the two edits together would leave zero admins. The
+	// write tx (_txlock=immediate) serializes against the concurrent one.
+	if (disabled != nil && *disabled) || (role != nil && *role != "admin") {
+		var curRole string
+		var curDisabled int
+		err := tx.QueryRow(`SELECT role, disabled FROM users WHERE id=?`, id).Scan(&curRole, &curDisabled)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		if err != nil {
+			return nil, err
+		}
+		if curRole == "admin" && curDisabled == 0 {
+			var others int
+			if err := tx.QueryRow(`SELECT COUNT(*) FROM users WHERE role='admin' AND disabled=0 AND id<>?`, id).Scan(&others); err != nil {
+				return nil, err
+			}
+			if others == 0 {
+				return nil, ErrLastAdmin
+			}
+		}
+	}
 	if priceMultiplier != nil {
 		if _, err := tx.Exec(`UPDATE users SET price_multiplier=? WHERE id=?`, *priceMultiplier, id); err != nil {
 			return nil, err
@@ -178,14 +213,6 @@ func UpdateUser(db *sql.DB, id int64, passwordHash *string, disabled *bool, role
 func UserCount(db *sql.DB) (int, error) {
 	var n int
 	err := db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&n)
-	return n, err
-}
-
-// CountEnabledAdminsExcept counts enabled admins other than excludeID.
-// AdminUpdateUser uses it to refuse removing the last one.
-func CountEnabledAdminsExcept(db *sql.DB, excludeID int64) (int, error) {
-	var n int
-	err := db.QueryRow(`SELECT COUNT(*) FROM users WHERE role='admin' AND disabled=0 AND id<>?`, excludeID).Scan(&n)
 	return n, err
 }
 
@@ -674,6 +701,14 @@ func UpdateModelMeta(db *sql.DB, id int64, contextLength, concurrencyLimit, busy
 		return err
 	}
 	defer tx.Rollback()
+	if err := updateModelMetaTx(tx, id, contextLength, concurrencyLimit, busyThresholdPct,
+		benchTokPerS, benchPPTokPerS); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func updateModelMetaTx(tx *sql.Tx, id int64, contextLength, concurrencyLimit, busyThresholdPct *int64, benchTokPerS, benchPPTokPerS *float64) error {
 	if contextLength != nil {
 		if _, err := tx.Exec(`UPDATE models SET context_length=? WHERE id=?`, *contextLength, id); err != nil {
 			return err
@@ -699,7 +734,7 @@ func UpdateModelMeta(db *sql.DB, id int64, contextLength, concurrencyLimit, busy
 			return err
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 // UpdateModelBench stores the latest benchmark result for a model. A nil PP
@@ -786,6 +821,16 @@ func UpdateModel(db *sql.DB, id int64, name *string, enabled *bool, prices [4]*i
 		return nil, err
 	}
 	defer tx.Rollback()
+	if err := updateModelTx(tx, id, name, enabled, prices); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return ModelByID(db, id)
+}
+
+func updateModelTx(tx *sql.Tx, id int64, name *string, enabled *bool, prices [4]*int64) error {
 	if name != nil {
 		// No-op rename (the UI PUT echoes the current name) must not trip
 		// the group guard: a member model legitimately carries the group's
@@ -794,19 +839,19 @@ func UpdateModel(db *sql.DB, id int64, name *string, enabled *bool, prices [4]*i
 		var cur string
 		if err := tx.QueryRow(`SELECT name FROM models WHERE id=?`, id).Scan(&cur); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
-				return nil, ErrNotFound
+				return ErrNotFound
 			}
-			return nil, err
+			return err
 		}
 		if *name != cur {
 			if err := assertNoGroupName(tx, *name); err != nil {
-				return nil, err
+				return err
 			}
 			if _, err := tx.Exec(`UPDATE models SET name=? WHERE id=?`, *name, id); err != nil {
 				if isUniqueErr(err) {
-					return nil, fmt.Errorf("%w: model name taken", ErrConflict)
+					return fmt.Errorf("%w: model name taken", ErrConflict)
 				}
-				return nil, err
+				return err
 			}
 		}
 	}
@@ -816,7 +861,7 @@ func UpdateModel(db *sql.DB, id int64, name *string, enabled *bool, prices [4]*i
 			v = 1
 		}
 		if _, err := tx.Exec(`UPDATE models SET enabled=? WHERE id=?`, v, id); err != nil {
-			return nil, err
+			return err
 		}
 	}
 	cols := []string{"price_in", "price_out", "price_cache_read", "price_cache_write"}
@@ -824,14 +869,11 @@ func UpdateModel(db *sql.DB, id int64, name *string, enabled *bool, prices [4]*i
 		if p != nil {
 			q := fmt.Sprintf(`UPDATE models SET %s=? WHERE id=?`, cols[i])
 			if _, err := tx.Exec(q, *p, id); err != nil {
-				return nil, err
+				return err
 			}
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-	return ModelByID(db, id)
+	return nil
 }
 
 // UpdateModelVisibility is the manual visibility editor (admin API): it
@@ -845,12 +887,94 @@ func UpdateModelVisibility(db *sql.DB, id int64, visibility string) (*Model, err
 	if visibility != "public" && visibility != "internal" {
 		return nil, fmt.Errorf("%w: visibility must be public or internal", ErrInvalid)
 	}
-	res, err := db.Exec(`UPDATE models SET visibility=? WHERE id=?`, visibility, id)
+	tx, err := db.Begin()
 	if err != nil {
 		return nil, err
 	}
+	defer tx.Rollback()
+	if err := updateModelVisibilityTx(tx, id, visibility); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return ModelByID(db, id)
+}
+
+func updateModelVisibilityTx(tx *sql.Tx, id int64, visibility string) error {
+	res, err := tx.Exec(`UPDATE models SET visibility=? WHERE id=?`, visibility, id)
+	if err != nil {
+		return err
+	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return nil, ErrNotFound
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ModelPatch carries every field the admin model PATCH can touch. Nil
+// pointers (and FedVisibility == "") leave the field unchanged.
+type ModelPatch struct {
+	Name             *string
+	Enabled          *bool
+	Prices           [4]*int64
+	Visibility       *string
+	ContextLength    *int64
+	ConcurrencyLimit *int64
+	BusyThresholdPct *int64
+	BenchTokPerS     *float64
+	BenchPPTokPerS   *float64
+	FedVisibility    string
+	FedPeerIDs       *[]int64
+}
+
+// UpdateModelPatch applies a whole admin PATCH in ONE transaction: the
+// separate per-field calls it replaces could commit the early fields and
+// fail on a later one, leaving a half-applied edit the client was told
+// failed. Error taxonomy is the same as the individual calls.
+func UpdateModelPatch(db *sql.DB, id int64, p ModelPatch) (*Model, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if err := updateModelTx(tx, id, p.Name, p.Enabled, p.Prices); err != nil {
+		return nil, err
+	}
+	if p.Visibility != nil {
+		if *p.Visibility != "public" && *p.Visibility != "internal" {
+			return nil, fmt.Errorf("%w: visibility must be public or internal", ErrInvalid)
+		}
+		if err := updateModelVisibilityTx(tx, id, *p.Visibility); err != nil {
+			return nil, err
+		}
+	}
+	if err := updateModelMetaTx(tx, id, p.ContextLength, p.ConcurrencyLimit,
+		p.BusyThresholdPct, p.BenchTokPerS, p.BenchPPTokPerS); err != nil {
+		return nil, err
+	}
+	if p.FedVisibility != "" {
+		// PATCH semantics for the allowlist pair: an unmentioned list does
+		// not change, so switching to allowlist without naming one keeps the
+		// stored list (it may still hold the previous allowlist). Switching
+		// to off/all clears it on purpose: those modes share with
+		// nobody/everybody, so a stale list would be a lie the UI could
+		// later re-apply.
+		var ids []int64
+		switch {
+		case p.FedPeerIDs != nil:
+			ids = *p.FedPeerIDs
+		case p.FedVisibility == FedVisAllowlist:
+			if ids, err = modelFedAllowlistTx(tx, id); err != nil {
+				return nil, err
+			}
+		}
+		if err := setModelFedVisibilityTx(tx, id, p.FedVisibility, ids); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
 	}
 	return ModelByID(db, id)
 }

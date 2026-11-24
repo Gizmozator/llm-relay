@@ -14,6 +14,12 @@ import (
 	"strings"
 )
 
+// ErrNoEligibleMember marks an enable request for a group whose members
+// cannot serve (every member's model or backend is disabled). It wraps
+// ErrConflict so callers matching the general clash sentinel still see it;
+// handlers map it to 409 with its own message.
+var ErrNoEligibleMember = fmt.Errorf("%w: no eligible group member", ErrConflict)
+
 // ---------------------------------------------------------------- groups
 
 type Group struct {
@@ -299,26 +305,30 @@ func UpdateGroup(db *sql.DB, id int64, name *string, enabled *bool, members []Gr
 		}
 	}
 	// Departed members (populated only when this call replaces membership):
-	// exempt from the post-condition name check below.
-	was := map[int64]bool{}
+	// exempt from the post-condition name check below. Values are the
+	// pre-join visibility each row carried, so a departure restores it.
+	was := map[int64]string{}
 	if members != nil {
 		// Membership determines visibility: a member row is hidden from
 		// /v1/models (the group owns the public name) but stays directly
-		// requestable; leaving a group restores public. The admin API also
-		// has a manual editor (UpdateModelVisibility), so "internal and
+		// requestable; leaving a group restores the visibility the row had
+		// when it joined (recorded on the membership row), so a model an
+		// admin had hidden by hand stays hidden. The admin API also has a
+		// manual editor (UpdateModelVisibility), so "internal and
 		// memberless" can now also mean "admin hid it by hand"; either way
 		// the next membership write re-asserts the rule above.
-		rows, err := tx.Query(`SELECT model_id FROM model_group_members WHERE group_id=?`, id)
+		rows, err := tx.Query(`SELECT model_id, prev_visibility FROM model_group_members WHERE group_id=?`, id)
 		if err != nil {
 			return nil, err
 		}
 		for rows.Next() {
 			var mid int64
-			if err := rows.Scan(&mid); err != nil {
+			var prev string
+			if err := rows.Scan(&mid, &prev); err != nil {
 				rows.Close()
 				return nil, err
 			}
-			was[mid] = true
+			was[mid] = prev
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
@@ -333,12 +343,21 @@ func UpdateGroup(db *sql.DB, id int64, name *string, enabled *bool, members []Gr
 				return nil, fmt.Errorf("%w: model %d listed twice", ErrConflict, mem.ModelID)
 			}
 			seen[mem.ModelID] = true
-			var ok int
-			if err := tx.QueryRow(`SELECT COUNT(*) FROM models WHERE id=?`, mem.ModelID).Scan(&ok); err != nil {
+			var vis string
+			err := tx.QueryRow(`SELECT visibility FROM models WHERE id=?`, mem.ModelID).Scan(&vis)
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil, fmt.Errorf("%w: model %d", ErrNotFound, mem.ModelID)
+			}
+			if err != nil {
 				return nil, err
 			}
-			if ok == 0 {
-				return nil, fmt.Errorf("%w: model %d", ErrNotFound, mem.ModelID)
+			// Pre-join visibility: a model that was already a member of
+			// THIS group carries its stored record across the wholesale
+			// replace (its current 'internal' is the previous flip, not a
+			// pre-join state); a fresh join records what it is right now.
+			prev, carried := was[mem.ModelID]
+			if !carried {
+				prev = vis
 			}
 			// Omitted (Go zero value) or non-positive weight normalizes to
 			// the default 1: a 0 weight would silently remove the member
@@ -347,8 +366,8 @@ func UpdateGroup(db *sql.DB, id int64, name *string, enabled *bool, members []Gr
 			if w <= 0 {
 				w = 1
 			}
-			if _, err := tx.Exec(`INSERT INTO model_group_members(group_id, model_id, weight, position) VALUES(?,?,?,?)`,
-				id, mem.ModelID, w, mem.Position); err != nil {
+			if _, err := tx.Exec(`INSERT INTO model_group_members(group_id, model_id, weight, position, prev_visibility)
+				VALUES(?,?,?,?,?)`, id, mem.ModelID, w, mem.Position, prev); err != nil {
 				if isUniqueErr(err) {
 					return nil, fmt.Errorf("%w: model %d already belongs to a group", ErrConflict, mem.ModelID)
 				}
@@ -359,9 +378,9 @@ func UpdateGroup(db *sql.DB, id int64, name *string, enabled *bool, members []Gr
 			WHERE id IN (SELECT model_id FROM model_group_members WHERE group_id=?)`, id); err != nil {
 			return nil, err
 		}
-		for mid := range was {
+		for mid, prev := range was {
 			if !seen[mid] {
-				if _, err := tx.Exec(`UPDATE models SET visibility='public' WHERE id=?`, mid); err != nil {
+				if _, err := tx.Exec(`UPDATE models SET visibility=? WHERE id=?`, prev, mid); err != nil {
 					return nil, err
 				}
 			}
@@ -418,14 +437,18 @@ func UpdateGroup(db *sql.DB, id int64, name *string, enabled *bool, members []Gr
 		}
 		if v == 1 {
 			// Enabling must not advertise a group that cannot serve:
-			// require at least one member (the post-condition below
-			// re-checks name ownership on every enabling).
-			var nmem int
-			if err := tx.QueryRow(`SELECT COUNT(*) FROM model_group_members WHERE group_id=?`, id).Scan(&nmem); err != nil {
+			// require at least one ELIGIBLE member (model and backend both
+			// enabled) — a group of disabled rows serves nothing, yet the
+			// catalog would advertise the name and every request to it
+			// would fail. (The post-condition below re-checks name
+			// ownership on every enabling.)
+			var eligible int
+			if err := tx.QueryRow(`SELECT COUNT(*) FROM model_groups g WHERE g.id=? AND `+
+				eligibleMemberSQL, id).Scan(&eligible); err != nil {
 				return nil, err
 			}
-			if nmem == 0 {
-				return nil, fmt.Errorf("%w: cannot enable a group with no members", ErrConflict)
+			if eligible == 0 {
+				return nil, fmt.Errorf("%w: cannot enable a group with no eligible members", ErrNoEligibleMember)
 			}
 		}
 		if _, err := tx.Exec(`UPDATE model_groups SET enabled=? WHERE id=?`, v, id); err != nil {
@@ -472,8 +495,13 @@ func DeleteGroup(db *sql.DB, id int64) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`UPDATE models SET visibility='public'
-		WHERE id IN (SELECT model_id FROM model_group_members WHERE group_id=?)`, id); err != nil {
+	// Member models keep their row and get back the visibility recorded at
+	// join time (they were hidden by membership; a model the admin had
+	// hidden by hand before joining stays hidden).
+	if _, err := tx.Exec(`UPDATE models SET visibility=(
+			SELECT gm.prev_visibility FROM model_group_members gm
+			WHERE gm.model_id=models.id AND gm.group_id=?)
+		WHERE id IN (SELECT model_id FROM model_group_members WHERE group_id=?)`, id, id); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM model_group_members WHERE group_id=?`, id); err != nil {

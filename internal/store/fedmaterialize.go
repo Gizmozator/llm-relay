@@ -221,28 +221,30 @@ type FedModelInput struct {
 	BusyThresholdPct int64
 }
 
-// FedModelCollision reports why a advertised name may NOT be materialized:
+// FedModelCollision reports why an advertised name may NOT be materialized:
 // a non-empty local group owns the name, or a local (non-synthetic) public
 // model already serves it. Two peers advertising the same name is fine —
 // distinct synthetic backends — so only local (non-synthetic) rows collide.
-func FedModelCollision(db *sql.DB, name string) (string, bool) {
+// A non-nil err is a DB failure, NOT a collision: the caller must keep the
+// previous row (treating it as a collision would drop the name from the
+// prune-keep set and let a transient SQLITE_BUSY delete a live row).
+func FedModelCollision(db *sql.DB, name string) (reason string, bad bool, err error) {
 	var n int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM model_groups g WHERE g.name=? AND
 		EXISTS (SELECT 1 FROM model_group_members gm WHERE gm.group_id=g.id)`, name).Scan(&n); err != nil {
-		return err.Error(), true
+		return "", false, err
 	}
 	if n > 0 {
-		return "a local group owns the name", true
+		return "a local group owns the name", true, nil
 	}
-	err := db.QueryRow(`SELECT COUNT(*) FROM models m JOIN backends b ON b.id=m.backend_id
-		WHERE m.name=? AND m.visibility='public' AND NOT (`+syntheticWhereB+`)`, name).Scan(&n)
-	if err != nil {
-		return err.Error(), true
+	if err := db.QueryRow(`SELECT COUNT(*) FROM models m JOIN backends b ON b.id=m.backend_id
+		WHERE m.name=? AND m.visibility='public' AND NOT (`+syntheticWhereB+`)`, name).Scan(&n); err != nil {
+		return "", false, err
 	}
 	if n > 0 {
-		return "a local public model owns the name", true
+		return "a local public model owns the name", true, nil
 	}
-	return "", false
+	return "", false, nil
 }
 
 // UpsertFedModel inserts or updates one materialized model row, keyed by
@@ -376,6 +378,10 @@ func UpsertFederatedGroup(db *sql.DB, name string, memberIDs []int64, weights []
 	if len(memberIDs) == 0 {
 		return fmt.Errorf("%w: federated group %q has no resolvable member", ErrInvalid, name)
 	}
+	if len(weights) != len(memberIDs) {
+		return fmt.Errorf("%w: federated group %q has %d members but %d weights",
+			ErrInvalid, name, len(memberIDs), len(weights))
+	}
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -399,11 +405,35 @@ func UpsertFederatedGroup(db *sql.DB, name string, memberIDs []int64, weights []
 	case fed == 0:
 		return fmt.Errorf("%w: local group owns the name %q", ErrConflict, name)
 	}
-	// Departing members become public again (the UpdateGroup rule: the group
-	// owns the name while they are members).
-	if _, err := tx.Exec(`UPDATE models SET visibility='public' WHERE id IN
-		(SELECT model_id FROM model_group_members WHERE group_id=
-			(SELECT id FROM model_groups WHERE name=?))`, name); err != nil {
+	// Carry each current member's recorded pre-join visibility across the
+	// wholesale replace: re-applying the same frame must not degrade the
+	// record to the 'internal' the previous flip stamped.
+	carried := map[int64]string{}
+	rows, err := tx.Query(`SELECT gm.model_id, gm.prev_visibility FROM model_group_members gm
+		JOIN model_groups g ON g.id=gm.group_id WHERE g.name=?`, name)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var mid int64
+		var prev string
+		if err := rows.Scan(&mid, &prev); err != nil {
+			rows.Close()
+			return err
+		}
+		carried[mid] = prev
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	// Departing members get their recorded pre-join visibility back (the
+	// UpdateGroup rule: the group owns the name while they are members).
+	if _, err := tx.Exec(`UPDATE models SET visibility=(
+			SELECT gm.prev_visibility FROM model_group_members gm
+			WHERE gm.model_id=models.id AND gm.group_id=(SELECT id FROM model_groups WHERE name=?))
+		WHERE id IN (SELECT model_id FROM model_group_members WHERE group_id=
+			(SELECT id FROM model_groups WHERE name=?))`, name, name); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM model_group_members WHERE group_id=
@@ -419,8 +449,14 @@ func UpsertFederatedGroup(db *sql.DB, name string, memberIDs []int64, weights []
 		if w <= 0 {
 			w = 1
 		}
-		if _, err := tx.Exec(`INSERT INTO model_group_members(group_id, model_id, weight, position)
-			VALUES(?,?,?,?)`, gid, mid, w, i); err != nil {
+		prev, ok := carried[mid]
+		if !ok {
+			if err := tx.QueryRow(`SELECT visibility FROM models WHERE id=?`, mid).Scan(&prev); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec(`INSERT INTO model_group_members(group_id, model_id, weight, position, prev_visibility)
+			VALUES(?,?,?,?,?)`, gid, mid, w, i, prev); err != nil {
 			return err
 		}
 	}
@@ -450,9 +486,14 @@ func DeleteFederatedGroupsNotIn(db *sql.DB, keep []string) error {
 	}
 	defer tx.Rollback()
 	sel := `SELECT id FROM model_groups WHERE federated=1` + clause
-	if _, err := tx.Exec(`UPDATE models SET visibility='public' WHERE id IN
-		(SELECT model_id FROM model_group_members WHERE group_id IN (`+sel+`))`,
-		args...); err != nil {
+	// Members get their recorded pre-join visibility back (the UpdateGroup
+	// rule), not a blanket 'public'. The statement references `sel` twice,
+	// so the keep-list args ride twice too.
+	if _, err := tx.Exec(`UPDATE models SET visibility=(
+			SELECT gm.prev_visibility FROM model_group_members gm
+			WHERE gm.model_id=models.id AND gm.group_id IN (`+sel+`))
+		WHERE id IN (SELECT model_id FROM model_group_members WHERE group_id IN (`+sel+`))`,
+		append(append([]any{}, args...), args...)...); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM model_group_members WHERE group_id IN (`+sel+`)`,

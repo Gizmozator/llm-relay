@@ -38,6 +38,13 @@ func ExtractUsage(endpoint string, body []byte) (tok pricing.Tokens, ok bool) {
 		if err := json.Unmarshal(body, &v); err != nil || v.Usage == nil {
 			return tok, false
 		}
+		// An empty "usage":{} block (some gateways emit it on error paths)
+		// is NOT an authoritative zero: accepting it would meter 0 tokens
+		// where the estimate fallback would get closer. Treat all-zero as
+		// "no usage reported".
+		if v.Usage.PromptTokens <= 0 && v.Usage.CompletionTokens <= 0 {
+			return pricing.Tokens{}, false
+		}
 		tok.Prompt = v.Usage.PromptTokens
 		tok.Completion = v.Usage.CompletionTokens
 		if v.Usage.Details != nil {
@@ -57,6 +64,9 @@ func ExtractUsage(endpoint string, body []byte) (tok pricing.Tokens, ok bool) {
 		}
 		if err := json.Unmarshal(body, &v); err != nil || v.Usage == nil {
 			return tok, false
+		}
+		if v.Usage.Input <= 0 && v.Usage.Output <= 0 {
+			return pricing.Tokens{}, false
 		}
 		tok.Prompt = v.Usage.Input
 		tok.Completion = v.Usage.Output
@@ -84,6 +94,9 @@ func ExtractUsage(endpoint string, body []byte) (tok pricing.Tokens, ok bool) {
 		tok.Completion = u.Output
 		tok.Cached = u.CacheRead
 		tok.CacheWrite = u.CacheCreation
+		if tok.Prompt <= 0 && tok.Completion <= 0 {
+			return pricing.Tokens{}, false
+		}
 		return tok, true
 	}
 	return tok, false
@@ -103,17 +116,26 @@ func DeriveSession(endpoint string, body []byte, keyID int64, model string) stri
 				Role    string          `json:"role"`
 				Content json.RawMessage `json:"content"`
 			} `json:"messages"`
-			Prompt string `json:"prompt"`
+			// RawMessage, not string: the completions API also allows an
+			// ARRAY of prompts (or token arrays), and a typed string field
+			// would fail the whole unmarshal — losing the messages too.
+			Prompt json.RawMessage `json:"prompt"`
 		}
 		if json.Unmarshal(body, &v) == nil {
 			for _, m := range v.Messages {
-				if m.Role == "user" {
-					text = flattenContent(m.Content)
+				if m.Role != "user" {
+					continue
+				}
+				// Skip empty user turns (image-only, tool-result shells):
+				// key off the first turn that actually carries text, not
+				// the first one claiming the role — an empty seed here
+				// leaves no session at all.
+				if text = flattenContent(m.Content); text != "" {
 					break
 				}
 			}
-			if text == "" && v.Prompt != "" {
-				text = v.Prompt
+			if text == "" && len(v.Prompt) > 0 {
+				text = firstStringIn(v.Prompt)
 			}
 		}
 	case EpResponses:
@@ -132,8 +154,10 @@ func DeriveSession(endpoint string, body []byte, keyID int64, model string) stri
 		}
 		if json.Unmarshal(body, &v) == nil {
 			for _, m := range v.Messages {
-				if m.Role == "user" {
-					text = flattenContent(m.Content)
+				if m.Role != "user" {
+					continue
+				}
+				if text = flattenContent(m.Content); text != "" {
 					break
 				}
 			}
@@ -167,6 +191,25 @@ func flattenContent(raw json.RawMessage) string {
 			}
 		}
 		return out
+	}
+	return ""
+}
+
+// firstStringIn extracts a session seed from a completions "prompt" field,
+// which may be a plain string or an array of strings (an array of token
+// arrays carries no text and yields "").
+func firstStringIn(raw json.RawMessage) string {
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	var arr []string
+	if json.Unmarshal(raw, &arr) == nil {
+		for _, e := range arr {
+			if e != "" {
+				return e
+			}
+		}
 	}
 	return ""
 }

@@ -47,7 +47,7 @@ func mcpResult(id json.RawMessage, result any) map[string]any {
 func (h *Handler) MCP(w http.ResponseWriter, r *http.Request) {
 	_, user, err := h.authKey(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid API key")
+		authError(w, err)
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20+1))

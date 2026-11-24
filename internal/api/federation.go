@@ -50,7 +50,10 @@ func (s *Server) PeerAuth(next func(w http.ResponseWriter, r *http.Request, p *s
 type FedController interface {
 	// Reload re-reads the federation settings and reconciles the spoke
 	// dialer (start/stop); called after every successful settings PUT.
-	Reload()
+	// A non-nil error means the settings are stored but the live reconcile
+	// failed (transient settings read, failed purge); the next PUT or a
+	// restart retries it.
+	Reload() error
 	// ServeHub handles an authenticated connect request (role gate +
 	// WS handshake + registry).
 	ServeHub(w http.ResponseWriter, r *http.Request, p *store.Peer)
@@ -389,9 +392,14 @@ func (s *Server) AdminPutFederation(w http.ResponseWriter, r *http.Request, c *a
 	// Live-safe role change: the Manager reconciles the spoke dialer
 	// with the stored config (spoke→standalone drops the channel,
 	// standalone→spoke starts it; hub acceptance is role-checked per
-	// request, so nothing else needs to happen).
+	// request, so nothing else needs to happen). A failed reconcile
+	// leaves the stored settings in place — report it distinctly so the
+	// operator knows the live state may lag until the next PUT/restart.
 	if s.Fed != nil {
-		s.Fed.Reload()
+		if err := s.Fed.Reload(); err != nil {
+			writeErr(w, http.StatusInternalServerError, "settings saved but live reload failed")
+			return
+		}
 	}
 	f, err := store.GetFederationSettings(s.DB)
 	if err != nil {

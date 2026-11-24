@@ -71,7 +71,20 @@ func New(db *sql.DB, rec *usage.Recorder, trustProxyHeaders bool) *Handler {
 	// No overall client timeout: generations may run for many minutes
 	// (OCR sends 10+ min non-streaming requests). Bounded at the
 	// transport level instead: dial and TLS handshake only.
-	h.Client = &http.Client{Transport: &schemeDispatch{inner: inner, h: h}}
+	//
+	// Redirects are refused, not followed: OpenAI-compatible backends
+	// answer in place, so a 3xx means either a misconfigured base URL or
+	// a hostile endpoint. Following it would forward the backend's API
+	// key (Authorization / x-api-key) to a host the operator never
+	// configured — credential exfiltration with extra steps. The 3xx
+	// itself passes through to the caller untouched (the failover loop
+	// treats a non-2xx like any other bad answer).
+	h.Client = &http.Client{
+		Transport: &schemeDispatch{inner: inner, h: h},
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	return h
 }
 
@@ -119,7 +132,7 @@ func (h *Handler) Embeddings(w http.ResponseWriter, r *http.Request) {
 // name shadowing and dedupe resolved store-side (ListPublicCatalog).
 func (h *Handler) Models(w http.ResponseWriter, r *http.Request) {
 	if _, _, err := h.authKey(r); err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid API key")
+		authError(w, err)
 		return
 	}
 	entries, err := store.ListPublicCatalog(h.DB)
@@ -148,7 +161,7 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request, endpoint string
 		var err error
 		key, user, err = h.authKey(r)
 		if err != nil {
-			writeError(w, http.StatusUnauthorized, "invalid API key")
+			authError(w, err)
 			return
 		}
 	}
@@ -219,7 +232,13 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request, endpoint string
 		case store.TargetGroup:
 			keep := make([]store.GroupMember, 0, len(tgt.Members))
 			for _, mem := range tgt.Members {
-				if fedShareVisible(h.DB, mem, fs.OriginPeer) {
+				vis, err := fedShareVisible(h.DB, mem, fs.OriginPeer)
+				if err != nil {
+					log.Printf("fed serve: %v", err)
+					writeError(w, http.StatusInternalServerError, "internal error")
+					return
+				}
+				if vis {
 					keep = append(keep, mem)
 				}
 			}
@@ -231,7 +250,13 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request, endpoint string
 			tgt.Members = keep
 		case store.TargetModel:
 			mem := store.GroupMember{Model: tgt.Model, Backend: tgt.Backend}
-			if !fedShareVisible(h.DB, mem, fs.OriginPeer) {
+			vis, err := fedShareVisible(h.DB, mem, fs.OriginPeer)
+			if err != nil {
+				log.Printf("fed serve: %v", err)
+				writeError(w, http.StatusInternalServerError, "internal error")
+				return
+			}
+			if !vis {
 				writeError(w, http.StatusForbidden,
 					fmt.Sprintf("model %q is not shared with this peer", peek.Model))
 				return
@@ -689,8 +714,14 @@ func (h *Handler) record(record bool, start time.Time, u *store.User, k *store.A
 	}
 }
 
+// ErrNoKey signals "no credentials supplied" (as opposed to a bad key or a
+// lookup failure) so callers can answer it without string matching.
+var ErrNoKey = errors.New("no API key supplied")
+
 // authKey resolves the relay API key from Authorization: Bearer sk-... or,
-// for Anthropic-dialect clients, x-api-key.
+// for Anthropic-dialect clients, x-api-key. A returned error distinguishes
+// the caller's problem (ErrNoKey, store.ErrNotFound for unknown/revoked/
+// disabled) from ours (raw DB error) — see authError.
 func (h *Handler) authKey(r *http.Request) (*store.APIKey, *store.User, error) {
 	key := ""
 	if authz := r.Header.Get("Authorization"); strings.HasPrefix(authz, "Bearer ") {
@@ -699,9 +730,23 @@ func (h *Handler) authKey(r *http.Request) (*store.APIKey, *store.User, error) {
 		key = xk
 	}
 	if key == "" {
-		return nil, nil, errors.New("no key")
+		return nil, nil, ErrNoKey
 	}
 	return store.KeyByHash(h.DB, auth.HashKey(key))
+}
+
+// authError answers a failed key authentication. A missing or unknown key is
+// the caller's problem (401, fixed phrase — never leak which half failed);
+// a lookup failure is ours: 500, logged, because answering 401 for a DB
+// error sends the operator chasing a nonexistent key problem while the real
+// one (SQLITE_BUSY, corrupt schema, closed DB) stays hidden.
+func authError(w http.ResponseWriter, err error) {
+	if errors.Is(err, ErrNoKey) || errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusUnauthorized, "invalid API key")
+		return
+	}
+	log.Printf("relay: API key lookup failed: %v", err)
+	writeError(w, http.StatusInternalServerError, "internal error")
 }
 
 func (h *Handler) clientIP(r *http.Request) string {

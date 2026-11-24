@@ -167,7 +167,17 @@ func (h *Hub) CloseAll(reason string) {
 // hello within HelloTimeout → version check → hello_ack → registry.
 func (h *Hub) ServeConn(w http.ResponseWriter, r *http.Request, peer *store.Peer) {
 	f, err := store.GetFederationSettings(h.db)
-	if err != nil || f.Role != store.FedRoleHub {
+	if err != nil {
+		// A settings read failure is a server problem, not a missing
+		// endpoint: answer 500 (distinctly logged) so the spoke retries a
+		// transient SQLITE_BUSY instead of backing off a phantom route.
+		h.opts.Log.Printf("fed: connect role gate: settings read: %v", err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":{"message":"federation settings unavailable"}}`))
+		return
+	}
+	if f.Role != store.FedRoleHub {
 		// Not a hub right now: pretend the endpoint does not exist
 		// (standalone/spoke must not advertise a federation surface).
 		w.Header().Set("Content-Type", "application/json")

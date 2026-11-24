@@ -121,7 +121,7 @@ func (s *Server) Live(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
 	// Privilege comes from the claims (same rule as usageScope), not
 	// from the URL alone, so the drill-down cannot leak if routes move.
 	isAdmin := c.Role == "admin" && strings.HasPrefix(r.URL.Path, "/api/admin/")
-	f := &store.UsageFilter{}
+	f := &store.UsageFilter{AllUsers: true}
 	if isAdmin {
 		if v := r.URL.Query().Get("user_id"); v != "" {
 			id, err := strconv.ParseInt(v, 10, 64)
@@ -371,9 +371,15 @@ func (s *Server) Live(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
 	// Personal route: fold member-name counts into the group name (streams
 	// carry the resolved member name), so internal member names never
 	// surface in the active list — nor, via the same map below, in the
-	// util series.
+	// util series. Folding is gated on the pool being EMITTED: folding into
+	// a disabled/unservable group's name would surface that unadvertised
+	// group name instead. The member names of such groups are internal, so
+	// the internalOnly sweep below removes them.
 	if !isAdmin {
 		for member, pool := range memberNameToPool {
+			if !poolNames[pool] {
+				continue
+			}
 			if n, ok := active[member]; ok {
 				active[pool] += n
 				delete(active, member)
@@ -417,8 +423,14 @@ func (s *Server) Live(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
 	// Personal route: fold member-name busy series into the group name
 	// (same leak as the active list; completed work already rolls up under
 	// the requested name, which is the group name for group sessions).
+	// Same emission gate as the active fold: a non-emitted pool name must
+	// not gain a util row, and the member series falls through to the
+	// internalOnly sweep below.
 	if !isAdmin {
 		for member, pool := range memberNameToPool {
+			if !poolNames[pool] {
+				continue
+			}
 			vals, ok := series[member]
 			if !ok {
 				continue

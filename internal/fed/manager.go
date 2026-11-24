@@ -14,6 +14,7 @@ package fed
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -49,9 +50,24 @@ type Manager struct {
 	served  map[string]context.CancelFunc // tunneled requests being served
 	transit map[string]int64              // hub transit: request id → target peer
 
+	// events carries hub registry connect/die events to the single
+	// ordered worker (see peerEvent).
+	events chan peerEventMsg
+
 	servedWg       sync.WaitGroup // served requests (Close waits, bounded)
 	servedShutdown bool           // Close began: refuse new served work
 }
+
+// peerEventMsg is one queued registry liveness event.
+type peerEventMsg struct {
+	peerID int64
+	online bool
+}
+
+// peerEventQueue bounds the pending-event queue. Connect/die events are
+// rare (channel churn); a full queue is pathological and drops with a log
+// rather than stalling the registry.
+const peerEventQueue = 64
 
 // NewManager builds the singleton. opts == nil means production defaults.
 func NewManager(db *sql.DB, opts *Options) *Manager {
@@ -75,11 +91,14 @@ func NewManager(db *sql.DB, opts *Options) *Manager {
 	}
 	m := &Manager{db: db, opts: o,
 		hub:     NewHub(db, o, o.InstanceName, o.Version),
+		spoke:   atomic.Pointer[Conn]{},
 		served:  map[string]context.CancelFunc{},
-		transit: map[string]int64{}}
+		transit: map[string]int64{},
+		events:  make(chan peerEventMsg, peerEventQueue)}
 	m.mat = &materializer{db: db, logf: o.Log.Printf}
 	m.cats = newCatalogCtl(m)
 	m.hub.SetHooks(m.peerEvent, m.attachChannel)
+	go m.runPeerEvents()
 	return m
 }
 
@@ -101,8 +120,14 @@ func (m *Manager) serveHandler() http.Handler {
 // Reload reconciles the running spoke dialer with the stored settings.
 // The hub side needs nothing to START (acceptance is role-checked per
 // request) but must TEAR DOWN live channels when the role moves away
-// from hub. The settings read happens under m.mu: reading before locking
-// lets interleaved Reloads start a dialer from a stale role.
+// from hub. reloadMu serializes whole calls, so the settings read runs
+// BEFORE m.mu: no interleaved Reload can act on a stale role, and a DB
+// read (busy_timeout up to 5 s) must not hold m.mu — the served registry
+// and serveHandler run through it on every tunneled request.
+//
+// A settings read failure keeps the running configuration untouched (see
+// below): a read error is not a role change. The error reaches the caller
+// so a failed reconcile is visible instead of silently half-applied.
 //
 // CRITICAL LOCKING RULE: dialer.stop waits for the dialer goroutine to
 // exit, and that goroutine may be inside conn.Serve dispatching a frame
@@ -111,40 +136,50 @@ func (m *Manager) serveHandler() http.Handler {
 // channel. So: state swap under m.mu, stop (and start) after releasing it.
 // reloadMu keeps concurrent Reloads ordered so exactly one dialer is
 // stopped and at most one started per call, in order.
-func (m *Manager) Reload() {
+func (m *Manager) Reload() error {
 	m.reloadMu.Lock()
 	defer m.reloadMu.Unlock()
 
-	m.mu.Lock()
 	f, err := store.GetFederationSettings(m.db)
-	old := m.dialer
-	m.dialer = nil
 	if err != nil {
-		m.opts.Log.Printf("fed: reload: settings read failed: %v", err)
-		m.mu.Unlock()
-		if old != nil {
-			old.stop()
-		}
-		return
+		// A transient read failure is NOT a role change: keep the running
+		// dialer and role exactly as they are (same D1 convention as the
+		// hub's Touch sweep — SQLITE_BUSY must not tear down a healthy
+		// spoke permanently). The caller reports the failed reconcile;
+		// the next Reload retries.
+		return fmt.Errorf("fed: reload: settings read failed: %w", err)
 	}
+
+	// Tear live hub channels down before the purge: a dying channel's
+	// queued catalog frame must not re-materialize rows the purge is
+	// about to delete (the onCatalog role check cannot reject them until
+	// the new role is committed below). CloseAll is async per connection
+	// and takes only h.mu.
 	if f.Role != store.FedRoleHub {
-		// Async per connection (CloseAll spawns goroutines), so holding
-		// m.mu here is fine.
 		m.hub.CloseAll("role changed")
 	}
+
+	// Materialized rows are rebuilt from live catalog frames, so anything
+	// left in the DB at startup or across a role change is stale by
+	// definition — purge it before anything can serve from it. The purge
+	// must succeed BEFORE the new role is committed: committing past a
+	// failed purge marks the transition done while the stale rows are
+	// still there, and nothing ever retries it. roleKnown/roleVal are
+	// Reload-only state (reloadMu), so reading them needs no m.mu.
 	prev := ""
 	if p := m.roleVal.Load(); p != nil {
 		prev = *p
 	}
-	// Materialized rows are rebuilt from live catalog frames, so anything
-	// left in the DB at startup or across a role change is stale by
-	// definition — purge it before anything can serve from it.
 	if !m.roleKnown || prev != f.Role {
 		if err := store.PurgeSynthetic(m.db); err != nil {
-			m.opts.Log.Printf("fed: purge synthetic backends: %v", err)
+			return fmt.Errorf("fed: purge synthetic backends: %w", err)
 		}
+		m.roleKnown = true
 	}
-	m.roleKnown = true
+
+	m.mu.Lock()
+	old := m.dialer
+	m.dialer = nil
 	role := f.Role
 	m.roleVal.Store(&role)
 	var next *dialer
@@ -160,6 +195,7 @@ func (m *Manager) Reload() {
 	if next != nil {
 		next.start()
 	}
+	return nil
 }
 
 // Close stops the spoke dialer and every live hub channel (process
@@ -314,31 +350,50 @@ func (m *Manager) spokeConn() *Conn { return m.spoke.Load() }
 //
 // It runs UNDER the hub registry lock (so online/offline events deliver in
 // registry order — an old channel's offline must never land after the new
-// channel's online). Two rules follow from that: no Hub callbacks
-// synchronously (h.mu is not reentrant) and no m.mu (lock order). The
-// Status fan-out therefore runs on its own goroutine: Conn.Send blocks on
-// a full write queue (up to WriteTimeout), and a stalled peer must not
-// stall register() for every new connection.
+// channel's online). Nothing expensive may run there: the synthetic flip is
+// a DB write (busy_timeout up to 5 s) and the registry lock gates every
+// other peer's connect and disconnect for its duration. So the hook only
+// enqueues — the buffered channel preserves registry order — and the
+// worker does the work off the lock.
 func (m *Manager) peerEvent(peerID int64, online bool) {
 	if m.currentRole() != store.FedRoleHub {
 		return
 	}
-	m.mat.setPeerOnline(peerID, online)
-	if !online {
-		// A dead peer's catalog stops being relayed; it re-sends on connect.
-		m.cats.set(peerID, nil)
+	select {
+	case m.events <- peerEventMsg{peerID: peerID, online: online}:
+	default:
+		// Pathological: a full queue means the worker is wedged (DB stall).
+		// Drop with a loud log rather than stall the registry; the next
+		// event re-syncs the peer's state anyway.
+		m.opts.Log.Printf("fed: peer event queue full: dropping peer %d online=%v", peerID, online)
 	}
-	go func() {
+}
+
+// runPeerEvents drains the registry event queue in order, outside h.mu.
+// One worker keeps events ordered (an offline must not overtake the online
+// that follows it). Each event may block on DB writes and on Conn.Send
+// (a stalled peer's full write queue, up to WriteTimeout) — safe here,
+// nothing on the registry path waits for this worker.
+func (m *Manager) runPeerEvents() {
+	for ev := range m.events {
+		if m.currentRole() != store.FedRoleHub {
+			continue // role moved while the event was queued
+		}
+		m.mat.setPeerOnline(ev.peerID, ev.online)
+		if !ev.online {
+			// A dead peer's catalog stops being relayed; it re-sends on connect.
+			m.cats.set(ev.peerID, nil)
+		}
 		for _, p := range m.hub.Peers() {
-			if p.PeerID == peerID {
+			if p.PeerID == ev.peerID {
 				continue
 			}
-			if err := m.hub.Send(p.PeerID, &Status{T: TStatus, PeerID: peerID, Online: online}); err != nil {
-				m.opts.Log.Printf("fed: status peer %d online=%v → peer %d: %v", peerID, online, p.PeerID, err)
+			if err := m.hub.Send(p.PeerID, &Status{T: TStatus, PeerID: ev.peerID, Online: ev.online}); err != nil {
+				m.opts.Log.Printf("fed: status peer %d online=%v → peer %d: %v", ev.peerID, ev.online, p.PeerID, err)
 			}
 		}
-	}()
-	m.cats.changed()
+		m.cats.changed()
+	}
 }
 
 // SyntheticOnline answers the health cache for a synthetic backend: the

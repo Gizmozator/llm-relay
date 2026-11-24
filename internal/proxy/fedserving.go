@@ -18,6 +18,7 @@ package proxy
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -190,14 +191,20 @@ func fedMemberFilter(fs *FedServe) func(mem store.GroupMember) bool {
 // row: local rows must be explicitly shared with the peer; materialized
 // rows are shareable to everyone except their own origin (the hub relays a
 // spoke's models to the rest of the federation — that is the merged pool).
-func fedShareVisible(db *sql.DB, mem store.GroupMember, origin int64) bool {
+// A non-nil err is a DB failure, NOT "not shared": the caller must answer
+// 500, because a 403 for a broken query tells the peer its access was
+// revoked when nothing of the sort happened.
+func fedShareVisible(db *sql.DB, mem store.GroupMember, origin int64) (bool, error) {
 	if mem.Model == nil || mem.Backend == nil {
-		return false
+		return false, nil
 	}
 	kind, peerID, syn := store.SyntheticBaseURL(mem.Backend.BaseURL)
 	if syn {
-		return kind == store.FedSchemePeer && peerID != origin
+		return kind == store.FedSchemePeer && peerID != origin, nil
 	}
 	ok, err := store.SharedWithPeer(db, mem.Model.ID, origin)
-	return err == nil && ok
+	if err != nil {
+		return false, fmt.Errorf("fed share check (model %d, peer %d): %w", mem.Model.ID, origin, err)
+	}
+	return ok, nil
 }

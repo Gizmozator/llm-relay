@@ -261,7 +261,11 @@ func (m *Manager) serveFrame(c *Conn, peer *store.Peer, origin int64, req *Req) 
 		_ = c.Send(&ResEnd{T: TResEnd, ID: req.ID, Error: "bad request: " + err.Error()})
 		return
 	}
-	httpReq.Header = headersFrom(req.Headers)
+	// Peer-supplied headers go through the receiver-side filter (see
+	// wireRequestHeader): they are applied verbatim otherwise, and a
+	// malicious peer could smuggle framing or inject credentials into the
+	// local pipeline with them.
+	httpReq.Header = wireRequestHeader(req.Headers)
 	if httpReq.Header.Get("Content-Type") == "" && len(req.Body) > 0 {
 		httpReq.Header.Set("Content-Type", "application/json")
 	}
@@ -325,6 +329,14 @@ func (m *Manager) transitFrame(fromPeer, origin int64, req *Req) {
 	}
 	m.registerTransit(req.ID, req.TargetPeer)
 	from := m.hub.connFor(fromPeer)
+	// ch was opened on the TARGET's Conn, and a request channel receives no
+	// sentinel when its Conn dies (OpenRequest contract: consumers watch
+	// Done). If the target's channel drops mid-stream nothing can ever
+	// arrive on ch again — without this handle the pump blocks forever and
+	// leaks the goroutine, the target's in-flight slot and the transit
+	// registration. Captured ONCE: a later reconnect swaps the Conn, and
+	// the death that matters is the one on the channel that owns ch.
+	targetDone := m.hub.connDone(req.TargetPeer)
 	go func() {
 		defer func() {
 			m.unregisterTransit(req.ID)
@@ -361,6 +373,15 @@ func (m *Manager) transitFrame(fromPeer, origin int64, req *Req) {
 				// The requester died mid-flight: tell the target to stop.
 				_ = m.hub.Send(req.TargetPeer, &Cancel{T: TCancel, ID: req.ID})
 				return
+			case <-targetDone:
+				// The target died mid-flight: ch is dead, so close the
+				// requester's stream with an error instead of hanging it
+				// (and release the slot via the deferred cleanup).
+				if from != nil && !from.Closed() {
+					_ = from.Send(&ResEnd{T: TResEnd, ID: req.ID,
+						Error: "federation: target peer channel lost"})
+				}
+				return
 			}
 		}
 	}()
@@ -382,9 +403,10 @@ type transitMeter struct {
 const transitMeterCap = 512 << 10
 
 func (mt *transitMeter) feed(p []byte) {
-	if len(mt.tail) >= transitMeterCap {
-		return
-	}
+	// The window SLIDES: usage payloads ride the END of the body, so the
+	// last cap bytes are what matters. (An early return once the window
+	// was full would freeze it at the FIRST cap bytes — responses over the
+	// cap then never carry their usage tail and go unmetered.)
 	mt.tail = append(mt.tail, p...)
 	if len(mt.tail) > transitMeterCap {
 		mt.tail = append(mt.tail[:0:0], mt.tail[len(mt.tail)-transitMeterCap:]...)

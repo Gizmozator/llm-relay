@@ -39,8 +39,10 @@ func Load() (*Config, error) {
 		c.AdminListenAddr = ":" + c.AdminPort
 	}
 	// A short or empty HS256 secret makes tokens offline-bruteforceable.
-	if len(c.JWTSecret) < 16 {
-		return nil, fmt.Errorf("config: JWT_SECRET must be at least 16 characters (openssl rand -hex 32)")
+	// HS256 (RFC 7518) wants a key at least as long as the hash output —
+	// 32 bytes; anything less is not a real secret for this algorithm.
+	if len(c.JWTSecret) < 32 {
+		return nil, fmt.Errorf("config: JWT_SECRET must be at least 32 characters (openssl rand -hex 32)")
 	}
 	if c.ListenAddr == c.AdminListenAddr {
 		return nil, fmt.Errorf("config: relay and admin listeners must not share an address (%s)", c.ListenAddr)

@@ -129,7 +129,7 @@ func newLiveEnv(t *testing.T, flight api.FlightSource) *liveEnv {
 		t.Fatal(err)
 	}
 
-	s := &api.Server{DB: d, JWTSecret: "testsecret", JWTTTL: time.Hour, Flight: flight}
+	s := &api.Server{DB: d, JWTSecret: "test-secret-0123456789abcdefghij", JWTTTL: time.Hour, Flight: flight}
 	mux := http.NewServeMux()
 	mux.Handle("POST /api/auth/login", s.RateLimitLogin(s.Login))
 	mux.Handle("GET /api/live", s.Auth(s.Live))
@@ -884,28 +884,32 @@ func TestLiveInternalRowsAdminOnly(t *testing.T) {
 	if len(count(ur.Models, "test-model")) != 1 {
 		t.Errorf("user rows missing the public test-model: %+v", ur.Models)
 	}
-	// Active list: internal member names fold into the group name — even
-	// for the DISABLED group (their streams would otherwise leak the
-	// internal name); public member names stay as requested; internal-only
+	// Active list: internal member names fold into the group name — but
+	// only when the group is EMITTED (enabled + servable). Folding into a
+	// disabled group's name would advertise that unadvertised group to
+	// non-admins, so those member streams are dropped entirely (the
+	// internalOnly sweep removes their names; the group name never
+	// surfaces). Public member names stay as requested; internal-only
 	// names (plain internal model) are dropped; a name with no row at all
 	// (deleted model with a live stream) keeps showing.
 	act := map[string]int{}
 	for _, a := range ur.Active {
 		act[a.Model] = a.Count
 	}
-	if act["pool-x"] != 2 || act["pool-y"] != 1 || act["pool-z"] != 1 || act["v-public"] != 1 {
-		t.Errorf("user active = %+v, want pool-x:2 pool-y:1 pool-z:1 v-public:1", ur.Active)
+	if act["pool-x"] != 2 || act["pool-y"] != 1 || act["v-public"] != 1 {
+		t.Errorf("user active = %+v, want pool-x:2 pool-y:1 v-public:1", ur.Active)
 	}
 	if act["ghost-model"] != 1 {
 		t.Errorf("user active = %+v, want the rowless ghost-model:1 kept", ur.Active)
 	}
-	for _, leaked := range []string{"q-renamed", "z-hidden", "secret-model"} {
+	for _, leaked := range []string{"q-renamed", "z-hidden", "secret-model", "pool-z"} {
 		if _, ok := act[leaked]; ok {
 			t.Errorf("user active leaks internal name %q: %+v", leaked, ur.Active)
 		}
 	}
 	// Util series: in-flight busy credits fold to the group name too
-	// (disabled group included); public member names stay put.
+	// (emitted groups only — a disabled group's series must not surface
+	// under its unadvertised name); public member names stay put.
 	utilNames := map[string]int64{}
 	for _, u := range ur.Util {
 		utilNames[u.Model] = u.ConcurrencyLimit
@@ -916,8 +920,8 @@ func TestLiveInternalRowsAdminOnly(t *testing.T) {
 	if utilNames["pool-y"] != 4 {
 		t.Errorf("pool-y util limit = %d, want 4 (pool sum)", utilNames["pool-y"])
 	}
-	if _, ok := utilNames["pool-z"]; !ok {
-		t.Errorf("user util missing folded pool-z series (disabled group): %+v", ur.Util)
+	if _, ok := utilNames["pool-z"]; ok {
+		t.Errorf("user util shows a pool-z series for the disabled group (name leak): %+v", ur.Util)
 	}
 	for _, leaked := range []string{"q-renamed", "z-hidden", "secret-model"} {
 		if _, ok := utilNames[leaked]; ok {

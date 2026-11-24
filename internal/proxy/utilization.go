@@ -41,7 +41,12 @@ type ModelStatus struct {
 	// Status is the derived verdict: "offline" (backend unreachable),
 	// "draining" (admin is shutting the backend down: finish existing
 	// sessions, start none), "busy" (all slots in use or mean busy at or
-	// above the model's threshold, default 80 %), else "free".
+	// above the model's threshold, default 80 %), else "free". For a pool
+	// row "busy" means EVERY servable member sits at or above its own
+	// threshold (one free member can still take the session), and
+	// UtilizationPct is the MAX per-member load — the group-name busy
+	// split equally across servable members plus each member's own-name
+	// busy — not a pool-wide sum.
 	Status string `json:"status"`
 }
 
@@ -88,7 +93,7 @@ func (h *Handler) Utilization(ctx context.Context, adminView bool) (map[string]a
 	// exceed 100 % (parallel streams stack); that is the intended
 	// semantics, so no clamp. Mirrors BusyByModel's window-start math.
 	now := time.Now()
-	busy, err := store.BusyByModel(h.DB, &store.UsageFilter{}, now, utilWindowMinutes)
+	busy, err := store.BusyByModel(h.DB, &store.UsageFilter{AllUsers: true}, now, utilWindowMinutes)
 	if err != nil {
 		return nil, err
 	}
@@ -186,24 +191,27 @@ func (h *Handler) Utilization(ctx context.Context, adminView bool) (map[string]a
 			servable := false
 			online := false
 			accepting := false // a servable member actually taking new sessions
-			thr := int64(0)
 			poolActive := 0
-			// Group sessions log model_requested = the group name, so the
-			// group key carries them; member-name-keyed busy (members are
-			// requestable by name via the ResolveTarget fallthrough) folds
-			// in too — mirror of the live view's util fold.
-			poolPct := busyPct[g.Name]
+			// Per-servable-member load. Group sessions log
+			// model_requested = the group name and are spread across the
+			// servable members by HRW, so each member carries an equal
+			// slice of the group-name busy plus the busy keyed under its
+			// own name (members are requestable by name via the
+			// ResolveTarget fallthrough; same-name members fold once —
+			// the bucket cannot be attributed to one of them). Summing
+			// the names into one pool-wide pct (the old math) inflated
+			// the verdict ~N× for an N-member pool.
+			groupShare := busyPct[g.Name]
+			var memPct []float64
+			var memThr []int64
+			seenName := map[string]bool{} // fold per DISTINCT name
 			for _, mem := range members {
 				if mem.Model == nil || mem.Backend == nil {
 					continue
 				}
 				memServable := mem.Model.Enabled && backendOn[mem.Backend.ID]
-				if mem.Model.Name != g.Name &&
-					(mem.Model.Visibility == "internal" || memServable) {
-					poolPct += busyPct[mem.Model.Name]
-				}
 				if !memServable {
-					continue
+					continue // cannot take work: not part of the verdict
 				}
 				servable = true
 				poolActive += active[mem.Model.ID]
@@ -217,26 +225,48 @@ func (h *Handler) Utilization(ctx context.Context, adminView bool) (map[string]a
 						accepting = true
 					}
 				}
-				// Threshold aggregate: the STRICTEST member threshold. The
-				// pool pct is one number, and "any member below its own
-				// threshold ⇒ not busy" (one free member means the name
-				// can take work) reduces to pct >= max(thresholds).
+				pct := 0.0
+				if mem.Model.Name != g.Name && !seenName[mem.Model.Name] {
+					seenName[mem.Model.Name] = true
+					pct += busyPct[mem.Model.Name]
+				}
 				mthr := mem.Model.BusyThresholdPct
 				if mthr <= 0 {
 					mthr = int64(busyPctThreshold)
 				}
-				if mthr > thr {
-					thr = mthr
-				}
+				memPct = append(memPct, pct)
+				memThr = append(memThr, mthr)
 			}
 			if !servable {
 				continue // nothing servable: the catalog does not advertise it either
+			}
+			// The servable count is final now: every member carries its
+			// equal slice of the group-name busy (HRW spreads group
+			// sessions across them).
+			share := groupShare / float64(len(memPct))
+			for i := range memPct {
+				memPct[i] += share
 			}
 			if unknown {
 				limit = 0 // any-unset ⇒ unknown, same rule as the live view
 			}
 			poolNames[g.Name] = true
-			pct := math.Round(poolPct*10) / 10
+			// Verdict: the pool can take work while ANY servable member is
+			// below its OWN threshold (HRW routes there) — "busy" means
+			// EVERY servable member sits at or above its own threshold.
+			// UtilizationPct is the MAX per-member load (the most loaded
+			// member), not a pool-wide sum.
+			allBusy := true
+			maxPct := 0.0
+			for i, p := range memPct {
+				if p > maxPct {
+					maxPct = p
+				}
+				if p < float64(memThr[i]) {
+					allBusy = false
+				}
+			}
+			pct := math.Round(maxPct*10) / 10
 			ms := ModelStatus{
 				ID:               -g.ID, // negative = synthetic, same convention as the live view
 				Name:             g.Name,
@@ -246,7 +276,18 @@ func (h *Handler) Utilization(ctx context.Context, adminView bool) (map[string]a
 				ConcurrencyLimit: limit,
 				UtilizationPct:   pct,
 			}
-			ms.Status = deriveStatus(ms.Online, ms.Draining, ms.Active, limit, pct, float64(thr))
+			switch {
+			case !ms.Online:
+				ms.Status = "offline"
+			case ms.Draining:
+				ms.Status = "draining"
+			case limit > 0 && int64(poolActive) >= limit:
+				ms.Status = "busy" // every slot across the pool is in use
+			case allBusy:
+				ms.Status = "busy"
+			default:
+				ms.Status = "free"
+			}
 			out = append(out, ms)
 		}
 		// Public standalone rows, same rules as ListPublicModels: enabled
@@ -308,7 +349,7 @@ func (h *Handler) Utilization(ctx context.Context, adminView bool) (map[string]a
 func (h *Handler) UtilizationREST(w http.ResponseWriter, r *http.Request) {
 	_, user, err := h.authKey(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid API key")
+		authError(w, err)
 		return
 	}
 	payload, err := h.Utilization(r.Context(), user.Role == "admin")

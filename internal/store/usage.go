@@ -68,14 +68,29 @@ func b2i(b bool) int {
 	return 0
 }
 
-// UsageFilter scopes an aggregation query. Zero values mean "no filter".
+// UsageFilter scopes an aggregation query. Zero values mean "no filter" —
+// except the user scope, which must be stated: UserID == 0 alone is the
+// forgotten-scope footgun, so unscoped queries must set AllUsers.
 type UsageFilter struct {
-	UserID int64 // 0 = unscoped (caller must have set Admin or its own UserID)
-	KeyID  int64
-	Model  string // exact model_requested match, "" = any
-	From   string // YYYY-MM-DD inclusive, "" = open
-	To     string // YYYY-MM-DD inclusive, "" = open
-	Since  string // RFC3339 UTC inclusive, "" = open (live-window queries)
+	// AllUsers opts into a cross-user query. Required whenever UserID is 0;
+	// the aggregation functions refuse a zero filter otherwise.
+	AllUsers bool
+	UserID   int64 // 0 = unscoped (requires AllUsers)
+	KeyID    int64
+	Model    string // exact model_requested match, "" = any
+	From     string // YYYY-MM-DD inclusive, "" = open
+	To       string // YYYY-MM-DD inclusive, "" = open
+	Since    string // RFC3339 UTC inclusive, "" = open (live-window queries)
+}
+
+// scopedErr refuses a zero-value user scope: UserID == 0 without AllUsers
+// means the caller forgot to scope, and silently summing every user's rows
+// is exactly the mistake this guards.
+func (f *UsageFilter) scopedErr() error {
+	if f.UserID == 0 && !f.AllUsers {
+		return errors.New("usage filter: zero UserID without AllUsers (unscoped query refused)")
+	}
+	return nil
 }
 
 func (f *UsageFilter) where() (string, []any) {
@@ -154,6 +169,9 @@ func ValidGroupBy(groupBy string) bool {
 
 // SummarizeUsage returns totals plus one bucket per group_by dimension.
 func SummarizeUsage(db *sql.DB, f *UsageFilter, groupBy string) (UsageGroup, []UsageGroup, error) {
+	if err := f.scopedErr(); err != nil {
+		return UsageGroup{}, nil, err
+	}
 	expr, ok := groupExprs[groupBy]
 	if !ok {
 		return UsageGroup{}, nil, fmt.Errorf("bad group_by %q", groupBy)
@@ -209,9 +227,15 @@ type LiveBucket struct {
 // guess gaps). `now` anchors the window; rows are bucketed by the minute
 // prefix of their UTC RFC3339 ts.
 func LiveBuckets(db *sql.DB, f *UsageFilter, now time.Time, minutes int) ([]LiveBucket, error) {
+	if err := f.scopedErr(); err != nil {
+		return nil, err
+	}
 	start := now.UTC().Truncate(time.Minute).Add(time.Duration(-minutes+1) * time.Minute)
-	f.Since = start.Format(time.RFC3339)
-	where, args := f.where()
+	// Local copy: stamping Since on the caller's filter would leak this
+	// query's window into a filter the caller reuses for other queries.
+	f2 := *f
+	f2.Since = start.Format(time.RFC3339)
+	where, args := f2.where()
 
 	rows, err := db.Query(`SELECT substr(u.ts,1,16) AS minute, COUNT(*),
 			COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0),
@@ -258,9 +282,14 @@ type ModelBusy struct {
 // the window if it completed inside it, so the Since bound is sufficient.
 // Values align with the same window as LiveBuckets.
 func BusyByModel(db *sql.DB, f *UsageFilter, now time.Time, minutes int) ([]ModelBusy, error) {
+	if err := f.scopedErr(); err != nil {
+		return nil, err
+	}
 	start := now.UTC().Truncate(time.Minute).Add(time.Duration(-minutes+1) * time.Minute)
-	f.Since = start.Format(time.RFC3339)
-	where, args := f.where()
+	// Local copy (see LiveBuckets): the caller's filter keeps its fields.
+	f2 := *f
+	f2.Since = start.Format(time.RFC3339)
+	where, args := f2.where()
 
 	rows, err := db.Query(`SELECT u.ts, u.latency_ms, COALESCE(u.model_requested,'(unknown)')
 		FROM usage_log u`+where, args...)
@@ -364,6 +393,9 @@ type UsageRow struct {
 
 // UsageDetail returns one page of per-request rows, newest first.
 func UsageDetail(db *sql.DB, f *UsageFilter, page, pageSize int) (int64, []UsageRow, error) {
+	if err := f.scopedErr(); err != nil {
+		return 0, nil, err
+	}
 	where, args := f.where()
 	var total int64
 	if err := db.QueryRow(`SELECT COUNT(*) FROM usage_log u`+where, args...).Scan(&total); err != nil {

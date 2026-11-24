@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -17,10 +18,15 @@ import (
 	"github.com/coder/websocket"
 )
 
-// ReadLimit caps one inbound frame (4 MiB): generous for a base64 body
-// chunk, small enough that a hostile peer cannot OOM the relay with one
-// frame.
-const ReadLimit = 4 << 20
+// ReadLimit caps one inbound frame. The tunnel's biggest honest frame is
+// a Req/ResBody at MaxBody raw bytes: base64 inflates that to ~4 MiB, and
+// the JSON envelope plus a full head of forwarded request headers (the
+// Go server default allows 1 MiB of inbound headers) ride on top — so the
+// limit sits 2 MiB above the base64 body to keep a MaxBody-compliant peer
+// structurally unable to produce a frame this pump refuses (a refused
+// frame kills the whole channel, not just the request). Still small
+// enough that a hostile peer cannot OOM the relay with one frame.
+const ReadLimit = 6 << 20
 
 // MaxInflight is the per-peer cap on concurrent tunneled requests (task 3
 // multiplexes req/res streams over the one channel).
@@ -295,12 +301,24 @@ func (c *Conn) Serve(ctx context.Context) error {
 		h := c.handlers[typ]
 		c.mu.Unlock()
 		if h != nil {
-			h(c, f)
+			c.dispatch(h, f, typ)
 		}
 		// Frames this channel does not serve (e.g. a Status arriving at a
 		// hub, which only ever sends them — see attachChannel) are ignored:
 		// a channel stays alive even if one feature is dark.
 	}
+}
+
+// dispatch runs one frame handler under a recover guard: a panicking
+// handler must not take the read pump — and with it the whole process —
+// down. The frame is dropped and the panic logged with a stack.
+func (c *Conn) dispatch(h Handler, f Frame, typ string) {
+	defer func() {
+		if r := recover(); r != nil {
+			c.opts.Log.Printf("fed: frame handler panic on %q: %v\n%s", typ, r, debug.Stack())
+		}
+	}()
+	h(c, f)
 }
 
 // maybeTouch runs the throttled liveness bookkeeping (hub side).

@@ -101,8 +101,12 @@ func main() {
 	fedMgr.AttachServe(relayMux)
 	// Start federation only now that the tunnel's target mux is complete:
 	// the stored role comes alive (spoke dialer starts, hub purges stale
-	// materialized rows) with every route in place.
-	fedMgr.Reload()
+	// materialized rows) with every route in place. A failed reconcile
+	// (settings read or purge) is logged, not fatal: the relay serves
+	// local traffic regardless, and the next settings PUT retries.
+	if err := fedMgr.Reload(); err != nil {
+		log.Printf("federation startup: %v", err)
+	}
 
 	// Dashboard port: JWT API + embedded SPA. This is the port to put
 	// behind the reverse proxy.

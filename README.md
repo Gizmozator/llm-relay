@@ -245,9 +245,9 @@ Environment (or `.env`, see `.env.example`):
 | `PORT` / `LISTEN_ADDR` | `8080` | relay API port (host mapping) |
 | `ADMIN_PORT` / `ADMIN_ADDR` | `8081` | dashboard + `/api/*` port |
 | `DB_PATH` | `/data/llm-relay.db` | SQLite file (parent dir auto-created) |
-| `JWT_SECRET` | — **required** | dashboard JWT signing key (≥16 chars; `openssl rand -hex 32`) |
+| `JWT_SECRET` | — **required** | dashboard JWT signing key (≥32 chars, HS256 floor; `openssl rand -hex 32`) |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | — | bootstrap admin, first run on empty DB only |
-| `TRUST_PROXY_HEADERS` | `false` | trust `X-Forwarded-For` (set behind a reverse proxy) |
+| `TRUST_PROXY_HEADERS` | `false` | trust `X-Forwarded-For` on the relay port (set behind a reverse proxy); the login rate limiter always keys on the peer address |
 | `PUBLIC_RELAY_URL` / `PUBLIC_DASHBOARD_URL` | — | public URLs shown in the dashboard; relay is the **root** (no `/v1` — the dashboard appends `/v1` for the OpenAI base) |
 | `TZ` | `Europe/Helsinki` | timezone |
 

@@ -83,7 +83,16 @@ func (m *materializer) applyModels(backendID int64, models []CatalogModel) {
 	}
 	keep := make([]string, 0, len(models))
 	for _, cm := range models {
-		if reason, bad := store.FedModelCollision(m.db, cm.Name); bad {
+		reason, bad, cerr := store.FedModelCollision(m.db, cm.Name)
+		if cerr != nil {
+			// Transient failure: keep the existing row (add to keep) — a
+			// collision verdict here is unknown, and leaving the name out
+			// would let one SQLITE_BUSY delete a live materialized model.
+			m.logf("fed: collision check for shared model %q: %v (keeping previous row)", cm.Name, cerr)
+			keep = append(keep, cm.Name)
+			continue
+		}
+		if bad {
 			m.logf("fed: skipping shared model %q: %s", cm.Name, reason)
 			continue
 		}

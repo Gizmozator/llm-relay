@@ -46,6 +46,21 @@ func newRequestID() string {
 	return hex.EncodeToString(b[:])
 }
 
+// hopByHopOrSecret names the headers that never cross a federation hop in
+// either direction: the caller's credentials (each side authenticates its
+// own surface — the serving relay applies its own backend keys), and the
+// transport framing a peer-supplied value could corrupt (request
+// smuggling, fake routing).
+func hopByHopOrSecret(name string) bool {
+	switch strings.ToLower(name) {
+	case "authorization", "x-api-key", "cookie", "proxy-authorization",
+		"host", "content-length", "connection", "keep-alive", "proxy-connection",
+		"te", "trailer", "transfer-encoding", "upgrade":
+		return true
+	}
+	return false
+}
+
 // stripRequestHeaders drops what must never cross a federation hop: the
 // caller's relay credentials (the serving side applies its own backend keys
 // locally), hop-by-hop framing, and Host. Everything else — Content-Type,
@@ -54,10 +69,7 @@ func newRequestID() string {
 func stripRequestHeaders(h http.Header) Headers {
 	var out Headers
 	for k, vs := range h {
-		switch strings.ToLower(k) {
-		case "authorization", "x-api-key", "cookie", "proxy-authorization",
-			"host", "content-length", "connection", "keep-alive", "proxy-connection",
-			"te", "trailer", "transfer-encoding", "upgrade":
+		if hopByHopOrSecret(k) {
 			continue
 		}
 		for _, v := range vs {
@@ -67,21 +79,62 @@ func stripRequestHeaders(h http.Header) Headers {
 	return out
 }
 
+// wireRequestHeader rebuilds a peer-supplied request header set for the
+// local pipeline, dropping everything hopByHopOrSecret names: an honest
+// sender already stripped these (stripRequestHeaders), so anything
+// arriving is a peer trying to smuggle framing or inject credentials the
+// receiver must never accept from the wire. Honest traffic is unaffected.
+func wireRequestHeader(h Headers) http.Header {
+	out := http.Header{}
+	for _, kv := range h {
+		if hopByHopOrSecret(kv[0]) {
+			continue
+		}
+		out.Add(kv[0], kv[1])
+	}
+	return out
+}
+
+// hopByHopResponse names the response headers that never ride the return
+// trip: hop-by-hop framing (the pipe-delivered body is authoritative, so
+// Content-Length goes too) and the relay's own identity headers.
+func hopByHopResponse(name string) bool {
+	switch strings.ToLower(name) {
+	case "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+		"te", "trailer", "transfer-encoding", "upgrade", "content-length",
+		"date", "server":
+		return true
+	}
+	return false
+}
+
 // responseHeaders filters a served response's headers for the return trip:
 // hop-by-hop framing goes, Content-Length goes (the pipe-delivered body is
 // authoritative), Content-Type and every API-relevant header stays.
 func responseHeaders(h http.Header) Headers {
 	var out Headers
 	for k, vs := range h {
-		switch strings.ToLower(k) {
-		case "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
-			"te", "trailer", "transfer-encoding", "upgrade", "content-length",
-			"date", "server":
+		if hopByHopResponse(k) {
 			continue
 		}
 		for _, v := range vs {
 			out = append(out, [2]string{k, v})
 		}
+	}
+	return out
+}
+
+// wireResponseHeader rebuilds a peer-supplied response header set for the
+// local client, dropping what an honest sender already stripped
+// (hopByHopResponse): framing a malicious peer must not smuggle into the
+// relay's own downstream response.
+func wireResponseHeader(h Headers) http.Header {
+	out := http.Header{}
+	for _, kv := range h {
+		if hopByHopResponse(kv[0]) {
+			continue
+		}
+		out.Add(kv[0], kv[1])
 	}
 	return out
 }
@@ -182,7 +235,7 @@ func (m *Manager) RoundTripFed(req *http.Request) (*http.Response, error) {
 					StatusCode: t.Status,
 					Proto:      "HTTP/1.1",
 					ProtoMajor: 1, ProtoMinor: 1,
-					Header:        headersFrom(t.Headers),
+					Header:        wireResponseHeader(t.Headers),
 					Body:          pr,
 					ContentLength: -1,
 					Request:       req,
@@ -264,6 +317,10 @@ func (m *Manager) pumpTunnel(tun *tunnel, id string, ch <-chan Frame, release fu
 					return
 				}
 				if _, err := pw.Write(t.Data); err != nil {
+					// Pipe closed by the consumer: tell the far end to stop
+					// generating into a dead request — the request context
+					// may still be alive, so ctx.Done would never fire.
+					_ = tun.send(&Cancel{T: TCancel, ID: id})
 					return // pipe closed by the consumer
 				}
 			case *ResEnd:

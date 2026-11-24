@@ -174,15 +174,25 @@ func (a *sseAccum) addText(s string) {
 func (a *sseAccum) result() (pricing.Tokens, bool) {
 	switch a.endpoint {
 	case EpMessages:
-		// A half-captured usage (message_start without message_delta, or
-		// the reverse) is not definitive: claiming it would bill 0 on the
-		// missing side instead of letting the caller estimate.
-		if !a.anthInF || !a.anthOutF {
+		switch {
+		case a.anthInF && a.anthOutF:
+			tok := a.anthIn
+			tok.Completion = a.anthOut
+			return tok, true
+		case a.anthOutF && a.anthOut > 0:
+			// Delta only: the capture window missed message_start (a
+			// tail-capped transit body keeps the stream's end, where
+			// message_delta lives). The final output count is real; the
+			// input side is unknown and stays 0 — a partial ledger row
+			// beats the caller's alternative of no usage at all.
+			return pricing.Tokens{Completion: a.anthOut}, true
+		default:
+			// message_start only (or nothing): its output_tokens is the
+			// initial placeholder (~1), not the final count — claiming it
+			// would bill the completion at ~1 instead of letting the caller
+			// estimate.
 			return pricing.Tokens{}, false
 		}
-		tok := a.anthIn
-		tok.Completion = a.anthOut
-		return tok, true
 	default:
 		return a.oai, a.oaiF
 	}
