@@ -220,7 +220,7 @@ Compose-style example (generic hosts; the hub token comes from the hub's
 ```yaml
 services:
   llm-relay:
-    image: llm-relay:latest
+    image: gitea.rantaeskola.fi/gizmoz/llm-relay:latest
     ports: ["8080:8080"]   # relay port only — headless never binds the admin port
     environment:
       JWT_SECRET: "…openssl rand -hex 32…"

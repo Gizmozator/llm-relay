@@ -4,7 +4,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ${IMAGE:-llm-relay:latest}
+    image: ${IMAGE:-gitea.rantaeskola.fi/gizmoz/llm-relay:latest}
     container_name: llm-relay
     restart: unless-stopped
     ports:

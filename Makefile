@@ -1,7 +1,7 @@
 # llm-relay — every build/run/test entry point lives here.
 # Recipe lines below use real tab characters; keep them that way.
 
-IMAGE    ?= llm-relay:latest
+IMAGE    ?= gitea.rantaeskola.fi/gizmoz/llm-relay:latest
 NAME     ?= llm-relay
 PORT     ?= 8080
 ADMIN_PORT ?= 8081
