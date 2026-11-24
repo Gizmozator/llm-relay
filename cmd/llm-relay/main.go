@@ -265,7 +265,10 @@ func main() {
 	//     /healthz stays free and the machine channels keep their own
 	//     stricter buckets; tunneled federation traffic is served through
 	//     relayMux directly (the frame server calls the mux, not this
-	//     wrapper) and is bounded per key by tier 3b instead.
+	//     wrapper), so it skips the per-IP tier and hits tier 3b on the
+	//     synthetic key id (0) — ONE shared bucket for all tunneled traffic
+	//     on this relay, not a per-peer one. Per-peer channel limits are
+	//     tier 5, reserved for #17.
 	//   • Tier 6: ONE server-wide in-flight shed shared by every listener
 	//     (relay, admin, TLS): at saturation new requests get 503 +
 	//     Retry-After instead of queueing onto a melting box. Long streams

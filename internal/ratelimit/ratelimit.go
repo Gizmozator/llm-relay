@@ -189,6 +189,13 @@ type FailureTracker struct {
 }
 
 func NewFailureTracker(cfg Lockout) *FailureTracker {
+	// A non-positive cap would make the eviction sweep fire on the first
+	// insert (degenerating to a ~1-entry tracker that forgets real streaks).
+	// No shipped config does this, but harden the constructor so a zero
+	// MaxEntries falls back to the same bound the keyed stores use.
+	if cfg.MaxEntries <= 0 {
+		cfg.MaxEntries = StoreMax
+	}
 	return &FailureTracker{m: make(map[string]*failEntry), cfg: cfg}
 }
 
