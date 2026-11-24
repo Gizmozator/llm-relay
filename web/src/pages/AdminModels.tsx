@@ -25,6 +25,17 @@ const PRICE_FIELDS = [
   { key: 'price_cache_write', label: 'Cache write' },
 ] as const;
 
+// Display labels for the Share dropdown. The stored/wire value stays 'off'
+// (the store CHECK-constrains fed_visibility to off|all|allowlist), but the
+// UI shows 'local' so the option reads as a sharing scope (local / allowlist
+// / all) instead of an on/off toggle. Display only — the <option value> and
+// every PATCH payload still carry the raw enum.
+const FED_VISIBILITY_LABELS: Record<FedVisibility, string> = {
+  off: 'local',
+  all: 'all',
+  allowlist: 'allowlist',
+};
+
 export default function AdminModelsPage() {
   const toast = useToast();
   const models = useLoad(() => api.models().then((r) => r.models), []);
@@ -74,8 +85,8 @@ export default function AdminModelsPage() {
   // own — the catalog rule), so the option needs an honest tooltip there.
   const fedShareTitle =
     fedRole.data?.role === 'spoke'
-      ? 'Federation sharing: off = local only, all = shared with the hub, allowlist = effectively off on a spoke (only “all” is pushed)'
-      : 'Federation sharing: off = local only, all = every peer, allowlist = the selected peers only';
+      ? 'Federation sharing: local = not shared with the federation, all = shared with the hub, allowlist = effectively local on a spoke (only “all” is pushed)'
+      : 'Federation sharing: local = not shared with the federation, all = every peer, allowlist = the selected peers only';
   const [showGroupAdd, setShowGroupAdd] = useState(false);
   // Id of the group whose member editor is open; the group itself is looked
   // up from the fresh list so a reload never edits a stale copy.
@@ -421,7 +432,7 @@ export default function AdminModelsPage() {
                               >
                                 {FED_VISIBILITIES.map((v) => (
                                   <option key={v} value={v}>
-                                    {v}
+                                    {FED_VISIBILITY_LABELS[v]}
                                   </option>
                                 ))}
                               </select>

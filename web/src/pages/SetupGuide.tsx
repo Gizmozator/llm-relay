@@ -103,7 +103,7 @@ export default function SetupGuidePage() {
           Nothing is shared until you opt in: on your relay’s{' '}
           <code className="mono">Admin → Models</code> page set each model’s
           federation switch to <code className="mono">all</code>. Paid or
-          private backends simply stay <code className="mono">off</code> and
+          private backends simply stay <code className="mono">local</code> and
           never appear on the hub.
         </p>
       </section>
