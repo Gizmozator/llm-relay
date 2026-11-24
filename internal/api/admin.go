@@ -177,9 +177,10 @@ func (s *Server) AdminListBackends(w http.ResponseWriter, r *http.Request, c *au
 
 func (s *Server) AdminCreateBackend(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
 	var in struct {
-		Name    string `json:"name"`
-		BaseURL string `json:"base_url"`
-		APIKey  string `json:"api_key"`
+		Name        string `json:"name"`
+		BaseURL     string `json:"base_url"`
+		APIKey      string `json:"api_key"`
+		OwnerUserID *int64 `json:"owner_user_id"`
 	}
 	if err := decode(r, &in); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON")
@@ -191,16 +192,31 @@ func (s *Server) AdminCreateBackend(w http.ResponseWriter, r *http.Request, c *a
 		writeErr(w, http.StatusBadRequest, "name required and base_url must start with http:// or https://")
 		return
 	}
-	b, err := store.CreateBackend(s.DB, in.Name, in.BaseURL, in.APIKey)
-	if err == store.ErrExists {
+	// owner_user_id 0 (or absent) means "no owner"; a positive id is validated
+	// by the store (clear ErrInvalid for a user that does not exist).
+	owner := ownerFromBody(in.OwnerUserID)
+	b, err := store.CreateBackendWithOwner(s.DB, in.Name, in.BaseURL, in.APIKey, owner)
+	switch {
+	case err == store.ErrExists:
 		writeErr(w, http.StatusConflict, "backend name taken")
 		return
-	}
-	if err != nil {
+	case errors.Is(err, store.ErrInvalid):
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	case err != nil:
 		writeErr(w, http.StatusInternalServerError, "backend create failed")
 		return
 	}
 	writeJSON(w, http.StatusCreated, b)
+}
+
+// ownerFromBody maps a PATCH/POST owner_user_id to a store owner pointer:
+// nil (absent) or 0 clears/omits the owner, a positive id sets it.
+func ownerFromBody(v *int64) *int64 {
+	if v == nil || *v == 0 {
+		return nil
+	}
+	return v
 }
 
 func (s *Server) AdminUpdateBackend(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
@@ -210,11 +226,12 @@ func (s *Server) AdminUpdateBackend(w http.ResponseWriter, r *http.Request, c *a
 		return
 	}
 	var in struct {
-		Name     *string `json:"name"`
-		BaseURL  *string `json:"base_url"`
-		APIKey   *string `json:"api_key"`
-		Enabled  *bool   `json:"enabled"`
-		Draining *bool   `json:"draining"`
+		Name        *string `json:"name"`
+		BaseURL     *string `json:"base_url"`
+		APIKey      *string `json:"api_key"`
+		Enabled     *bool   `json:"enabled"`
+		Draining    *bool   `json:"draining"`
+		OwnerUserID *int64  `json:"owner_user_id"`
 	}
 	if err := decode(r, &in); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON")
@@ -258,6 +275,21 @@ func (s *Server) AdminUpdateBackend(w http.ResponseWriter, r *http.Request, c *a
 		}
 		in.Name = &trimmed
 	}
+	// Owner (ticket #12): validate the user exists up front so a bad id is a
+	// clean 400 before any write, then apply it after the field update. An
+	// owner_user_id of 0 clears the owner; absent leaves it unchanged.
+	owner := ownerFromBody(in.OwnerUserID)
+	if owner != nil {
+		ok, err := store.UserExists(s.DB, *owner)
+		switch {
+		case err != nil:
+			writeErr(w, http.StatusInternalServerError, "internal error")
+			return
+		case !ok:
+			writeErr(w, http.StatusBadRequest, "owner user does not exist")
+			return
+		}
+	}
 	b, err := store.UpdateBackend(s.DB, id, in.Name, in.BaseURL, in.APIKey, in.Enabled, in.Draining)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
@@ -269,6 +301,20 @@ func (s *Server) AdminUpdateBackend(w http.ResponseWriter, r *http.Request, c *a
 	case err != nil:
 		writeErr(w, http.StatusInternalServerError, "backend update failed")
 		return
+	}
+	// Apply the owner change last (its own single UPDATE): the field update
+	// above already committed, and the owner is validated, so this only fails
+	// on a vanished row. Re-read through it so the response carries the owner.
+	if in.OwnerUserID != nil {
+		b, err = store.SetBackendOwner(s.DB, id, owner)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			writeErr(w, http.StatusNotFound, "backend not found")
+			return
+		case err != nil:
+			writeErr(w, http.StatusInternalServerError, "backend update failed")
+			return
+		}
 	}
 	// Enabled state gates what the catalog shares (both roles push).
 	s.catalogChanged()
