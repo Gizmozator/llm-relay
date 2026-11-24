@@ -1,27 +1,7 @@
-import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
-import { copyToClipboard } from '../format';
 import { useLoad } from '../useLoad';
-import { Banner, CopyField, Loading } from '../components/ui';
-
-/** Monospace snippet with a copy button. */
-function CodeBlock({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false);
-  const copy = async () => {
-    const ok = await copyToClipboard(text);
-    setCopied(ok);
-    if (ok) window.setTimeout(() => setCopied(false), 2000);
-  };
-  return (
-    <div className="code-block">
-      <pre className="mono">{text}</pre>
-      <button className="btn small" onClick={copy}>
-        {copied ? 'Copied ✓' : 'Copy'}
-      </button>
-    </div>
-  );
-}
+import { Banner, CodeBlock, CopyField, Loading } from '../components/ui';
 
 /**
  * Integration guide for AI agents: the public markdown URL to hand to an

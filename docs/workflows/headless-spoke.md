@@ -15,16 +15,12 @@ Env reference: README **Headless spoke** section + `.env.example`.
 1. **Hub side** (once): on the hub's dashboard, *My keys → Server token* →
    create a `fed-…` token. Note the hub's public relay URL (the URL spokes
    dial, i.e. the relay port, not the admin port).
-2. **Spoke side**: set the env (see `.env.example`):
-
-   ```
-   JWT_SECRET=…            # still required by config (≥32 chars)
-   HEADLESS=true
-   BACKEND_URL=http://engine.example.fi:8080
-   MODEL_NAME=qwen3-coder
-   HUB_URL=https://relay.example.fi
-   HUB_TOKEN=fed-…
-   ```
+2. **Spoke side**: copy `deploy/headless-spoke/docker-compose.yml` and
+   `deploy/headless-spoke/.env.example` (rename the latter to `.env`) onto the
+   machine that runs your engine, and fill in `.env`: `JWT_SECRET` (≥32 chars),
+   `BACKEND_URL`, `MODEL_NAME`, `HUB_URL` and `HUB_TOKEN`. The hub's
+   **Connect your server** page shows these same two files ready to copy, with
+   `HUB_URL` already filled in.
 
    Missing/empty `BACKEND_URL`, `MODEL_NAME`, `HUB_URL` or `HUB_TOKEN` =
    the relay refuses to start (`config: X is required when HEADLESS=true`).

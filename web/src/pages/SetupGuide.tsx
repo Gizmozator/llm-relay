@@ -2,7 +2,12 @@ import { Link } from 'react-router-dom';
 import { api } from '../api';
 import { useAuth } from '../auth';
 import { useLoad } from '../useLoad';
-import { Banner, CopyField, Loading } from '../components/ui';
+import { Banner, CodeBlock, CopyField, Loading } from '../components/ui';
+// Canonical spoke templates: the dashboard shows (and lets you copy) the very
+// files that ship in deploy/headless-spoke/, imported at build time so the
+// page can never drift from them — edit the file, rebuild the web, it updates.
+import composeRaw from '../../../deploy/headless-spoke/docker-compose.yml?raw';
+import spokeEnvRaw from '../../../deploy/headless-spoke/.env.example?raw';
 
 /**
  * Setup guide ("set up your home server"): how a user enrolls their own
@@ -16,6 +21,12 @@ export default function SetupGuidePage() {
   // The spoke dials {hub_url}/federation/v1/connect, so what goes into its
   // config is this relay's base URL — no path.
   const hubUrl = (info.data?.relay_url ?? '').replace(/\/+$/, '');
+  // The shipped .env.example carries a placeholder hub; when this hub advertises
+  // its own URL (PUBLIC_RELAY_URL), fill it into the copyable env so the file
+  // works as-is. Everything else is copied verbatim from the repo file.
+  const spokeEnv = hubUrl
+    ? spokeEnvRaw.replace(/^HUB_URL=.*$/m, () => `HUB_URL=${hubUrl}`)
+    : spokeEnvRaw;
 
   if (role.loading && !role.data) return <Loading />;
   if (role.error) return <Banner>Could not load federation role: {role.error}</Banner>;
@@ -106,6 +117,28 @@ export default function SetupGuidePage() {
           private backends simply stay <code className="mono">local</code> and
           never appear on the hub.
         </p>
+      </section>
+
+      <section className="panel">
+        <h3>Or: run a headless spoke (one model, no dashboard)</h3>
+        <p className="dim">
+          If that machine does not run a relay yet and you only want to share a
+          single model, skip the dashboard entirely. Put these two files next to
+          each other, fill in your engine and the <code className="mono">fed-…</code>{' '}
+          token from step 1, then <code className="mono">docker compose up -d</code>.
+          The box boots already pointed at this hub and shares its one model
+          automatically; the admin dashboard stays closed and only the relay
+          port is exposed.
+        </p>
+        <CodeBlock title="docker-compose.yml" text={composeRaw} />
+        <CodeBlock title=".env" text={spokeEnv} />
+        {!hubUrl && (
+          <p className="dim">
+            The hub admin has not set <code className="mono">PUBLIC_RELAY_URL</code>,
+            so <code className="mono">HUB_URL</code> above is still the example
+            host — replace it with this hub’s relay URL before starting.
+          </p>
+        )}
       </section>
 
       <section className="panel">

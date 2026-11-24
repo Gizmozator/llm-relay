@@ -122,3 +122,10 @@ None open. (Hub-side price overrides: out of scope, Decision 2.)
   (the admin API already refuses them; headless writes the row directly), and
   the four required vars are trimmed in place so a padded value cannot
   surface later as a probe/dial failure.
+- 2026-11-24 — the hub's **Connect your server** page now offers a copyable
+  headless-spoke `docker-compose.yml` + `.env`, so enrolling a single-model box
+  is copy-paste rather than hand-writing files. The content is the canonical
+  `deploy/headless-spoke/` files imported at web build time (`?raw`), so the
+  page can never drift from them; the live hub URL is interpolated into
+  `HUB_URL` when the hub advertises `PUBLIC_RELAY_URL`. The runbook and README
+  now point at these files instead of repeating the env block.

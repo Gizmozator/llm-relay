@@ -464,6 +464,13 @@ td.money {
   margin: 8px 0;
 }
 
+/* Optional caption above a code block (a file name, e.g. on the connect page). */
+.code-block-title {
+  margin: 10px 0 -2px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
 .code-block pre {
   margin: 0;
   padding: 10px 12px;

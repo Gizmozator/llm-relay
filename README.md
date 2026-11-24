@@ -214,8 +214,10 @@ rows, so changing anything means editing the env and restarting.
 | `BACKEND_TOKEN` | — | bearer token for the backend (optional) |
 | `PRICE_IN` / `PRICE_OUT` / `PRICE_CACHE_READ` / `PRICE_CACHE_WRITE` | `0` | price in integer micro-units per 1M tokens (0 = free) |
 
-Compose-style example (generic hosts; the hub token comes from the hub's
-*My keys → Server token*):
+Ready-made copies live in `deploy/headless-spoke/` (`docker-compose.yml` +
+`.env.example`), and a hub shows both on its **Connect your server** page ready
+to copy with `HUB_URL` pre-filled. Equivalent compose-style example (generic
+hosts; the hub token comes from the hub's *My keys → Server token*):
 
 ```yaml
 services:
@@ -333,7 +335,7 @@ llm-relay
 ├── internal/api           dashboard JSON API (user + admin)
 ├── web/                   Vite + React + Chart.js dashboard (embedded via go:embed)
 ├── scripts/               manual tools: federation e2e (two relays + mock engines)
-├── deploy/                sample container-compose stack
+├── deploy/                sample container-compose stacks (incl. headless-spoke/)
 ├── docs/
 │   ├── api-contract.md    authoritative HTTP API contract
 │   ├── screenshots/       dashboard screenshots (shown in README)

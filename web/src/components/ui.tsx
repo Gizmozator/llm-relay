@@ -192,6 +192,31 @@ export function CopyField({
   );
 }
 
+/**
+ * Monospace snippet with a copy button; optional caption (a file name, a
+ * command label). Shared by the agent guide and the connect-your-server
+ * guide so the copy affordance stays identical across pages.
+ */
+export function CodeBlock({ text, title }: { text: string; title?: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    const ok = await copyToClipboard(text);
+    setCopied(ok);
+    if (ok) window.setTimeout(() => setCopied(false), 2000);
+  };
+  return (
+    <>
+      {title && <div className="code-block-title mono">{title}</div>}
+      <div className="code-block">
+        <pre className="mono">{text}</pre>
+        <button className="btn small" onClick={copy}>
+          {copied ? 'Copied ✓' : 'Copy'}
+        </button>
+      </div>
+    </>
+  );
+}
+
 /** Labeled form field. */
 export function Field({
   label,
