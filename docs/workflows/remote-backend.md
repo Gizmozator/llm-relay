@@ -76,6 +76,11 @@ token in the env and restart the connector. Disable or delete does the same.
   required"` means the relay is not serving TLS where you dial: it needs a
   cert (Settings → TLS) or, behind a TLS-terminating proxy, `TLS_PORT=0` **and**
   `TRUST_PROXY_HEADERS=true` so `X-Forwarded-Proto: https` satisfies the gate.
+- **429 at connect** (`too many connect attempts`): the per-source-IP
+  machine-endpoint bucket is drained — usually repeated bad-token attempts
+  (a wrong or rotated token typed into `.env`) or a flapping connector loop.
+  A successful connect resets the bucket; see `RATELIMIT_CONNECT_*` in the
+  README and fix the token rather than raising the limit.
 - **Online but Sync models fails**: the engine is down on the remote box
   (`ENGINE_URL` wrong or the engine not up) — the connector answers the
   probe from the engine, so a dead engine reads as a probe error, not a
@@ -86,3 +91,16 @@ token in the env and restart the connector. Disable or delete does the same.
 - **Connector restart flaps the row offline/online briefly**: expected —
   the new connection replaces the old one on the handshake; no action
   needed.
+
+## Channel admission (reserved seam, ticket #18)
+
+The abuse-protection stack (`internal/ratelimit`, README **Abuse
+protection**) guards the connect endpoints per source IP, but per-channel
+admission for live tunnels (tier 5) is deliberately **not** wired yet:
+the federation channel keeps its bespoke `fed.MaxInflight` cap, and remote
+channels have none. When the channel rework (#17) lands, that per-peer /
+per-backend cap moves into `internal/ratelimit` as the tier-5 store keyed
+on the channel identity — per-socket IP is the wrong key there, since one
+box multiplexes its channels over one source address. Until then, treat
+`fed.MaxInflight` as the only per-channel bound and do not add a second one
+at the HTTP layer.

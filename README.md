@@ -239,6 +239,56 @@ whatever it always did; only the two connect endpoints are gated. The cert
 lives in the database (single row), its private key plaintext-at-rest like every
 other secret there — the file's permissions are the boundary.
 
+## Abuse protection
+
+Rate limiting and concurrency caps are a **server-wide property**: every
+listener answers with bounded work per client in **every mode** (standalone,
+hub, spoke — all serve the relay and admin muxes). All limiters are in-memory
+(single-instance app), size-capped with TTL/LRU eviction so the limiter
+itself can never become the DoS, and every denial carries a truthful
+`Retry-After`. **Setting a tier's rate or burst to `0` turns that tier off**
+(the dev/LAN escape); defaults are sized so legitimate traffic never sees a
+429/503.
+
+| tier | keyed on | protects | knobs (default) |
+|---|---|---|---|
+| pre-auth endpoints | source IP | `POST /api/auth/login` | `RATELIMIT_LOGIN_RATE`/`_BURST` (`0.2`/`10`) |
+| login failure backoff | source IP **+ username** | per-account password spraying across many source IPs | `RATELIMIT_LOGIN_LOCK_AFTER`/`_SECONDS` (`5`/`30`) |
+| machine endpoints | source IP | `/federation/v1/*`, `/remote/v1/connect` (each bad token costs a hash + DB lookup) | `RATELIMIT_CONNECT_RATE`/`_BURST` (`0.2`/`10`) |
+| `/v1` per client | source IP | the public relay surface, pre-auth (bad-key floods) | `RATELIMIT_V1_IP_RATE`/`_BURST` (`100`/`200`) |
+| `/v1` per key | resolved API key | authenticated abuse, applied after auth before proxy work | `RATELIMIT_V1_KEY_RATE`/`_BURST` (`50`/`100`) |
+| admin API | dashboard user | runaway scripts / stolen sessions on `/api/*` | `RATELIMIT_ADMIN_RATE`/`_BURST` (`100`/`200`) |
+| global shed | server-wide | total in-flight requests → `503` at saturation | `RATELIMIT_GLOBAL_MAX_INFLIGHT` (`1024`) |
+
+Behaviour notes:
+
+- **Login**: a successful login resets the per-IP bucket; five consecutive
+  failures for one (IP, username) pair lock that pair out for 30 s,
+  doubling per additional failure up to 15 min — the correct password is
+  refused with 429 until the window passes, then works again.
+- **Connect endpoints**: a valid token resets the bucket, so a legitimately
+  reconnecting spoke/connector never drains its own credits; only failing
+  traffic does.
+- **Streaming is never broken**: there is deliberately no blanket
+  `WriteTimeout`/`ReadTimeout` on the HTTP servers — long SSE streams stay
+  bounded by per-handler deadlines and idle timeouts, not by a wall clock on
+  the socket.
+- **Tunnel channels (reserved seam)**: per-backend/per-peer channel admission
+  (tier 5 of the plan) is the future home of the federation channel's
+  bespoke `fed.MaxInflight` cap; it moves over when the channel rework
+  (#17) lands. Per-socket IP is the wrong key there — one spoke box is one
+  shared source for all its channels.
+
+**Source IP and `TRUST_PROXY_HEADERS`**: every per-IP tier keys on the peer
+address, and consults `X-Forwarded-For` (rightmost entry — the one appended
+by your own proxy) **only when `TRUST_PROXY_HEADERS=true`**. That flag is
+not optional behind a reverse proxy: without it every client behind the
+proxy shares the proxy's IP and one bucket, so a single abuser locks
+everyone out of login, `/v1` and the connect endpoints. Conversely, turning
+it on while clients can reach the relay directly lets them mint one bucket
+per forged header — the flag means *"every request arrives through my
+proxy"*.
+
 ## Remote backends
 
 A **remote backend** is an engine on another machine — typically behind NAT —
@@ -338,8 +388,15 @@ Environment (or `.env`, see `.env.example`):
 | `DB_PATH` | `/data/llm-relay.db` | SQLite file (parent dir auto-created) |
 | `JWT_SECRET` | — **required** | dashboard JWT signing key (≥32 chars, HS256 floor; `openssl rand -hex 32`); **not needed when `HEADLESS=true`** — a connector has no dashboard to sign into |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | — | bootstrap admin, first run on empty DB only |
-| `TRUST_PROXY_HEADERS` | `false` | trust `X-Forwarded-For` on the relay port (set behind a reverse proxy); the login rate limiter always keys on the peer address. **Also required for a TLS-terminating proxy**: with it on **and `TLS_PORT=0`**, `X-Forwarded-Proto: https` satisfies the machine-channel TLS gate (see **TLS for machine channels**) |
+| `TRUST_PROXY_HEADERS` | `false` | trust `X-Forwarded-For` on both listeners (set behind a reverse proxy): the proxy's metering and **every per-IP rate limit** key on the real client (rightmost XFF entry); without it all proxied clients share the proxy's bucket. **Also required for a TLS-terminating proxy**: with it on **and `TLS_PORT=0`**, `X-Forwarded-Proto: https` satisfies the machine-channel TLS gate (see **TLS for machine channels**) |
 | `TLS_PORT` / `TLS_ADDR` | `8443` | TLS listener for the machine channels (federation + remote-backend connect), serving the same relay mux with the dashboard-generated cert. `0` disables it (the TLS-terminating-proxy deployment, where the proxy holds the real cert) |
+| `RATELIMIT_LOGIN_RATE` / `_BURST` | `0.2` / `10` | login per-source-IP token bucket (sustained req/s / burst). `0` on either disables the tier |
+| `RATELIMIT_LOGIN_LOCK_AFTER` / `_SECONDS` | `5` / `30` | consecutive failures per (IP, username) before lockout / initial lockout seconds (doubles per extra failure, capped 15 min). `0` disables the lockout |
+| `RATELIMIT_CONNECT_RATE` / `_BURST` | `0.2` / `10` | per-source-IP bucket on `/federation/v1/*` + `/remote/v1/connect`. `0` disables |
+| `RATELIMIT_V1_IP_RATE` / `_BURST` | `100` / `200` | per-source-IP bucket on the public `/v1` surface (pre-auth). `0` disables |
+| `RATELIMIT_V1_KEY_RATE` / `_BURST` | `50` / `100` | per-API-key bucket on authenticated `/v1` traffic. `0` disables |
+| `RATELIMIT_ADMIN_RATE` / `_BURST` | `100` / `200` | per-user bucket on the authenticated dashboard API. `0` disables |
+| `RATELIMIT_GLOBAL_MAX_INFLIGHT` | `1024` | server-wide in-flight cap; at saturation new requests get 503 + `Retry-After`. `0` disables the shed |
 | `PUBLIC_RELAY_URL` / `PUBLIC_DASHBOARD_URL` | — | URLs shown in the dashboard copy buttons and interpolated into the agent guide; **include the scheme**, and a hostname or a plain IP:port both work (LAN hosting: `http://192.0.2.10:8080`); relay is the **root** (no `/v1` — the dashboard appends `/v1` for the OpenAI base) |
 | `HEADLESS` (+ `RELAY_URL`/`RELAY_TOKEN`/`ENGINE_URL`/`ENGINE_TOKEN`) | `false` | remote-backend connector: dial in to a relay and expose a local engine — see **Remote backends** |
 | `TZ` | `Europe/Helsinki` | timezone |
