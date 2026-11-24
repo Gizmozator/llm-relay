@@ -22,6 +22,7 @@ import (
 	"llm-relay/internal/config"
 	"llm-relay/internal/db"
 	"llm-relay/internal/fed"
+	"llm-relay/internal/headless"
 	"llm-relay/internal/proxy"
 	"llm-relay/internal/store"
 	"llm-relay/internal/usage"
@@ -104,6 +105,20 @@ func main() {
 	// materialized rows) with every route in place. A failed reconcile
 	// (settings read or purge) is logged, not fatal: the relay serves
 	// local traffic regardless, and the next settings PUT retries.
+	// Headless spoke (plan 2026-11-24-headless-spoke): the env is the source
+	// of truth — backend, model and federation settings land in the DB here,
+	// BEFORE the manager reads them below, so the dialer starts with
+	// everything in place. Fatal on error: a half-configured headless box
+	// cannot serve its one model, and there is no dashboard to fix it in.
+	if cfg.Headless {
+		if err := headless.Bootstrap(d, headless.FromConfig(cfg), log.Printf); err != nil {
+			log.Fatalf("startup: %v", err)
+		}
+		// Mirror the admin API's hook: the shareable catalog just changed.
+		// (The dialer's post-connect push carries the first frame anyway;
+		// this covers a hub that comes up later without a reconnect.)
+		fedMgr.CatalogChanged()
+	}
 	if err := fedMgr.Reload(); err != nil {
 		log.Printf("federation startup: %v", err)
 	}

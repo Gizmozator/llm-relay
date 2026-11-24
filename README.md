@@ -187,6 +187,55 @@ shown once, rotatable, and disabling a peer drops its live channel at once.
 Spoke-local usernames never leave the spoke — the hub stamps its own identity
 onto forwarded traffic and is the attribution authority for the ledger.
 
+## Headless spoke
+
+**Headless spoke** = "I have one local model on one machine and want to add
+it to a federation": pure env config, no dashboard interaction, exactly one
+model, restart to change anything. **Full relay server** = everything beyond
+that: several models/machines, pricing per model, users/keys, the dashboard.
+If you want to add a single local model, run headless; for more models or
+options, run the full server and use the dashboard.
+
+With `HEADLESS=true` the relay boots fully configured by env: it creates (or
+re-applies) one backend, one shared model and the spoke federation settings,
+then the ordinary federation machinery dials the hub and shares the model.
+The dashboard stays served and usable — it is simply not needed. Every boot
+re-applies the env over the stored rows, so changing anything means editing
+the env and restarting.
+
+| var | default | meaning |
+|---|---|---|
+| `HEADLESS` | `false` | enable the env bootstrap; when true the four vars below are **required** (missing = boot error) |
+| `BACKEND_URL` | — **required** | server root of the upstream OpenAI-compatible server |
+| `MODEL_NAME` | — **required** | the upstream model id this backend serves — the relay's entire catalog |
+| `HUB_URL` | — **required** | the hub's relay URL (the spoke dials out to it) |
+| `HUB_TOKEN` | — **required** | the `fed-…` server token minted on the hub |
+| `BACKEND_TOKEN` | — | bearer token for the backend (optional) |
+| `PRICE_IN` / `PRICE_OUT` / `PRICE_CACHE_READ` / `PRICE_CACHE_WRITE` | `0` | price in integer micro-units per 1M tokens (0 = free) |
+
+Compose-style example (generic hosts; the hub token comes from the hub's
+*My keys → Server token*):
+
+```yaml
+services:
+  llm-relay:
+    image: llm-relay:latest
+    ports: ["8080:8080", "8081:8081"]
+    environment:
+      JWT_SECRET: "…openssl rand -hex 32…"
+      HEADLESS: "true"
+      BACKEND_URL: "http://engine.example.fi:8080"
+      MODEL_NAME: "qwen3-coder"
+      HUB_URL: "https://relay.example.fi"
+      HUB_TOKEN: "fed-…"
+      PRICE_IN: "100"
+      PRICE_OUT: "200"
+    volumes: ["./data:/data"]
+```
+
+Bring-up steps, how to verify on the hub and common failures:
+`docs/workflows/headless-spoke.md`.
+
 ## Supported upstream dialects
 
 | Route | Dialect | Metered |
@@ -253,6 +302,7 @@ Environment (or `.env`, see `.env.example`):
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | — | bootstrap admin, first run on empty DB only |
 | `TRUST_PROXY_HEADERS` | `false` | trust `X-Forwarded-For` on the relay port (set behind a reverse proxy); the login rate limiter always keys on the peer address |
 | `PUBLIC_RELAY_URL` / `PUBLIC_DASHBOARD_URL` | — | URLs shown in the dashboard copy buttons and interpolated into the agent guide; **include the scheme**, and a hostname or a plain IP:port both work (LAN hosting: `http://192.0.2.10:8080`); relay is the **root** (no `/v1` — the dashboard appends `/v1` for the OpenAI base) |
+| `HEADLESS` (+ `BACKEND_URL`/`MODEL_NAME`/`HUB_URL`/`HUB_TOKEN`/`BACKEND_TOKEN`/`PRICE_*`) | `false` | env-only bootstrap of a single-model spoke — see **Headless spoke** |
 | `TZ` | `Europe/Helsinki` | timezone |
 
 ## Deployment
@@ -273,6 +323,7 @@ llm-relay
 ├── internal/pricing       cost snapshots (integer micro-units)
 ├── internal/usage         buffered usage recorder
 ├── internal/proxy         dialect forwarder, SSE scanning, backend discovery
+├── internal/headless      headless-spoke bootstrap: env → backend+model+fed settings
 ├── internal/api           dashboard JSON API (user + admin)
 ├── web/                   Vite + React + Chart.js dashboard (embedded via go:embed)
 ├── scripts/               manual tools: federation e2e (two relays + mock engines)

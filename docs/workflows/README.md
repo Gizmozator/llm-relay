@@ -7,6 +7,7 @@ Runbooks. Read the one you need; do not read the folder.
 | [review-protocol.md](review-protocol.md) | before every commit — how the `reviewer` subagent is used |
 | [bug-fix-loop.md](bug-fix-loop.md) | fixing a reported bug (Gitea `bug` label) |
 | [feature-dev-loop.md](feature-dev-loop.md) | building an enhancement / feature request |
+| [headless-spoke.md](headless-spoke.md) | bringing up an env-only single-model spoke and verifying it on the hub |
 | [conventions.md](conventions.md) | commit messages, branches, issue references, doc updates |
 
 ## The invariant

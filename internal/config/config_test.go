@@ -27,3 +27,72 @@ func TestLoadRejectsSharedAddr(t *testing.T) {
 		t.Fatal("relay and admin on the same address must be rejected")
 	}
 }
+
+// headlessEnv is a complete, valid HEADLESS=true environment; each
+// subtest breaks one required var.
+func headlessEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("JWT_SECRET", "0123456789abcdef0123456789abcdef")
+	t.Setenv("HEADLESS", "true")
+	t.Setenv("BACKEND_URL", "http://backend.example.fi:8080")
+	t.Setenv("MODEL_NAME", "qwen3-coder")
+	t.Setenv("HUB_URL", "https://relay.example.fi")
+	t.Setenv("HUB_TOKEN", "fed-secret-token")
+}
+
+func TestLoadHeadlessRequiresVars(t *testing.T) {
+	for _, key := range []string{"BACKEND_URL", "MODEL_NAME", "HUB_URL", "HUB_TOKEN"} {
+		t.Run(key+"_empty", func(t *testing.T) {
+			headlessEnv(t)
+			t.Setenv(key, "")
+			if _, err := Load(); err == nil {
+				t.Fatalf("%s must be required when HEADLESS=true", key)
+			}
+		})
+		t.Run(key+"_whitespace", func(t *testing.T) {
+			headlessEnv(t)
+			t.Setenv(key, "  ")
+			if _, err := Load(); err == nil {
+				t.Fatalf("whitespace-only %s must be rejected when HEADLESS=true", key)
+			}
+		})
+	}
+}
+
+func TestLoadHeadlessValid(t *testing.T) {
+	headlessEnv(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("valid headless config rejected: %v", err)
+	}
+	if !c.Headless || c.ModelName != "qwen3-coder" {
+		t.Fatalf("parsed config wrong: %+v", c)
+	}
+	// Price defaults: 0 (free) unless set.
+	if c.PriceIn != 0 || c.PriceOut != 0 || c.PriceCacheRead != 0 || c.PriceCacheWrite != 0 {
+		t.Errorf("price defaults = %d/%d/%d/%d, want 0/0/0/0",
+			c.PriceIn, c.PriceOut, c.PriceCacheRead, c.PriceCacheWrite)
+	}
+	t.Setenv("PRICE_IN", "1000")
+	t.Setenv("PRICE_CACHE_WRITE", "7")
+	c, err = Load()
+	if err != nil {
+		t.Fatalf("valid headless config rejected: %v", err)
+	}
+	if c.PriceIn != 1000 || c.PriceCacheWrite != 7 {
+		t.Errorf("prices = %d/%d, want 1000/7", c.PriceIn, c.PriceCacheWrite)
+	}
+}
+
+// HEADLESS=false (the default) must ignore the whole headless block: an env
+// without any of the new vars parses exactly as before.
+func TestLoadHeadlessOffIgnoresBlock(t *testing.T) {
+	t.Setenv("JWT_SECRET", "0123456789abcdef0123456789abcdef")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("config without headless vars rejected: %v", err)
+	}
+	if c.Headless {
+		t.Error("HEADLESS must default to false")
+	}
+}
