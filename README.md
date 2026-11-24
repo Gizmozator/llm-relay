@@ -188,6 +188,15 @@ user and per server. Usage through a federated model is metered to the
 consuming user and credited to the serving account: fairness bookkeeping,
 not billing.
 
+**Crediting the hub's own hardware**: a spoke's served capacity is credited to
+its peer's owner user, but the hub's own backends had no such owner, so hub-local
+serving left the per-user fairness table silent. An admin can now set an
+**Owner** on any backend (the **Backends** page, or `owner_user_id` on the
+backends API): usage that backend's own hardware serves to a peer is credited to
+that user's *served* total — the hub-side mirror of a spoke's capacity crediting
+its peer owner. A backend with no owner behaves exactly as before (hub-hardware
+usage stays uncredited), and a spoke's own crediting is unchanged.
+
 **Security**: server tokens (`fed-…`) authenticate only the federation
 channel, never `/v1/*` (and API keys never the channel); they are hashed,
 shown once, rotatable, and disabling a peer drops its live channel at once.

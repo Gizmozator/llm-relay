@@ -54,11 +54,11 @@ Proxy requests may carry `X-Session-Id: <string>`; without it the relay derives 
 - `PATCH /api/admin/users/{id}` — any of `{"password","disabled","role","display_name","price_multiplier"}` → user object. `price_multiplier` (float >0, default 1) scales every cost recorded for that user at request time (snapshot semantics: changing it never rewrites existing rows). Admin-only: `GET /api/me` deliberately omits it. Guard: an update that would leave zero enabled admins → `400`; setting a password >72 bytes → `400`.
 
 ### Admin — backends
-- `GET /api/admin/backends` → `{"backends":[{"id":1,"name":"halogen","base_url":"http://llm-host:8731","has_key":false,"enabled":true,"draining":false,"online":true,"health_error":"","last_probe_at":"...|null","last_probe_error":"...|null","server_version":"...|null","created_at":"...","model_count":2}]}` — `online` is the **live** reachability verdict (shared health cache, re-probed at most once per minute per backend; disabled backends are offline without a probe) and `health_error` explains a live `false`; `last_probe_*` are the stored result of the last manual Probe only
-- `POST /api/admin/backends` — `{"name","base_url","api_key"?}` → `201` backend object
+- `GET /api/admin/backends` → `{"backends":[{"id":1,"name":"halogen","base_url":"http://llm-host:8731","has_key":false,"enabled":true,"draining":false,"online":true,"health_error":"","last_probe_at":"...|null","last_probe_error":"...|null","server_version":"...|null","created_at":"...","model_count":2,"owner_user_id":2|null}]}` — `online` is the **live** reachability verdict (shared health cache, re-probed at most once per minute per backend; disabled backends are offline without a probe) and `health_error` explains a live `false`; `last_probe_*` are the stored result of the last manual Probe only; `owner_user_id` is the fairness-credit owner (ticket #12) — the user credited in the federation ledger when this backend's own hardware serves, `null` when unowned
+- `POST /api/admin/backends` — `{"name","base_url","api_key"?,"owner_user_id"?}` → `201` backend object. `owner_user_id` (ticket #12) sets the fairness-credit owner up front; a non-existent user id → `400`
 - `POST /api/admin/backends/remote` — `{"name"}` → `201 {"backend":{...},"token":"rb-..."}`: creates a **remote backend** (plan 2026-11-24-remote-backend-v1) — a backend row with `base_url = remote://<id>` and a fresh connect token shown **once** (only its SHA-256 hash is stored). `400` missing name · `409` name taken (one namespace with plain backends)
 - `POST /api/admin/backends/{id}/remote/rotate` — replaces a remote backend's connect token (the old one dies with the call, and the live connector channel is dropped) → `200 {"token":"rb-..."}`. `404` unknown id · `400` not a remote backend
-- `PATCH /api/admin/backends/{id}` — any of `{"name","base_url","api_key","enabled","draining"}` (`api_key:""` clears) → backend object. On a **remote** row `base_url` edits are refused (`400` — the URL is the registry key), and disabling drops the live channel at once
+- `PATCH /api/admin/backends/{id}` — any of `{"name","base_url","api_key","enabled","draining","owner_user_id"}` (`api_key:""` clears; `owner_user_id:0` clears the fairness owner, a positive id sets it — a non-existent user → `400`) → backend object. On a **remote** row `base_url` edits are refused (`400` — the URL is the registry key), and disabling drops the live channel at once
 - `DELETE /api/admin/backends/{id}` → `204` · `409` if catalog models still reference it · a live remote connector channel is dropped
 - `POST /api/admin/backends/{id}/probe` → `{"ok":true,"server_version":"0.18.22|","error":"","models":[{"id":"halogen-qwen3.8-flash-next","in_catalog":true,"model_id":3|null}]}` — for a **remote** backend the probe rides the connector's live channel (`GET /health` + `/v1/models` frames answered by the box against its engine); an offline backend fails fast with `ok:false` instead of hanging
 - `POST /api/admin/backends/{id}/models` — `{"model_ids":["halogen-qwen3.8-flash-next"]}` → `201 {"created":[{"id":3,"name":"halogen-qwen3.8-flash-next","upstream_model":"halogen-qwen3.8-flash-next"}]}` (skips already-present ids)
@@ -121,7 +121,16 @@ the window is the last N days, `since` echoed in the response):
     (deleted users share the `"(deleted user)"` label but stay distinct
     entries); a peer's `served` sums the rows naming it as host, its
     `consumed` is owner-level (every consumed row of the peer's owner —
-    an owner with several peers carries the same total under each).
+    an owner with several peers carries the same total under each). A user's
+    `served` also picks up **hub-hardware serving credited through a backend
+    owner** (ticket #12): a federated row served by this relay's own hardware
+    (`fed_peer_id` NULL) whose serving model's backend has an `owner_user_id`
+    credits that owner with the serving — the hub mirror of a spoke's capacity
+    crediting its peer owner, so hub capacity finally appears in the per-user
+    table. Attribution is a query-time join (`usage_log → models →
+    backends.owner_user_id`), so it covers historical rows the moment an owner
+    is set; a backend with no owner contributes nothing (hub-hardware usage
+    stays uncredited) and peer-hosted rows are never double-counted.
   - spoke: `{"role":"spoke","since":"…","served_by_source":[{"fed_user":
     "hub-alice","counts":{…}}],"consumed":[{"user_id":4,"user":"alice",
     "counts":{…}}]}` — what this box served to which hub-stamped
@@ -366,9 +375,12 @@ flow:
 
 Costs on hub-side federation rows are computed from the model's own
 pricing (transit rows without a user multiplier — the ledger compares
-capacity, not billed money). The aggregation queries live in
-`internal/store/fedstats.go`; the HTTP shape is under “Federation stats”
-above.
+capacity, not billed money). A hub-hardware serve (a `consumed` row with
+`fed_peer_id` NULL) has no hosting peer to credit, so the aggregation derives
+its `served` side from the serving backend's `owner_user_id` when one is set
+(ticket #12) — see the "Federation stats" note above. The aggregation queries
+live in `internal/store/fedstats.go`; the HTTP shape is under "Federation
+stats" above.
 
 
 Admin usage = same summary/detail endpoints under `/api/admin/usage/...` with extra optional `user_id`, `key_id` params; detail rows always include `username`.
