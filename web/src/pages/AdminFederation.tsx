@@ -11,6 +11,7 @@ import type {
   FedSettings,
 } from '../api';
 import { fmtAgo, fmtDateTime, fmtInt, fmtMoney, inNewTokens } from '../format';
+import { fedLedgerState, localOnlyLabel } from './fedLedger';
 import { useFedRole } from '../fedrole';
 import { useLoad } from '../useLoad';
 import type { LoadState } from '../useLoad';
@@ -496,6 +497,9 @@ function SpokeConnection({ status }: { status: FedSettings['spoke'] }) {
  * per-user fairness table and the per-server rollup; a spoke gets what it served
  * to the hub and what its own users consumed on federated models. A refresh
  * failure keeps the last good payload on screen (useLoad retains data on error).
+ * The hub fairness panel distinguishes three states (ticket #13): ledger
+ * rows, "no federation activity" (local-only usage exists — named, so the
+ * gap reads as design, not a bug), and "no data at all".
  */
 function Ledger({
   stats,
@@ -511,37 +515,70 @@ function Ledger({
     return <Banner>{stats.error ?? 'Could not load the federation ledger.'}</Banner>;
   }
   if (stats.data.role === 'hub') {
+    // Three honest states (ticket #13): ledger rows → the table; no rows
+    // but local-only accounts → "no federation activity, usage is local";
+    // neither → there is simply no data in this window.
+    const state = fedLedgerState(stats.data.users.length, stats.data.local_only.length);
     return (
       <>
         <section className="panel">
           <h3>Fairness — served vs consumed per user (last {days} days)</h3>
-          {stats.data.users.length === 0 ? (
-            <Empty label="No federation traffic in this window." />
+          {state === 'no-usage' ? (
+            <Empty label="No usage at all in this window — neither local traffic nor federation traffic." />
+          ) : state === 'no-fed-activity' ? (
+            <>
+              <Empty label="No federation activity in this window." />
+              <p className="dim">
+                {stats.data.local_only.map(localOnlyLabel).join(', ')} used hub-local models
+                only — local usage is not part of this ledger, it is on the Usage page.
+              </p>
+            </>
           ) : (
-            <div className="table-scroll">
-              <table>
-                <thead>
-                  <tr>
-                    <th>User</th>
-                    <th className="num">Served req</th>
-                    <th className="num">Served cost</th>
-                    <th className="num">Consumed req</th>
-                    <th className="num">Consumed cost</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {stats.data.users.map((u) => (
-                    <tr key={u.user_id}>
-                      <td>{u.user}</td>
-                      <td className="num">{fmtInt(u.served.requests)}</td>
-                      <td className="num money">{fmtMoney(u.served.cost_micro, currency)}</td>
-                      <td className="num">{fmtInt(u.consumed.requests)}</td>
-                      <td className="num money">{fmtMoney(u.consumed.cost_micro, currency)}</td>
+            <>
+              <div className="table-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th rowSpan={2}>User</th>
+                      <th colSpan={4} className="num">Served</th>
+                      <th colSpan={4} className="num">Consumed</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                    <tr>
+                      <th className="num">Req</th>
+                      <th className="num">In new</th>
+                      <th className="num">Out</th>
+                      <th className="num">Cost</th>
+                      <th className="num">Req</th>
+                      <th className="num">In new</th>
+                      <th className="num">Out</th>
+                      <th className="num">Cost</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {stats.data.users.map((u) => (
+                      <tr key={u.user_id}>
+                        <td>{u.user}</td>
+                        <td className="num">{fmtInt(u.served.requests)}</td>
+                        <td className="num">{fmtInt(inNewTokens(u.served))}</td>
+                        <td className="num">{fmtInt(u.served.completion_tokens)}</td>
+                        <td className="num money">{fmtMoney(u.served.cost_micro, currency)}</td>
+                        <td className="num">{fmtInt(u.consumed.requests)}</td>
+                        <td className="num">{fmtInt(inNewTokens(u.consumed))}</td>
+                        <td className="num">{fmtInt(u.consumed.completion_tokens)}</td>
+                        <td className="num money">{fmtMoney(u.consumed.cost_micro, currency)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {stats.data.local_only.length > 0 && (
+                <p className="dim footnote">
+                  Not in this table — no federation activity this window (hub-local usage
+                  only): {stats.data.local_only.map(localOnlyLabel).join(', ')}. Their usage
+                  is on the Usage page.
+                </p>
+              )}
+            </>
           )}
         </section>
 
@@ -555,11 +592,19 @@ function Ledger({
                 <table>
                   <thead>
                     <tr>
-                      <th>Server</th>
-                      <th className="num">Served req</th>
-                      <th className="num">Served cost</th>
-                      <th className="num">Consumed req *</th>
-                      <th className="num">Consumed cost *</th>
+                      <th rowSpan={2}>Server</th>
+                      <th colSpan={4} className="num">Served</th>
+                      <th colSpan={4} className="num">Consumed *</th>
+                    </tr>
+                    <tr>
+                      <th className="num">Req</th>
+                      <th className="num">In new</th>
+                      <th className="num">Out</th>
+                      <th className="num">Cost</th>
+                      <th className="num">Req</th>
+                      <th className="num">In new</th>
+                      <th className="num">Out</th>
+                      <th className="num">Cost *</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -567,8 +612,12 @@ function Ledger({
                       <tr key={p.peer_id}>
                         <td>{p.peer}</td>
                         <td className="num">{fmtInt(p.served.requests)}</td>
+                        <td className="num">{fmtInt(inNewTokens(p.served))}</td>
+                        <td className="num">{fmtInt(p.served.completion_tokens)}</td>
                         <td className="num money">{fmtMoney(p.served.cost_micro, currency)}</td>
                         <td className="num">{fmtInt(p.consumed.requests)}</td>
+                        <td className="num">{fmtInt(inNewTokens(p.consumed))}</td>
+                        <td className="num">{fmtInt(p.consumed.completion_tokens)}</td>
                         <td className="num money">{fmtMoney(p.consumed.cost_micro, currency)}</td>
                       </tr>
                     ))}

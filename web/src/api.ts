@@ -375,13 +375,23 @@ export interface FedConsumedEntry {
   counts: FedCounts;
 }
 
+/** Hub: an account whose window usage is entirely hub-local — no federation
+ *  rows, so it cannot appear in the fairness ledger. The ledger UI names
+ *  these to say "no federation activity" instead of showing a blank
+ *  (ticket #13). */
+export interface FedLocalOnlyEntry {
+  user_id: number;
+  user: string;
+  counts: FedCounts;
+}
+
 export type FedAdminStats =
-  | { role: 'hub'; since: string; users: FedUserTotals[]; peers: FedPeerTotals[] }
+  | { role: 'hub'; since: string; users: FedUserTotals[]; peers: FedPeerTotals[]; local_only: FedLocalOnlyEntry[] }
   | { role: 'spoke'; since: string; served_by_source: FedSourceEntry[]; consumed: FedConsumedEntry[] }
   | { role: 'standalone' };
 
 export type FedMyStats =
-  | { role: 'hub'; since: string; totals: FedUserTotals[] }
+  | { role: 'hub'; since: string; totals: FedUserTotals[]; local_only: FedLocalOnlyEntry[] }
   | { role: 'spoke'; since: string; consumed: FedConsumedEntry[] }
   | { role: 'standalone' };
 
