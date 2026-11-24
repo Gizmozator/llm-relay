@@ -86,9 +86,6 @@ export default function Layout() {
               <NavLink to="/admin/federation" className={navClass}>
                 Federation
               </NavLink>
-              <NavLink to="/admin/servers" className={navClass}>
-                Servers
-              </NavLink>
               <NavLink to="/admin/settings" className={navClass}>
                 Settings
               </NavLink>

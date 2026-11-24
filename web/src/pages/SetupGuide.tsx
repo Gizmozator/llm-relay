@@ -112,8 +112,8 @@ export default function SetupGuidePage() {
         <h3>Good to know</h3>
         <p className="dim">
           Usage through your models is metered to the hub user who asked, and
-          credited to your account as served capacity — the hub’s Servers page
-          keeps the fairness ledger. If your spoke goes offline, its models
+          credited to your account as served capacity — the hub’s Federation
+          page keeps the fairness ledger. If your spoke goes offline, its models
           vanish from the hub until it reconnects; the token can be rotated (or
           revoked) at any time from My keys.
         </p>

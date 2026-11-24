@@ -13,7 +13,6 @@ import BackendsPage from './pages/Backends';
 import ModelsPage from './pages/Models';
 import AdminModelsPage from './pages/AdminModels';
 import AdminFederationPage from './pages/AdminFederation';
-import ServersPage from './pages/Servers';
 import UsersPage from './pages/Users';
 import SettingsPage from './pages/Settings';
 
@@ -77,14 +76,11 @@ export default function App() {
                   </RequireAdmin>
                 }
               />
-              <Route
-                path="admin/servers"
-                element={
-                  <RequireAdmin>
-                    <ServersPage />
-                  </RequireAdmin>
-                }
-              />
+              {/* The Servers page merged into Federation (#7). The route stays
+                  as a redirect so old bookmarks and links keep working; replace
+                  keeps it out of the back-stack so the browser does not ping-pong
+                  between the dead URL and the merged page. */}
+              <Route path="admin/servers" element={<Navigate to="/admin/federation" replace />} />
               <Route
                 path="admin/settings"
                 element={
