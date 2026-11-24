@@ -276,3 +276,96 @@ func TestSummarizeUsageModelGroupRollup(t *testing.T) {
 		t.Errorf("member upstream ids not surfaced: %v", upstreams)
 	}
 }
+
+// Day buckets split at the viewer's local midnight when TZOffset is set
+// (minutes east of UTC): rows near a UTC midnight land in the local day of
+// the shifted clock. TZOffset == 0 must keep the plain UTC bucketing and
+// bounds byte-identically (callers that do not send an offset are
+// unaffected).
+func TestSummarizeUsageDayLocalMidnight(t *testing.T) {
+	d, err := db.Open(t.TempDir() + "/localday.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Migrate(d); err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	seed := func(ts string) {
+		if err := store.InsertUsage(d, &store.UsageEvent{
+			TS: ts, Endpoint: "chat", Prompt: 1, CostTotal: 1, Status: 200,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed("2026-11-19T23:00:00Z") // local +120: Nov 20 01:00
+	seed("2026-11-20T22:30:00Z") // local +120: Nov 21 00:30
+	seed("2026-11-21T00:30:00Z") // local +120: Nov 21 02:30 · local -60: Nov 20 23:30
+	seed("2026-11-21T01:00:00Z") // local +120: Nov 21 03:00 · local -60: Nov 21 00:00
+
+	byKey := func(f *store.UsageFilter) map[string]int64 {
+		t.Helper()
+		_, groups, err := store.SummarizeUsage(d, f, "day")
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]int64{}
+		for _, g := range groups {
+			out[g.Key] = g.Requests
+		}
+		return out
+	}
+
+	// Offset 0: plain UTC days — the 20th holds only the 22:30Z row.
+	got := byKey(&store.UsageFilter{AllUsers: true})
+	want := map[string]int64{"2026-11-19": 1, "2026-11-20": 1, "2026-11-21": 2}
+	if len(got) != len(want) {
+		t.Fatalf("offset 0 groups = %v, want %v", got, want)
+	}
+	for k, w := range want {
+		if got[k] != w {
+			t.Errorf("offset 0 day %s = %d, want %d", k, got[k], w)
+		}
+	}
+
+	// +120 (UTC+2): the 22:30Z and 00:30Z rows join the 01:00Z row on
+	// local day Nov 21; the 19th's 23:00Z row becomes local Nov 20.
+	got = byKey(&store.UsageFilter{AllUsers: true, TZOffset: 120})
+	want = map[string]int64{"2026-11-20": 1, "2026-11-21": 3}
+	if len(got) != len(want) {
+		t.Fatalf("offset +120 groups = %v, want %v", got, want)
+	}
+	for k, w := range want {
+		if got[k] != w {
+			t.Errorf("offset +120 day %s = %d, want %d", k, got[k], w)
+		}
+	}
+
+	// -60 (UTC-1): the 00:30Z row falls back to local Nov 20; the exact
+	// local-midnight row (01:00Z = 00:00 local) belongs to Nov 21.
+	got = byKey(&store.UsageFilter{AllUsers: true, TZOffset: -60})
+	want = map[string]int64{"2026-11-19": 1, "2026-11-20": 2, "2026-11-21": 1}
+	if len(got) != len(want) {
+		t.Fatalf("offset -60 groups = %v, want %v", got, want)
+	}
+	for k, w := range want {
+		if got[k] != w {
+			t.Errorf("offset -60 day %s = %d, want %d", k, got[k], w)
+		}
+	}
+
+	// From/To bounds follow the same clock: local day Nov 20 at +120 is
+	// [Nov 19 22:00Z, Nov 20 22:00Z) — it holds the 23:00Z row but NOT
+	// the 22:30Z row, which already belongs to local Nov 21. The same
+	// filter at offset 0 holds exactly the opposite row.
+	got = byKey(&store.UsageFilter{AllUsers: true, From: "2026-11-20", To: "2026-11-20", TZOffset: 120})
+	want = map[string]int64{"2026-11-20": 1}
+	if len(got) != 1 || got["2026-11-20"] != 1 {
+		t.Errorf("bounded +120 groups = %v, want %v", got, want)
+	}
+	got = byKey(&store.UsageFilter{AllUsers: true, From: "2026-11-20", To: "2026-11-20"})
+	if len(got) != 1 || got["2026-11-20"] != 1 {
+		t.Errorf("bounded offset 0 groups = %v, want one Nov 20 row", got)
+	}
+}

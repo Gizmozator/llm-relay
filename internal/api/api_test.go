@@ -58,6 +58,7 @@ func newTestEnv(t *testing.T, upstream http.Handler) *testEnv {
 	mux.Handle("GET /api/keys", s.Auth(s.ListKeys))
 	mux.Handle("GET /api/usage/summary", s.Auth(s.UsageSummary))
 	mux.Handle("GET /api/usage/detail", s.Auth(s.UsageDetail))
+	mux.Handle("GET /api/admin/usage/summary", s.Admin(s.UsageSummary))
 	mux.Handle("GET /api/admin/users", s.Admin(s.AdminListUsers))
 	mux.Handle("PATCH /api/admin/users/{id}", s.Admin(s.AdminUpdateUser))
 	mux.Handle("PATCH /api/admin/models/{id}", s.Admin(s.AdminUpdateModel))
@@ -979,6 +980,9 @@ func TestUsageInputValidation(t *testing.T) {
 		"from=2026-2-3",                 // unpadded
 		"from=2026-05-01&to=2026-04-01", // inverted range
 		"group_by=bogus",
+		"tz_offset=abc", // not an integer
+		"tz_offset=99999",
+		"tz_offset=-99999", // outside -1440..1440
 	} {
 		resp := e.do(t, "GET", "/api/usage/summary?"+q, "", admin)
 		if resp.StatusCode != http.StatusBadRequest {
@@ -1003,6 +1007,63 @@ func TestUsageInputValidation(t *testing.T) {
 		t.Errorf("valid summary: %d, want 200", resp.StatusCode)
 	} else {
 		resp.Body.Close()
+	}
+	for _, q := range []string{"tz_offset=120", "tz_offset=-60", "tz_offset=0"} {
+		if resp := e.do(t, "GET", "/api/usage/summary?"+q, "", admin); resp.StatusCode != 200 {
+			t.Errorf("summary ?%s: %d, want 200", q, resp.StatusCode)
+		} else {
+			resp.Body.Close()
+		}
+	}
+}
+
+// tz_offset shifts the from/to bounds to the viewer's clock: a row at
+// From-1 day 23:00Z is local From 01:00 at +120 and belongs to the range,
+// while the offset-0 query (plain UTC) excludes it. The day key of that
+// row is the local date, not the UTC one.
+func TestUsageTZOffsetBoundary(t *testing.T) {
+	e := newTestEnv(t, http.NotFoundHandler())
+	admin := login(t, e)
+	seed := func(ts string) {
+		if err := store.InsertUsage(e.db, &store.UsageEvent{
+			TS: ts, Endpoint: "chat", Prompt: 1, CostTotal: 1, Status: 200,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed("2026-05-31T23:00:00Z") // local (UTC+2) Jun 1 01:00 — inside the offset range only
+	seed("2026-06-01T10:00:00Z") // inside both
+
+	type summary struct {
+		Totals store.UsageGroup   `json:"totals"`
+		Groups []store.UsageGroup `json:"groups"`
+	}
+	get := func(q string) summary {
+		t.Helper()
+		resp := e.do(t, "GET", "/api/admin/usage/summary?"+q, "", admin)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("summary ?%s: %d, want 200", q, resp.StatusCode)
+		}
+		var s summary
+		if err := json.NewDecoder(resp.Body).Decode(&s); err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return s
+	}
+
+	// Offset 0 (no parameter): UTC bounds, UTC day keys.
+	s := get("from=2026-06-01&to=2026-06-01&group_by=day")
+	if s.Totals.Requests != 1 || len(s.Groups) != 1 || s.Groups[0].Key != "2026-06-01" {
+		t.Errorf("offset 0 = %+v, want 1 request on 2026-06-01", s)
+	}
+
+	// +120: the 23:00Z row is local Jun 1 01:00 — inside the range and
+	// bucketed on the local day key.
+	s = get("from=2026-06-01&to=2026-06-01&group_by=day&tz_offset=120")
+	if s.Totals.Requests != 2 || len(s.Groups) != 1 ||
+		s.Groups[0].Key != "2026-06-01" || s.Groups[0].Requests != 2 {
+		t.Errorf("offset +120 = %+v, want 2 requests on 2026-06-01", s)
 	}
 }
 
