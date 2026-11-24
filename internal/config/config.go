@@ -17,11 +17,14 @@ type Config struct {
 	AdminUsername     string `env:"ADMIN_USERNAME"`
 	AdminPassword     string `env:"ADMIN_PASSWORD"`
 	TrustProxyHeaders bool   `env:"TRUST_PROXY_HEADERS" envDefault:"false"`
-	// Public URLs advertised in the dashboard so users copy the right
-	// endpoints (behind a reverse proxy these differ from the listen ports).
-	// PUBLIC_RELAY_URL is the server ROOT (e.g. https://llm.example.com,
-	// no /v1); the dashboard appends /v1 where the OpenAI-style base URL
-	// is shown, and the agent endpoints link off the root.
+	// URLs advertised in the dashboard copy buttons and interpolated into
+	// the agent guide, so users copy the right endpoints (behind a reverse
+	// proxy these differ from the listen ports). Used verbatim — include the
+	// scheme; a hostname or a plain IP:port both work (direct LAN hosting:
+	// http://192.0.2.10:8080). PUBLIC_RELAY_URL is the server ROOT (e.g.
+	// https://llm.example.com, no /v1); the dashboard appends /v1 where the
+	// OpenAI-style base URL is shown, and the agent endpoints link off the
+	// root.
 	PublicRelayURL     string `env:"PUBLIC_RELAY_URL"`
 	PublicDashboardURL string `env:"PUBLIC_DASHBOARD_URL"`
 }
