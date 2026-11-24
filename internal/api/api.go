@@ -15,6 +15,7 @@ import (
 
 	"llm-relay/internal/auth"
 	"llm-relay/internal/proxy"
+	"llm-relay/internal/ratelimit"
 	"llm-relay/internal/store"
 )
 
@@ -43,30 +44,64 @@ type Server struct {
 	// listener instead. X-Forwarded-Proto is honoured only when SelfTLS is
 	// false (the proxied deployment, TLS_PORT=0).
 	SelfTLS bool
+	// Limits resolves the abuse-protection tiers (ticket #18). nil means
+	// ratelimit.DefaultConfig() — every struct-literal build (main wires
+	// the env-resolved config; tests take the production defaults).
+	Limits *ratelimit.Config
 
-	loginLimit *loginLimiter
-	limitOnce  sync.Once
-	// connectLimit guards the remote-backend connect endpoint (token
-	// guessing costs a DB query per attempt). Separate bucket space from
-	// login: a connector flapping on the relay port must not lock out
-	// dashboard logins from the same address.
-	connectLimit *loginLimiter
-	connectOnce  sync.Once
+	limitsOnce   sync.Once
+	loginLimit   *ratelimit.Store
+	connectLimit *ratelimit.Store
+	adminLimit   *ratelimit.Store
+	lockout      *ratelimit.FailureTracker
 	health       *proxy.HealthCache
 	healthOnce   sync.Once
 }
 
-// limiter returns the lazily created login limiter (Server is built as a
-// struct literal in main and tests).
-func (s *Server) limiter() *loginLimiter {
-	s.limitOnce.Do(func() { s.loginLimit = newLoginLimiter() })
+// initLimits lazily builds every api-side limiter from the resolved tier
+// config (Server is built as a struct literal in main and tests, so the
+// stores cannot be constructor state).
+func (s *Server) initLimits() {
+	s.limitsOnce.Do(func() {
+		cfg := ratelimit.DefaultConfig()
+		if s.Limits != nil {
+			cfg = *s.Limits
+		}
+		s.loginLimit = ratelimit.NewStore(cfg.Login, ratelimit.StoreMax)
+		s.connectLimit = ratelimit.NewStore(cfg.Connect, ratelimit.StoreMax)
+		s.adminLimit = ratelimit.NewStore(cfg.Admin, ratelimit.StoreMax)
+		s.lockout = ratelimit.NewFailureTracker(cfg.Lockout)
+	})
+}
+
+// loginLimiter returns the per-source-IP login bucket store (tier 1).
+func (s *Server) loginLimiter() *ratelimit.Store {
+	s.initLimits()
 	return s.loginLimit
 }
 
-// connectLimiter returns the lazily created connect-endpoint limiter.
-func (s *Server) connectLimiter() *loginLimiter {
-	s.connectOnce.Do(func() { s.connectLimit = newLoginLimiter() })
+// connectLimiter returns the per-source-IP store guarding the machine
+// channels — /federation/v1/* and /remote/v1/connect share it (token
+// guessing costs a hash + DB lookup per attempt on both). Separate bucket
+// space from login: a connector flapping on the relay port must not lock
+// out dashboard logins from the same address.
+func (s *Server) connectLimiter() *ratelimit.Store {
+	s.initLimits()
 	return s.connectLimit
+}
+
+// adminLimiter returns the per-user store for the authenticated dashboard
+// API (tier 4).
+func (s *Server) adminLimiter() *ratelimit.Store {
+	s.initLimits()
+	return s.adminLimit
+}
+
+// lockoutTracker returns the per-(source IP, username) login-failure
+// backoff (tier 2).
+func (s *Server) lockoutTracker() *ratelimit.FailureTracker {
+	s.initLimits()
+	return s.lockout
 }
 
 // ---------------------------------------------------------------- plumbing
@@ -121,6 +156,17 @@ func (s *Server) Auth(next func(w http.ResponseWriter, r *http.Request, c *auth.
 				return
 			}
 		}
+		// Tier 4 (ticket #18): per-user bucket on the authenticated admin
+		// API, keyed on the resolved identity (not the socket — behind the
+		// reverse proxy every dashboard shares the proxy IP). Generous by
+		// design: dashboard polling is chatty but human, and this tier
+		// exists to bound a runaway script or a stolen session, not to
+		// throttle normal use.
+		if ok, wait := s.adminLimiter().Allow("u:"+strconv.FormatInt(user.ID, 10), time.Now()); !ok {
+			w.Header().Set("Retry-After", retryAfter(wait))
+			writeErr(w, http.StatusTooManyRequests, "too many requests, slow down")
+			return
+		}
 		c.Role = user.Role
 		next(w, r, c)
 	}
@@ -165,12 +211,25 @@ func (s *Server) Login(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
+	// Tier 2 (ticket #18): per-(source IP, username) failure backoff.
+	// Checked before the DB lookup and the bcrypt compare — the whole point
+	// of the lockout is that a locked-out guesser costs nothing. The pair
+	// key is NUL-joined so no (ip, username) split can collide with
+	// another. This is what the per-IP bucket alone cannot do: a
+	// distributed guesser sprays one password per source IP and never
+	// drains any single bucket, yet each source hammers one account.
+	pair := ratelimit.SourceIP(r, s.TrustProxy) + "\x00" + in.Username
+	if locked, wait := s.lockoutTracker().Locked(pair, time.Now()); locked {
+		w.Header().Set("Retry-After", retryAfter(wait))
+		writeErr(w, http.StatusTooManyRequests, "too many failed attempts, try again later")
+		return
+	}
 	user, hash, err := store.UserByName(s.DB, in.Username)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
 			// A DB failure is not a bad password: collapsing it into 401
 			// hides an outage behind "invalid credentials" and leaves no
-			// trace in the log.
+			// trace in the log. It must not feed the lockout either.
 			log.Printf("api: login user lookup failed (%q): %v", in.Username, err)
 			writeErr(w, http.StatusInternalServerError, "login unavailable")
 			return
@@ -178,13 +237,18 @@ func (s *Server) Login(w http.ResponseWriter, r *http.Request) {
 		// Constant-ish time: still run a bcrypt compare so a missing username
 		// cannot be distinguished by response timing.
 		_ = auth.CheckPassword(dummyHash, in.Password)
+		s.lockoutTracker().Record(pair, time.Now())
 		writeErr(w, http.StatusUnauthorized, "invalid username or password")
 		return
 	}
 	if !auth.CheckPassword(hash, in.Password) {
+		s.lockoutTracker().Record(pair, time.Now())
 		writeErr(w, http.StatusUnauthorized, "invalid username or password")
 		return
 	}
+	// Correct password: the streak is over whatever else follows (a
+	// disabled account proved its user, too).
+	s.lockoutTracker().Clear(pair)
 	if user.Disabled {
 		writeErr(w, http.StatusForbidden, "account disabled")
 		return

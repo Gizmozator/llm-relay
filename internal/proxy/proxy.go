@@ -14,8 +14,10 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -56,6 +58,15 @@ type Handler struct {
 	// shown in the agent guide so it can point its human at the key
 	// creation page. Empty drops the mention.
 	DashboardURL string
+	// KeyLimit is tier 3b of the abuse-protection stack (ticket #18): a
+	// per-resolved-key token bucket applied after authentication and
+	// before any proxy work. It is a hook rather than mux middleware
+	// because the identity it keys on — the resolved key id — only exists
+	// after authKey (or the tunnel's injected identity) has run; keying
+	// middleware on the raw bearer string would re-hash every request a
+	// second time and let bad keys mint unbounded buckets. nil = tier off.
+	// Returns (wait, ok); !ok means shed with wait as the Retry-After.
+	KeyLimit func(keyID int64) (wait time.Duration, ok bool)
 }
 
 func New(db *sql.DB, rec *usage.Recorder, trustProxyHeaders bool) *Handler {
@@ -166,6 +177,18 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request, endpoint string
 		key, user, err = h.authKey(r)
 		if err != nil {
 			authError(w, err)
+			return
+		}
+	}
+	// Tier 3b (ticket #18): per-key bucket after auth, before any proxy
+	// work — body reads, resolution, upstream dial all cost something, and
+	// a leaked or runaway key must not buy unbounded work. Keyed on the
+	// already-resolved key id (no second hash/lookup). Unknown keys never
+	// get here — they are bounded per source by the mux-level tier.
+	if h.KeyLimit != nil && key != nil {
+		if wait, ok := h.KeyLimit(key.ID); !ok {
+			w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(wait.Seconds()))))
+			writeError(w, http.StatusTooManyRequests, "rate limit exceeded for this key, slow down")
 			return
 		}
 	}

@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/caarlos0/env/v11"
 
+	"llm-relay/internal/ratelimit"
 	"llm-relay/internal/tlscert"
 )
 
@@ -56,6 +58,52 @@ type Config struct {
 	RelayPin    string `env:"RELAY_PIN"`
 	EngineURL   string `env:"ENGINE_URL"`
 	EngineToken string `env:"ENGINE_TOKEN"`
+
+	// Abuse/DDoS protection tiers (ticket #18): one rate/burst pair per
+	// tier plus the login lockout and the global in-flight cap. Every
+	// default is non-zero and sized so normal traffic never sees a
+	// 429/503; setting a tier's rate or burst to 0 turns that tier off
+	// (the dev/LAN escape). The envDefault strings below must match
+	// ratelimit.DefaultConfig — TestRateLimitDefaultsMatchesPackage
+	// guards the pairing so the two lists cannot drift.
+	RateLoginRate    float64 `env:"RATELIMIT_LOGIN_RATE" envDefault:"0.2"`
+	RateLoginBurst   float64 `env:"RATELIMIT_LOGIN_BURST" envDefault:"10"`
+	RateConnectRate  float64 `env:"RATELIMIT_CONNECT_RATE" envDefault:"0.2"`
+	RateConnectBurst float64 `env:"RATELIMIT_CONNECT_BURST" envDefault:"10"`
+	RateV1IPRate     float64 `env:"RATELIMIT_V1_IP_RATE" envDefault:"100"`
+	RateV1IPBurst    float64 `env:"RATELIMIT_V1_IP_BURST" envDefault:"200"`
+	RateV1KeyRate    float64 `env:"RATELIMIT_V1_KEY_RATE" envDefault:"50"`
+	RateV1KeyBurst   float64 `env:"RATELIMIT_V1_KEY_BURST" envDefault:"100"`
+	RateAdminRate    float64 `env:"RATELIMIT_ADMIN_RATE" envDefault:"100"`
+	RateAdminBurst   float64 `env:"RATELIMIT_ADMIN_BURST" envDefault:"200"`
+	RateLockAfter    int     `env:"RATELIMIT_LOGIN_LOCK_AFTER" envDefault:"5"`
+	RateLockSeconds  int     `env:"RATELIMIT_LOGIN_LOCK_SECONDS" envDefault:"30"`
+	RateGlobalMax    int64   `env:"RATELIMIT_GLOBAL_MAX_INFLIGHT" envDefault:"1024"`
+}
+
+// RateLimits assembles the resolved tier configuration from the environment.
+// Values are passed through verbatim: a zero rate/burst (or zero global cap)
+// means "tier off", which only the operator can set — Load's envDefaults
+// guarantee the shipped defaults are never zero.
+func (c *Config) RateLimits() ratelimit.Config {
+	d := ratelimit.DefaultConfig()
+	return ratelimit.Config{
+		Login:   ratelimit.Rate{Rate: c.RateLoginRate, Burst: c.RateLoginBurst},
+		Connect: ratelimit.Rate{Rate: c.RateConnectRate, Burst: c.RateConnectBurst},
+		V1IP:    ratelimit.Rate{Rate: c.RateV1IPRate, Burst: c.RateV1IPBurst},
+		V1Key:   ratelimit.Rate{Rate: c.RateV1KeyRate, Burst: c.RateV1KeyBurst},
+		Admin:   ratelimit.Rate{Rate: c.RateAdminRate, Burst: c.RateAdminBurst},
+		Lockout: ratelimit.Lockout{
+			Threshold: c.RateLockAfter,
+			Base:      time.Duration(c.RateLockSeconds) * time.Second,
+			// Escalation cap and idle reset are not env-tunable: they
+			// are safety shape, not sizing.
+			Max:        d.Lockout.Max,
+			IdleTTL:    d.Lockout.IdleTTL,
+			MaxEntries: d.Lockout.MaxEntries,
+		},
+		GlobalMax: c.RateGlobalMax,
+	}
 }
 
 // Load parses the environment and resolves the effective listen addresses.

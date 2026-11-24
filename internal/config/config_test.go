@@ -1,8 +1,11 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
+
+	"llm-relay/internal/ratelimit"
 )
 
 func TestLoadValidatesSecret(t *testing.T) {
@@ -229,5 +232,57 @@ func TestLoadTLSPort(t *testing.T) {
 	t.Setenv("TLS_PORT", "8080")
 	if _, err := Load(); err == nil {
 		t.Fatal("TLS port colliding with the relay port must be refused")
+	}
+}
+
+// The envDefault strings on the RATELIMIT_* fields must equal
+// ratelimit.DefaultConfig: the package owns the sizing, the env block owns
+// the plumbing, and a silent drift between them would ship defaults nobody
+// reviewed. This test loads a clean environment (every RATELIMIT_* var
+// unset) and compares the assembled config field by field.
+func TestRateLimitDefaultsMatchesPackage(t *testing.T) {
+	for _, key := range []string{
+		"RATELIMIT_LOGIN_RATE", "RATELIMIT_LOGIN_BURST",
+		"RATELIMIT_CONNECT_RATE", "RATELIMIT_CONNECT_BURST",
+		"RATELIMIT_V1_IP_RATE", "RATELIMIT_V1_IP_BURST",
+		"RATELIMIT_V1_KEY_RATE", "RATELIMIT_V1_KEY_BURST",
+		"RATELIMIT_ADMIN_RATE", "RATELIMIT_ADMIN_BURST",
+		"RATELIMIT_LOGIN_LOCK_AFTER", "RATELIMIT_LOGIN_LOCK_SECONDS",
+		"RATELIMIT_GLOBAL_MAX_INFLIGHT",
+	} {
+		if old, ok := os.LookupEnv(key); ok {
+			t.Cleanup(func() { os.Setenv(key, old) })
+		}
+		os.Unsetenv(key)
+	}
+	t.Setenv("JWT_SECRET", "0123456789abcdef0123456789abcdef")
+	t.Setenv("PORT", "8080")
+	t.Setenv("ADMIN_PORT", "8081")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got, want := c.RateLimits(), ratelimit.DefaultConfig(); got != want {
+		t.Errorf("env defaults drifted from ratelimit.DefaultConfig:\n got %+v\nwant %+v", got, want)
+	}
+}
+
+// Explicit zeros must reach the config as zeros (0 = tier off).
+func TestRateLimitZeroDisables(t *testing.T) {
+	t.Setenv("JWT_SECRET", "0123456789abcdef0123456789abcdef")
+	t.Setenv("PORT", "8080")
+	t.Setenv("ADMIN_PORT", "8081")
+	t.Setenv("RATELIMIT_LOGIN_RATE", "0")
+	t.Setenv("RATELIMIT_GLOBAL_MAX_INFLIGHT", "0")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	lim := c.RateLimits()
+	if lim.Login.Rate != 0 {
+		t.Errorf("RATELIMIT_LOGIN_RATE=0 did not reach config: %+v", lim.Login)
+	}
+	if lim.GlobalMax != 0 {
+		t.Errorf("RATELIMIT_GLOBAL_MAX_INFLIGHT=0 did not reach config: %d", lim.GlobalMax)
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"llm-relay/internal/auth"
+	"llm-relay/internal/ratelimit"
 	"llm-relay/internal/store"
 )
 
@@ -23,6 +24,17 @@ import (
 // third argument (the Claims pattern), not in the request context.
 func (s *Server) PeerAuth(next func(w http.ResponseWriter, r *http.Request, p *store.Peer)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Tier 1 (ticket #18): pre-auth per-source-IP bucket, shared with
+		// /remote/v1/connect. Every attempt costs a hash + DB lookup
+		// before the 401, so token guessing must not be free. A valid
+		// token resets the bucket: a legitimately reconnecting spoke never
+		// drains its own credits.
+		key := ratelimit.SourceIP(r, s.TrustProxy)
+		if ok, wait := s.connectLimiter().Allow(key, time.Now()); !ok {
+			w.Header().Set("Retry-After", retryAfter(wait))
+			writeErr(w, http.StatusTooManyRequests, "too many connect attempts, try again later")
+			return
+		}
 		tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if !ok || tok == "" {
 			writeErr(w, http.StatusUnauthorized, "authentication required")
@@ -39,6 +51,7 @@ func (s *Server) PeerAuth(next func(w http.ResponseWriter, r *http.Request, p *s
 			// debugging a disabled peer sees the real reason.
 			writeErr(w, http.StatusForbidden, "peer disabled")
 		default:
+			s.connectLimiter().Reset(key)
 			next(w, r, p)
 		}
 	}

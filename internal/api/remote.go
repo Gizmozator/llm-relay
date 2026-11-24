@@ -8,14 +8,13 @@ package api
 import (
 	"context"
 	"errors"
-	"math"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
 	"llm-relay/internal/auth"
 	"llm-relay/internal/proxy"
+	"llm-relay/internal/ratelimit"
 	"llm-relay/internal/store"
 )
 
@@ -45,13 +44,15 @@ type RemoteController interface {
 // reason; an unknown token gets the fixed 401 phrase.
 func (s *Server) RemoteAuth(next func(w http.ResponseWriter, r *http.Request, b *store.Backend, tokenHash string)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Throttle before the DB lookup: this is the only endpoint that
-		// answers unauthenticated callers with a query per attempt, so
-		// token guessing must not be free. Successful auth resets the
-		// bucket — a legitimately reconnecting connector never drains it.
-		key := clientKey(r)
-		if ok, wait := s.connectLimiter().allow(key, time.Now()); !ok {
-			w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(wait.Seconds()))))
+		// Tier 1 (ticket #18): throttle before the DB lookup — this is the
+		// only endpoint that answers unauthenticated callers with a query
+		// per attempt, so token guessing must not be free. Successful auth
+		// resets the bucket — a legitimately reconnecting connector never
+		// drains it. Shares the machine-channel bucket space with
+		// /federation/v1/* (same identity class: relay-port sockets).
+		key := ratelimit.SourceIP(r, s.TrustProxy)
+		if ok, wait := s.connectLimiter().Allow(key, time.Now()); !ok {
+			w.Header().Set("Retry-After", retryAfter(wait))
 			writeErr(w, http.StatusTooManyRequests, "too many connect attempts, try again later")
 			return
 		}
@@ -70,7 +71,7 @@ func (s *Server) RemoteAuth(next func(w http.ResponseWriter, r *http.Request, b 
 		case !b.Enabled:
 			writeErr(w, http.StatusForbidden, "backend disabled")
 		default:
-			s.connectLimiter().reset(key)
+			s.connectLimiter().Reset(key)
 			next(w, r, b, hash)
 		}
 	}

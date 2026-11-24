@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -25,6 +26,7 @@ import (
 	"llm-relay/internal/db"
 	"llm-relay/internal/fed"
 	"llm-relay/internal/proxy"
+	"llm-relay/internal/ratelimit"
 	"llm-relay/internal/remote"
 	"llm-relay/internal/store"
 	"llm-relay/internal/usage"
@@ -106,12 +108,27 @@ func main() {
 	apiSrv := &api.Server{DB: d, JWTSecret: cfg.JWTSecret, JWTTTL: 12 * time.Hour,
 		RelayURL: cfg.PublicRelayURL, DashboardURL: cfg.PublicDashboardURL,
 		TrustProxy: cfg.TrustProxyHeaders, SelfTLS: cfg.TLSPort != "0"}
+	// Abuse-protection tiers (ticket #18), resolved from env with safe
+	// non-zero defaults (0 per tier = that tier off). The api-side tiers
+	// (login per-IP, login failure lockout, admin per-user) live behind
+	// the Server's lazy limiters.
+	lim := cfg.RateLimits()
+	apiSrv.Limits = &lim
 	apiSrv.Fed = fedMgr
 	apiSrv.Remote = remoteReg
 	ph := proxy.New(d, rec, cfg.TrustProxyHeaders)
 	apiSrv.Flight = ph.Flight
 	ph.RelayURL = cfg.PublicRelayURL
 	ph.DashboardURL = cfg.PublicDashboardURL
+	// Tier 3b: per-resolved-key bucket inside the proxy, after auth and
+	// before any upstream work. The hook reuses the key id the metering
+	// path already resolved (no second hash/lookup); bad keys never reach
+	// it — they are bounded per source by the mux-level tier below.
+	v1KeyStore := ratelimit.NewStore(lim.V1Key, ratelimit.StoreMax)
+	ph.KeyLimit = func(keyID int64) (time.Duration, bool) {
+		ok, wait := v1KeyStore.Allow("k:"+strconv.FormatInt(keyID, 10), time.Now())
+		return wait, ok
+	}
 	// Federation seams on the proxy: the scheme-dispatching transport asks
 	// the Manager to tunnel peer://hub:// backends, the health cache asks
 	// it whether a synthetic backend's channel is up, and the Manager runs
@@ -239,15 +256,40 @@ func main() {
 	}
 	adminMux.Handle("/", spaHandler(spa))
 
+	// Abuse-protection wrapping (ticket #18), applied in every mode —
+	// standalone, hub and spoke all serve these muxes:
+	//
+	//   • Tier 3a: per-source-IP bucket on the public /v1 surface,
+	//     pre-auth, so a bad-key flood (each attempt costs a hash + DB
+	//     lookup before the 401) is bounded per client. Path-scoped so
+	//     /healthz stays free and the machine channels keep their own
+	//     stricter buckets; tunneled federation traffic is served through
+	//     relayMux directly (the frame server calls the mux, not this
+	//     wrapper) and is bounded per key by tier 3b instead.
+	//   • Tier 6: ONE server-wide in-flight shed shared by every listener
+	//     (relay, admin, TLS): at saturation new requests get 503 +
+	//     Retry-After instead of queueing onto a melting box. Long streams
+	//     and live WS channels legitimately hold a slot for their whole
+	//     duration — the cap sits far above normal concurrency (see
+	//     ratelimit.Config). No blanket Read/WriteTimeout anywhere: SSE
+	//     streaming must survive; per-handler deadlines bound the work.
+	v1IPMW := ratelimit.Middleware(ratelimit.NewStore(lim.V1IP, ratelimit.StoreMax),
+		func(r *http.Request) string { return ratelimit.SourceIP(r, cfg.TrustProxyHeaders) },
+		"too many requests from this client, slow down")
+	relayHandler := ratelimit.PathPrefix([]string{"/v1/"}, v1IPMW)(relayMux)
+	shed := ratelimit.NewShed(lim.GlobalMax)
+	relayHandler = shed.Middleware(relayHandler)
+	adminHandler := shed.Middleware(adminMux)
+
 	relaySrv := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           relayMux,
+		Handler:           relayHandler,
 		ReadHeaderTimeout: 30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
 	adminSrv := &http.Server{
 		Addr:              cfg.AdminListenAddr,
-		Handler:           adminMux,
+		Handler:           adminHandler,
 		ReadHeaderTimeout: 30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
@@ -278,7 +320,7 @@ func main() {
 	if cfg.TLSPort != "0" {
 		tlsSrv := &http.Server{
 			Addr:              cfg.TLSListenAddr,
-			Handler:           relayMux,
+			Handler:           relayHandler,
 			ReadHeaderTimeout: 30 * time.Second,
 			IdleTimeout:       120 * time.Second,
 			TLSConfig: &tls.Config{
