@@ -84,10 +84,13 @@ export default function AdminModelsPage() {
   const isSynthetic = (m: CatalogModel) => backends.data === null || syntheticBackendIds.has(m.backend_id);
   // On a spoke an allowlist shares nothing (a spoke has no peer table of its
   // own — the catalog rule), so the option needs an honest tooltip there.
+  // Framed as “who can use it in the federation” to contrast with the
+  // Visibility column (“who can see it on this relay”) — the two dropdowns
+  // must not read as duplicates.
   const fedShareTitle =
     fedRole.data?.role === 'spoke'
-      ? 'Federation sharing: local = not shared with the federation, all = shared with the hub, allowlist = effectively local on a spoke (only “all” is pushed)'
-      : 'Federation sharing: local = not shared with the federation, all = every peer, allowlist = the selected peers only';
+      ? 'Who can use it in the federation — local: not shared; all: shared with the hub; allowlist: effectively local on a spoke (only “all” is pushed)'
+      : 'Who can use it in the federation — local: not shared; all: every peer; allowlist: the selected peers only';
   const [showGroupAdd, setShowGroupAdd] = useState(false);
   // Id of the group whose member editor is open; the group itself is looked
   // up from the fresh list so a reload never edits a stale copy.
@@ -216,6 +219,19 @@ export default function AdminModelsPage() {
         <h2>Model catalog</h2>
       </div>
 
+      {/* Visibility and Share sit side by side and read as duplicates without
+          this: one is local visibility, the other federation sharing. The
+          column tooltips carry the per-value detail; this line only draws the
+          contrast so the two switches stop looking alike. */}
+      <p className="dim">
+        <b>Visibility</b> and <b>Share</b> are independent: Visibility is who can see a
+        model <em>on this relay</em> (<code>public</code> = listed on <code>/v1/models</code>{' '}
+        and the dashboard; <code>internal</code> = hidden from the catalog but still directly
+        requestable); Share is who can use it <em>in the federation</em> (<code>local</code> =
+        not shared; <code>allowlist</code> = the selected peers; <code>all</code> = the hub and
+        every peer).
+      </p>
+
       {/* Auxiliary loads fail visibly, and each degrades honestly: no
           backend list → every row stays synthetic-locked; no role → Share
           controls hidden; no peers → the allowlist picker shows the error
@@ -247,7 +263,7 @@ export default function AdminModelsPage() {
                   <th>Public name</th>
                   <th>Backend</th>
                   <th>Upstream id</th>
-                  <th title="public: listed on /v1/models; internal: hidden but still requestable (group members are internal)">
+                  <th title="Who can see it on this relay — public: listed on /v1/models and the dashboard; internal: hidden from the catalog but still directly requestable (group members are set internal)">
                     Visibility
                   </th>
                   <th>Enabled</th>
