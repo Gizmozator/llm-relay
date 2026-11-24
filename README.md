@@ -186,7 +186,12 @@ peer registry and the fairness ledger in one place — lists every peer with its
 online state, version, shared models and the served-vs-consumed ledger, per
 user and per server. Usage through a federated model is metered to the
 consuming user and credited to the serving account: fairness bookkeeping,
-not billing.
+not billing. The ledger tables carry the token usage itself — requests, new
+input tokens, output tokens and cost per user and per server. The ledger
+tracks **federation** traffic only: an account whose usage is entirely
+hub-local has no row there by design, so the page names those accounts
+("no federation activity — their usage is on the Usage page") instead of
+leaving a blank that reads as missing data.
 
 **Crediting the hub's own hardware**: a spoke's served capacity is credited to
 its peer's owner user, but the hub's own backends had no such owner, so hub-local

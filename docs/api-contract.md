@@ -117,7 +117,8 @@ the window is the last N days, `since` echoed in the response):
     row on the spender's account and a `served` row on the server's):
     `{"role":"hub","since":"…","users":[{"user_id":4,"user":"alice",
     "served":{…},"consumed":{…}}],"peers":[{"peer_id":3,"peer":"home-server",
-    "served":{…},"consumed":{…}}]}` — user entries are keyed by `user_id`
+    "served":{…},"consumed":{…}}],"local_only":[{"user_id":7,"user":"bob",
+    "counts":{…}}]}` — user entries are keyed by `user_id`
     (deleted users share the `"(deleted user)"` label but stay distinct
     entries); a peer's `served` sums the rows naming it as host, its
     `consumed` is owner-level (every consumed row of the peer's owner —
@@ -131,6 +132,13 @@ the window is the last N days, `since` echoed in the response):
     backends.owner_user_id`), so it covers historical rows the moment an owner
     is set; a backend with no owner contributes nothing (hub-hardware usage
     stays uncredited) and peer-hosted rows are never double-counted.
+    `local_only` (ticket #13) names the accounts whose window usage is
+    entirely **hub-local**: unstamped rows and no federation rows, so they
+    cannot appear in `users` (the ledger aggregates `fed_direction != ''`
+    only). A user with both local and fed rows is not listed; an empty
+    `users` **and** empty `local_only` means there was no usage at all. The
+    UI uses this to say "no federation activity — this account's usage is
+    local" instead of showing a blank that reads as missing data.
   - spoke: `{"role":"spoke","since":"…","served_by_source":[{"fed_user":
     "hub-alice","counts":{…}}],"consumed":[{"user_id":4,"user":"alice",
     "counts":{…}}]}` — what this box served to which hub-stamped
@@ -141,7 +149,10 @@ the window is the last N days, `since` echoed in the response):
     "completion_tokens","cached_tokens","cache_write_tokens","cost_micro"}`.
 - `GET /api/federation/stats` (JWT, any user) — the caller's own totals,
   always scoped to the caller (admins included): hub → `{"role":"hub",
-  "since":…,"totals":[one FedUserTotal]}`; spoke → `{"role":"spoke",
+  "since":…,"totals":[one FedUserTotal],"local_only":[caller's local-only
+  entry or empty]}` (`local_only` carries the caller's own hub-local usage
+  when they have no federation rows — the personal "no federation activity"
+  signal, ticket #13); spoke → `{"role":"spoke",
   "since":…,"consumed":[caller's slice]}` (served rows belong to the box,
   not to a session user); standalone → `{"role":"standalone"}`.
 
