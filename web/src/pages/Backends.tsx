@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { FormEvent } from 'react';
 import { api, errMsg, isRemoteBackendUrl, isSyntheticBackendUrl } from '../api';
-import type { Backend, CatalogModel, ProbeResult } from '../api';
+import type { AdminUser, Backend, CatalogModel, ProbeResult } from '../api';
 import { fmtDateTime } from '../format';
 import { useLoad } from '../useLoad';
 import { useToast } from '../components/Toast';
@@ -11,6 +11,14 @@ export default function BackendsPage() {
   const toast = useToast();
   const backends = useLoad(() => api.backends().then((r) => r.backends), []);
   const models = useLoad(() => api.models().then((r) => r.models), []);
+  // Users feed the backend owner selector (ticket #12): the fairness-credit
+  // owner is one of these accounts. Admin-only page, so the list is available.
+  const users = useLoad(() => api.users().then((r) => r.users), []);
+  const userNames = useMemo(() => {
+    const m = new Map<number, string>();
+    for (const u of users.data ?? []) m.set(u.id, u.display_name || u.username);
+    return m;
+  }, [users.data]);
 
   // Keep the live status badge honest without a manual refresh; the shared
   // health cache caps the real probes at one per backend per minute, so this
@@ -85,6 +93,7 @@ export default function BackendsPage() {
                     <th>Server version</th>
                     <th>Last probe</th>
                     <th className="num">Models</th>
+                    <th>Owner</th>
                     <th></th>
                   </tr>
                 </thead>
@@ -139,6 +148,11 @@ export default function BackendsPage() {
                         {fmtDateTime(b.last_probe_at)}
                       </td>
                       <td className="num">{b.model_count}</td>
+                      <td title="Federation fairness credit: usage this backend's own hardware serves is credited to this user">
+                        {b.owner_user_id != null
+                          ? userNames.get(b.owner_user_id) ?? `user #${b.owner_user_id}`
+                          : '—'}
+                      </td>
                       <td className="actions">
                         {/* Synthetic backends expose nothing editable: sync
                             and probe have nothing to talk to, an Edit would
@@ -171,9 +185,10 @@ export default function BackendsPage() {
       {showAdd && (
         <BackendFormModal
           title="Add backend"
+          users={users.data ?? []}
           onClose={() => setShowAdd(false)}
-          onSubmit={async (name, base_url, api_key) => {
-            await api.createBackend(name, base_url, api_key || undefined);
+          onSubmit={async (name, base_url, api_key, _clearKey, owner) => {
+            await api.createBackend(name, base_url, api_key || undefined, owner ?? undefined);
             toast.push('success', 'Backend added.');
             setShowAdd(false);
             backends.reload();
@@ -206,14 +221,23 @@ export default function BackendsPage() {
         <BackendFormModal
           title={`Edit backend — ${editTarget.name}`}
           backend={editTarget}
+          users={users.data ?? []}
           onClose={() => setEditTarget(null)}
-          onSubmit={async (name, base_url, api_key, clearKey) => {
-            const patchBody: { name?: string; base_url?: string; api_key?: string } = {
+          onSubmit={async (name, base_url, api_key, clearKey, owner) => {
+            const patchBody: {
+              name?: string;
+              base_url?: string;
+              api_key?: string;
+              owner_user_id?: number | null;
+            } = {
               name,
               base_url,
             };
             if (clearKey) patchBody.api_key = '';
             else if (api_key) patchBody.api_key = api_key;
+            // Always send the owner so the selector is authoritative: a number
+            // sets it, null clears it (0 on the wire).
+            patchBody.owner_user_id = owner ?? 0;
             await api.patchBackend(editTarget.id, patchBody);
             toast.push('success', 'Backend updated.');
             setEditTarget(null);
@@ -253,18 +277,28 @@ export default function BackendsPage() {
 function BackendFormModal({
   title,
   backend,
+  users,
   onClose,
   onSubmit,
 }: {
   title: string;
   backend?: Backend;
+  users: AdminUser[];
   onClose: () => void;
-  onSubmit: (name: string, base_url: string, apiKey: string, clearKey?: boolean) => Promise<void>;
+  onSubmit: (
+    name: string,
+    base_url: string,
+    apiKey: string,
+    clearKey?: boolean,
+    owner?: number | null,
+  ) => Promise<void>;
 }) {
   const [name, setName] = useState(backend?.name ?? '');
   const [baseUrl, setBaseUrl] = useState(backend?.base_url ?? '');
   const [apiKey, setApiKey] = useState('');
   const [clearKey, setClearKey] = useState(false);
+  // Fairness-credit owner (ticket #12): '' = no owner, else the user id.
+  const [owner, setOwner] = useState<string>(backend?.owner_user_id != null ? String(backend.owner_user_id) : '');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -273,7 +307,8 @@ function BackendFormModal({
     setBusy(true);
     setError(null);
     try {
-      await onSubmit(name.trim(), baseUrl.trim(), apiKey.trim(), clearKey);
+      const ownerVal = owner === '' ? null : Number(owner);
+      await onSubmit(name.trim(), baseUrl.trim(), apiKey.trim(), clearKey, ownerVal);
     } catch (err: unknown) {
       setError(errMsg(err));
     } finally {
@@ -315,6 +350,21 @@ function BackendFormModal({
             <span>Remove stored API key</span>
           </label>
         )}
+        <Field label="Owner">
+          <select className="input" value={owner} onChange={(e) => setOwner(e.target.value)}>
+            <option value="">No owner (usage uncredited)</option>
+            {users.map((u) => (
+              <option key={u.id} value={u.id}>
+                {u.display_name || u.username}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <p className="dim">
+          The owner is credited in the federation fairness ledger when this backend’s own
+          hardware serves a peer — the hub-side mirror of a spoke’s capacity crediting its
+          peer owner.
+        </p>
         <div className="modal-actions">
           <button type="button" className="btn" onClick={onClose}>
             Cancel

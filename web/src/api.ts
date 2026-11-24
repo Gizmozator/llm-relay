@@ -117,6 +117,9 @@ export interface Backend {
   server_version: string | null;
   created_at: string;
   model_count: number;
+  /** Fairness-credit owner (ticket #12): the user credited in the federation
+   *  ledger when this backend's own hardware serves. null = uncredited. */
+  owner_user_id: number | null;
 }
 
 export interface ProbeModel {
@@ -683,9 +686,14 @@ export const api = {
 
   // admin — backends
   backends: () => request<{ backends: Backend[] }>('GET', '/api/admin/backends'),
-  createBackend: (name: string, base_url: string, api_key?: string) =>
+  createBackend: (name: string, base_url: string, api_key?: string, owner_user_id?: number) =>
     request<Backend>('POST', '/api/admin/backends', {
-      body: api_key ? { name, base_url, api_key } : { name, base_url },
+      body: {
+        name,
+        base_url,
+        ...(api_key ? { api_key } : {}),
+        ...(owner_user_id ? { owner_user_id } : {}),
+      },
     }),
   createRemoteBackend: (name: string) =>
     request<{ backend: Backend; token: string }>('POST', '/api/admin/backends/remote', {
@@ -695,7 +703,14 @@ export const api = {
     request<{ token: string }>('POST', `/api/admin/backends/${id}/remote/rotate`),
   patchBackend: (
     id: number,
-    patch: { name?: string; base_url?: string; api_key?: string; enabled?: boolean; draining?: boolean },
+    patch: {
+      name?: string;
+      base_url?: string;
+      api_key?: string;
+      enabled?: boolean;
+      draining?: boolean;
+      owner_user_id?: number | null;
+    },
   ) => request<Backend>('PATCH', `/api/admin/backends/${id}`, { body: patch }),
   deleteBackend: (id: number) => request<void>('DELETE', `/api/admin/backends/${id}`),
   probeBackend: (id: number) => request<ProbeResult>('POST', `/api/admin/backends/${id}/probe`),
