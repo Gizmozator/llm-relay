@@ -27,12 +27,13 @@ import (
 // the only way a test can put hand-crafted frames — forged origins, forged
 // status, malformed catalogs — on a hub channel; a real spoke never sends
 // those.
-func rawSpoke(t *testing.T, hubURL, token string) *websocket.Conn {
+func rawSpoke(t *testing.T, hubURL, token string, client *http.Client) *websocket.Conn {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	ws, _, err := websocket.Dial(ctx, hubURL+"/federation/v1/connect",
-		&websocket.DialOptions{HTTPHeader: http.Header{"Authorization": {"Bearer " + token}}})
+		&websocket.DialOptions{HTTPClient: client,
+			HTTPHeader: http.Header{"Authorization": {"Bearer " + token}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +125,7 @@ func TestForgedOriginPeerDenied(t *testing.T) {
 	}
 	hub.shareLocal("open", "hub")
 
-	ws := rawSpoke(t, hub.srv.URL, tokC)
+	ws := rawSpoke(t, hub.srv.URL, tokC, hub.client)
 	// C forges OriginPeer=B: the hub must derive the origin from the
 	// channel (C) and deny the B-only model.
 	if status, body := rawReq(t, ws, &fed.Req{T: fed.TReq, ID: "forged-1",
@@ -156,7 +157,7 @@ func mustPeerID(t *testing.T, db *sql.DB, name string) int64 {
 func TestHubIgnoresInboundStatus(t *testing.T) {
 	hub, spoke, peerA := federationUp(t)
 	_, tokC := hub.enroll("spoke-c")
-	ws := rawSpoke(t, hub.srv.URL, tokC)
+	ws := rawSpoke(t, hub.srv.URL, tokC, hub.client)
 
 	rawSend(t, ws, &fed.Status{T: fed.TStatus, PeerID: peerA.ID, Online: false})
 	time.Sleep(300 * time.Millisecond) // a processed frame lands near-instantly
@@ -298,7 +299,7 @@ func TestFederatedGroupRepushKeepsLocalFirst(t *testing.T) {
 	if _, err := store.UpdateModelVisibility(spoke.db, lm.ID, "internal"); err != nil {
 		t.Fatal(err)
 	}
-	spoke.becomeSpoke(hub.srv.URL, tok)
+	spoke.becomeSpoke(hub, tok)
 	pollLog(t, spoke, hub)("pool materialized with the local m1", func() bool {
 		var n int
 		err := spoke.db.QueryRow(`SELECT COUNT(*) FROM model_group_members gm
@@ -447,7 +448,7 @@ func TestChannelDeathAbortsServed(t *testing.T) {
 	if err := store.SetModelFedVisibility(spoke.db, m.ID, store.FedVisAll, nil); err != nil {
 		t.Fatal(err)
 	}
-	spoke.becomeSpoke(hub.srv.URL, tok)
+	spoke.becomeSpoke(hub, tok)
 	poll(t, "peer online", func() bool { return hub.mgr.Online(peer.ID) })
 	poll(t, "slow materialized", func() bool {
 		return countRows(hub.db, `SELECT COUNT(*) FROM models WHERE name='slow'`) == 1
@@ -480,7 +481,7 @@ func TestCloseAbortsServedRequests(t *testing.T) {
 	if err := store.SetModelFedVisibility(spoke.db, m.ID, store.FedVisAll, nil); err != nil {
 		t.Fatal(err)
 	}
-	spoke.becomeSpoke(hub.srv.URL, tok)
+	spoke.becomeSpoke(hub, tok)
 	poll(t, "peer online", func() bool { return hub.mgr.Online(peer.ID) })
 	poll(t, "slow materialized", func() bool {
 		return countRows(hub.db, `SELECT COUNT(*) FROM models WHERE name='slow'`) == 1

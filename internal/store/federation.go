@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"llm-relay/internal/auth"
+	"llm-relay/internal/tlscert"
 )
 
 // ---------------------------------------------------------------- settings
@@ -27,6 +28,11 @@ const (
 	SettingFedRole     = "federation_role"
 	SettingFedHubURL   = "hub_url"
 	SettingFedHubToken = "hub_token"
+	// SettingFedHubPin is the optional hub certificate fingerprint pin
+	// (plan 2026-11-24-remote-tls-v1): public-ish data (a fingerprint is
+	// a hash), stored plaintext like hub_url so the Federation page can
+	// echo it back for review.
+	SettingFedHubPin = "hub_pin"
 
 	FedRoleStandalone = "standalone"
 	FedRoleHub        = "hub"
@@ -42,6 +48,7 @@ type FederationSettings struct {
 	Role     string `json:"role"`
 	HubURL   string `json:"hub_url"`
 	HubToken string `json:"hub_token"`
+	HubPin   string `json:"hub_pin"`
 }
 
 func GetFederationSettings(db *sql.DB) (FederationSettings, error) {
@@ -63,6 +70,11 @@ func GetFederationSettings(db *sql.DB) (FederationSettings, error) {
 	} else if !errors.Is(err, ErrNotFound) {
 		return out, err
 	}
+	if v, err := GetSetting(db, SettingFedHubPin); err == nil {
+		out.HubPin = v
+	} else if !errors.Is(err, ErrNotFound) {
+		return out, err
+	}
 	return out, nil
 }
 
@@ -80,17 +92,36 @@ func PutFederationSettings(db *sql.DB, in FederationSettings) error {
 	if in.Role == FedRoleSpoke {
 		in.HubURL = strings.TrimRight(strings.TrimSpace(in.HubURL), "/")
 		u, err := url.Parse(in.HubURL)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return fmt.Errorf("%w: spoke requires an http(s) hub_url", ErrFedConfig)
+		// Hard TLS rule (plan 2026-11-24-remote-tls-v1): the fed- token
+		// and all tunneled traffic ride this URL — https only, no
+		// opt-out. Existing http hub_urls stop working at upgrade by
+		// design (see plan Decisions).
+		if err != nil || u.Scheme != "https" || u.Host == "" {
+			return fmt.Errorf("%w: spoke requires an https:// hub_url — federation connections require TLS", ErrFedConfig)
+		}
+		// Canonicalize the scheme to lowercase https. url.Parse lowercases
+		// u.Scheme for the check above, but the raw string keeps its case;
+		// a stored "HTTPS://…" would pass here yet fail the spoke dialer's
+		// case-sensitive https:// prefix check and never connect.
+		if i := strings.Index(in.HubURL, "://"); i >= 0 {
+			in.HubURL = "https://" + in.HubURL[i+len("://"):]
 		}
 		if strings.TrimSpace(in.HubToken) == "" {
 			return fmt.Errorf("%w: spoke requires the hub server token", ErrFedConfig)
 		}
 		in.HubToken = strings.TrimSpace(in.HubToken)
+		in.HubPin = strings.TrimSpace(in.HubPin)
+		if in.HubPin != "" {
+			normalized, err := tlscert.ParsePin(in.HubPin)
+			if err != nil {
+				return fmt.Errorf("%w: hub_pin: %w", ErrFedConfig, err)
+			}
+			in.HubPin = normalized
+		}
 	} else {
-		in.HubURL, in.HubToken = "", ""
+		in.HubURL, in.HubToken, in.HubPin = "", "", ""
 	}
-	// One tx: the three keys are one logical block, so a half-written state
+	// One tx: the keys are one logical block, so a half-written state
 	// (role=spoke with a stale or missing token) must never be observable.
 	// SetSetting is autocommit-only, so its UPSERT is inlined here.
 	tx, err := db.Begin()
@@ -99,7 +130,8 @@ func PutFederationSettings(db *sql.DB, in FederationSettings) error {
 	}
 	defer tx.Rollback()
 	for k, v := range map[string]string{
-		SettingFedRole: in.Role, SettingFedHubURL: in.HubURL, SettingFedHubToken: in.HubToken,
+		SettingFedRole: in.Role, SettingFedHubURL: in.HubURL,
+		SettingFedHubToken: in.HubToken, SettingFedHubPin: in.HubPin,
 	} {
 		if _, err := tx.Exec(`INSERT INTO settings(key,value) VALUES(?,?)
 			ON CONFLICT(key) DO UPDATE SET value=excluded.value`, k, v); err != nil {

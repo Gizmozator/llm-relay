@@ -276,9 +276,25 @@ export interface FedSettings {
   role: FedRole;
   hub_url: string;
   hub_token: string;
+  /** Spoke role only: the hub cert fingerprint to pin (plan
+   *  2026-11-24-remote-tls-v1); empty = verify against the system CA store
+   *  (the TLS-terminating-proxy hub). Public data, echoed back for review. */
+  hub_pin: string;
   /** Spoke role only: the live channel state from the dialer's point of
    *  view, with the hub's hello_ack identity (empty while disconnected). */
   spoke?: { connected: boolean; hub_name: string; hub_version: string };
+}
+
+/** Instance TLS certificate view (GET/POST/DELETE /api/admin/tls). The
+ *  private key is never sent to the client. `configured` is false when no
+ *  cert exists (nothing to pin). `fingerprint` is the `sha256:<hex>` a peer
+ *  pastes as hub_pin / RELAY_PIN. */
+export interface TlsView {
+  configured: boolean;
+  fingerprint?: string;
+  sans?: string[];
+  not_after?: string;
+  created_at?: string;
 }
 
 /** One peer row on both list surfaces (self-service + admin). `online` is
@@ -460,6 +476,9 @@ export interface Info {
   relay_url: string;
   dashboard_url: string;
   currency: string;
+  /** Present only when the instance has a self-signed TLS cert (plan
+   *  2026-11-24-remote-tls-v1): the fingerprint spokes/connectors pin. */
+  tls_fingerprint?: string;
 }
 
 export class ApiError extends Error {
@@ -700,6 +719,14 @@ export const api = {
   putSettings: (currency: string) =>
     request<Settings>('PUT', '/api/admin/settings', { body: { currency } }),
 
+  // admin — instance TLS certificate (plan 2026-11-24-remote-tls-v1). The
+  // private key never comes back to the client; generate returns the cert
+  // PEM once (for an optional install in an external proxy) beside the view.
+  tls: () => request<TlsView>('GET', '/api/admin/tls'),
+  tlsGenerate: (hosts: string[]) =>
+    request<{ tls: TlsView; cert_pem: string }>('POST', '/api/admin/tls', { body: { hosts } }),
+  tlsDelete: () => request<TlsView>('DELETE', '/api/admin/tls'),
+
   // federation — role + stats (session auth, any user)
   fedRole: () => request<{ role: FedRole }>('GET', '/api/federation/role'),
   fedMyStats: (days: number) =>
@@ -713,8 +740,8 @@ export const api = {
 
   // federation — admin: settings pair, peer registry, ledger
   fedSettings: () => request<FedSettings>('GET', '/api/admin/federation'),
-  putFedSettings: (role: FedRole, hub_url: string, hub_token: string) =>
-    request<FedSettings>('PUT', '/api/admin/federation', { body: { role, hub_url, hub_token } }),
+  putFedSettings: (role: FedRole, hub_url: string, hub_token: string, hub_pin: string) =>
+    request<FedSettings>('PUT', '/api/admin/federation', { body: { role, hub_url, hub_token, hub_pin } }),
   adminPeers: () => request<{ peers: FedPeer[] }>('GET', '/api/admin/peers'),
   adminRotatePeer: (id: number) => request<{ token: string }>('POST', `/api/admin/peers/${id}/rotate`),
   adminPatchPeer: (id: number, enabled: boolean) =>

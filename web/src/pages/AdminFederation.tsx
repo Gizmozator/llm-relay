@@ -54,6 +54,7 @@ export default function AdminFederationPage() {
   const [role, setRole] = useState<FedRole | null>(null);
   const [hubUrl, setHubUrl] = useState<string | null>(null);
   const [hubToken, setHubToken] = useState<string | null>(null);
+  const [hubPin, setHubPin] = useState<string | null>(null);
   const [reveal, setReveal] = useState(false);
   const [busy, setBusy] = useState(false);
   const [days, setDays] = useState(30);
@@ -71,10 +72,14 @@ export default function AdminFederationPage() {
   const curRole = role ?? persistedRole;
   const curUrl = hubUrl ?? cur?.hub_url ?? '';
   const curToken = hubToken ?? cur?.hub_token ?? '';
+  const curPin = hubPin ?? cur?.hub_pin ?? '';
   // "Dirty" is always measured against what the SERVER has (the settings
   // payload), never the context echo, so Save offers exactly the pending edit.
   const dirty =
-    curRole !== cur?.role || curUrl !== cur?.hub_url || curToken !== cur?.hub_token;
+    curRole !== cur?.role ||
+    curUrl !== cur?.hub_url ||
+    curToken !== cur?.hub_token ||
+    curPin !== cur?.hub_pin;
 
   // The spoke's connection status rides the settings payload; poll it like
   // the Backends page polls health — the dialer reconnects on its own, the
@@ -119,7 +124,7 @@ export default function AdminFederationPage() {
     e.preventDefault();
     setBusy(true);
     try {
-      const res = await api.putFedSettings(curRole, curUrl.trim(), curToken.trim());
+      const res = await api.putFedSettings(curRole, curUrl.trim(), curToken.trim(), curPin.trim());
       // Publish the role the server says it persisted: the sidebar menu and this
       // page's own sections are keyed on the shared role, so they follow the
       // save at once — no reload, and no stale entry left pointing at a section
@@ -129,6 +134,7 @@ export default function AdminFederationPage() {
       setRole(null);
       setHubUrl(null);
       setHubToken(null);
+      setHubPin(null);
       settings.reload();
     } catch (err: unknown) {
       toast.push('error', errMsg(err));
@@ -190,12 +196,13 @@ export default function AdminFederationPage() {
     });
 
   const spokeStatus = cur?.spoke;
-  // A spoke without a usable dial-in target cannot connect: the URL must
-  // be http(s) and the token non-empty (the server validates too, but the
-  // Save button should not offer a guaranteed 400).
+  // A spoke without a usable dial-in target cannot connect: the URL must be
+  // https (hard TLS rule, plan 2026-11-24-remote-tls-v1) and the token
+  // non-empty (the server validates too, but the Save button should not
+  // offer a guaranteed 400). The pin is optional (a CA-cert hub needs none).
   const spokeConfigValid =
     curRole !== 'spoke' ||
-    (/^https?:\/\/\S+$/i.test(curUrl.trim()) && curToken.trim() !== '');
+    (/^https:\/\/\S+$/i.test(curUrl.trim()) && curToken.trim() !== '');
   // The server ships fed_visibility='all' AND model-enabled AND backend-
   // enabled; the model payload carries the model flag only, so a model on
   // a disabled backend can linger in this list (residual over-count, the
@@ -267,10 +274,23 @@ export default function AdminFederationPage() {
                     </button>
                   </div>
                 </Field>
+                <Field label="Hub pin (optional — the hub cert fingerprint)">
+                  <input
+                    className="input mono"
+                    placeholder="sha256:…"
+                    value={curPin}
+                    onChange={(e) => setHubPin(e.target.value)}
+                  />
+                </Field>
+                <p className="dim">
+                  Required when the hub uses a self-signed cert: paste the fingerprint from
+                  the hub’s Settings → TLS page. Leave empty when the hub has a real CA cert
+                  (a TLS-terminating proxy) — it verifies normally.
+                </p>
                 {!spokeConfigValid && (
                   <p className="dim">
-                    Hub URL must start with http:// or https://, and the hub token is
-                    required — Save stays disabled until both are filled.
+                    Hub URL must start with https:// (federation requires TLS), and the hub
+                    token is required — Save stays disabled until both are filled.
                   </p>
                 )}
               </>

@@ -26,6 +26,7 @@ import (
 	"llm-relay/internal/fed"
 	"llm-relay/internal/proxy"
 	"llm-relay/internal/store"
+	"llm-relay/internal/tlscert"
 	"llm-relay/internal/usage"
 )
 
@@ -108,8 +109,13 @@ type relay struct {
 	mgr  *fed.Manager
 	logs *safeBuf
 	srv  *httptest.Server
-	key  string // a client API key for /v1 calls
-	uid  int64
+	// pin is srv's TLS certificate fingerprint (plan 2026-11-24-remote-tls-v1:
+	// the federation channel is TLS-only, so spokes dial the hub over TLS
+	// and pin this). client trusts srv's self-signed test cert.
+	pin    string
+	client *http.Client
+	key    string // a client API key for /v1 calls
+	uid    int64
 
 	mu      sync.Mutex
 	engines map[string]*engine // engines by model name, for hit counting
@@ -149,12 +155,19 @@ func newRelay(t *testing.T, name string) *relay {
 	mux.HandleFunc("POST /v1/chat/completions", ph.Chat)
 	mux.HandleFunc("GET /v1/models", ph.Models)
 	mgr.AttachServe(mux)
-	srv := httptest.NewServer(mux)
+	srv := httptest.NewTLSServer(mux)
 	t.Cleanup(func() { srv.Close() })
 	t.Cleanup(func() { mgr.Close() })
 	t.Cleanup(func() { rec.Close(2 * time.Second) })
 	return &relay{t: t, name: name, db: d, mgr: mgr, logs: logs, srv: srv,
+		pin: pinOf(srv), client: srv.Client(),
 		key: plain, uid: u.ID, engines: map[string]*engine{}}
+}
+
+// pinOf is the fingerprint an httptest TLS server's cert presents — the
+// value a spoke's hub_pin must carry to trust it.
+func pinOf(srv *httptest.Server) string {
+	return tlscert.Fingerprint(srv.Certificate().Raw)
 }
 
 // becomeHub flips role=hub and re-reads settings.
@@ -199,11 +212,12 @@ func (r *relay) serveConnect() {
 		})
 }
 
-// becomeSpoke flips role=spoke pointed at hub and re-reads settings.
-func (r *relay) becomeSpoke(hubURL, token string) {
+// becomeSpoke flips role=spoke pointed at hub (TLS + fingerprint pin,
+// plan 2026-11-24-remote-tls-v1) and re-reads settings.
+func (r *relay) becomeSpoke(hub *relay, token string) {
 	r.t.Helper()
 	if err := store.PutFederationSettings(r.db, store.FederationSettings{
-		Role: store.FedRoleSpoke, HubURL: hubURL, HubToken: token,
+		Role: store.FedRoleSpoke, HubURL: hub.srv.URL, HubToken: token, HubPin: hub.pin,
 	}); err != nil {
 		r.t.Fatal(err)
 	}
@@ -271,7 +285,7 @@ func (r *relay) get(path string) (*http.Response, []byte) {
 	r.t.Helper()
 	req, _ := http.NewRequest("GET", r.srv.URL+path, nil)
 	req.Header.Set("Authorization", "Bearer "+r.key)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := r.client.Do(req)
 	if err != nil {
 		r.t.Fatal(err)
 	}
@@ -294,7 +308,7 @@ func (r *relay) chatCtx(ctx context.Context, model, session string) (*http.Respo
 	if session != "" {
 		req.Header.Set("X-Session-Id", session)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := r.client.Do(req)
 	if err != nil {
 		r.t.Fatal(err)
 	}
@@ -387,7 +401,7 @@ func federationUp(t *testing.T) (hub, spoke *relay, peer *store.Peer) {
 	hub.serveConnect()
 	spoke = newRelay(t, "spoke-a")
 	spoke.shareLocal("alpha", "spoke-a")
-	spoke.becomeSpoke(hub.srv.URL, tok)
+	spoke.becomeSpoke(hub, tok)
 	poll(t, "peer online at hub", func() bool { return hub.mgr.Online(peer.ID) })
 	pollLog(t, spoke, hub)("alpha materialized at hub", func() bool {
 		return countRows(hub.db, `SELECT COUNT(*) FROM models m JOIN backends b ON b.id=m.backend_id
@@ -486,7 +500,7 @@ func TestNotSharedAbsentAndForbidden(t *testing.T) {
 		t.Fatal(err)
 	}
 	spoke := newRelay(t, "spoke-a")
-	spoke.becomeSpoke(hub.srv.URL, tok)
+	spoke.becomeSpoke(hub, tok)
 	poll(t, "peer online", func() bool { return hub.mgr.Online(peer.ID) })
 
 	if _, body := spoke.get("/v1/models"); strings.Contains(modelsList(body), "secret") {
@@ -579,7 +593,7 @@ func TestSpokeServingSharingGate(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	spoke.becomeSpoke(hub.srv.URL, tok)
+	spoke.becomeSpoke(hub, tok)
 	poll(t, "peer online", func() bool { return hub.mgr.Online(peer.ID) })
 	pollLog(t, spoke, hub)("group pool materialized with the LOCAL pool-member", func() bool {
 		var n int
@@ -627,11 +641,11 @@ func TestSpokeToSpokeTransit(t *testing.T) {
 
 	spokeB := newRelay(t, "spoke-b")
 	spokeB.shareLocal("gamma", "spoke-b")
-	spokeB.becomeSpoke(hub.srv.URL, tokB)
+	spokeB.becomeSpoke(hub, tokB)
 	poll(t, "B online", func() bool { return hub.mgr.Online(pb.ID) })
 
 	spokeA := newRelay(t, "spoke-a")
-	spokeA.becomeSpoke(hub.srv.URL, tokA)
+	spokeA.becomeSpoke(hub, tokA)
 	poll(t, "A online", func() bool { return hub.mgr.Online(pa.ID) })
 	poll(t, "gamma relayed to A", func() bool {
 		return countRows(spokeA.db, `SELECT COUNT(*) FROM models m JOIN backends b ON b.id=m.backend_id
@@ -704,7 +718,7 @@ func TestHubGroupServeDoubleEntry(t *testing.T) {
 
 	spokeB := newRelay(t, "spoke-b")
 	spokeB.shareLocal("gamma", "spoke-b")
-	spokeB.becomeSpoke(hub.srv.URL, tokB)
+	spokeB.becomeSpoke(hub, tokB)
 	poll(t, "B online", func() bool { return hub.mgr.Online(pb.ID) })
 
 	// A real admin group: hub-local member + the synthetic peer://B member.
@@ -726,7 +740,7 @@ func TestHubGroupServeDoubleEntry(t *testing.T) {
 
 	// A (raw spoke client) asks the hub to serve-here the group name; the
 	// only eligible member is the synthetic peer://B row.
-	ws := rawSpoke(t, hub.srv.URL, tokA)
+	ws := rawSpoke(t, hub.srv.URL, tokA, hub.client)
 	status, text := rawReq(t, ws, &fed.Req{T: fed.TReq, ID: "syn-1", Method: "POST",
 		Path: "/v1/chat/completions", Body: chatBody("mix")})
 	if status != 200 || !strings.Contains(text, "from-spoke-b") {
@@ -928,7 +942,7 @@ func TestCancelAbortsUpstream(t *testing.T) {
 	if err := store.SetModelFedVisibility(spoke.db, m.ID, store.FedVisAll, nil); err != nil {
 		t.Fatal(err)
 	}
-	spoke.becomeSpoke(hub.srv.URL, tok)
+	spoke.becomeSpoke(hub, tok)
 	poll(t, "peer online", func() bool { return hub.mgr.Online(peer.ID) })
 	poll(t, "slow materialized", func() bool {
 		return countRows(hub.db, `SELECT COUNT(*) FROM models WHERE name='slow'`) == 1
@@ -943,7 +957,7 @@ func TestCancelAbortsUpstream(t *testing.T) {
 		strings.NewReader(`{"model":"slow","messages":[{"role":"user","content":"hi"}]}`))
 	req.Header.Set("Authorization", "Bearer "+hub.key)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := hub.client.Do(req)
 	if err == nil {
 		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
@@ -974,7 +988,7 @@ func TestInflightCapFailsOver(t *testing.T) {
 	if err := store.SetModelFedVisibility(spoke.db, m.ID, store.FedVisAll, nil); err != nil {
 		t.Fatal(err)
 	}
-	spoke.becomeSpoke(hub.srv.URL, tok)
+	spoke.becomeSpoke(hub, tok)
 	poll(t, "peer online", func() bool { return hub.mgr.Online(peer.ID) })
 	poll(t, "slow materialized", func() bool {
 		return countRows(hub.db, `SELECT COUNT(*) FROM models WHERE name='slow'`) == 1
@@ -1023,7 +1037,7 @@ func TestCollisionSkipsAndLogs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	spoke.becomeSpoke(hub.srv.URL, tok)
+	spoke.becomeSpoke(hub, tok)
 	poll(t, "peer online", func() bool { return hub.mgr.Online(peer.ID) })
 	poll(t, "collision logged", func() bool { return spoke.logs.has(`skipping shared model "dup"`) })
 
@@ -1069,7 +1083,7 @@ func TestFederatedGroupLocalFirst(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	spoke.becomeSpoke(hub.srv.URL, tok)
+	spoke.becomeSpoke(hub, tok)
 	poll(t, "peer online", func() bool { return hub.mgr.Online(peer.ID) })
 	poll(t, "federated group materialized", func() bool {
 		return countRows(spoke.db, `SELECT COUNT(*) FROM model_groups WHERE name='pool' AND federated=1`) == 1
@@ -1111,11 +1125,11 @@ func TestTransitTargetDeathUnblocksRequester(t *testing.T) {
 	spokeB := newRelay(t, "spoke-b")
 	e := newEngine(t, "spoke-b", 3*time.Second) // slow: holds the transit open
 	spokeB.shareLocalEngine("slowgamma", e)
-	spokeB.becomeSpoke(hub.srv.URL, tokB)
+	spokeB.becomeSpoke(hub, tokB)
 	poll(t, "B online", func() bool { return hub.mgr.Online(pb.ID) })
 
 	spokeA := newRelay(t, "spoke-a")
-	spokeA.becomeSpoke(hub.srv.URL, tokA)
+	spokeA.becomeSpoke(hub, tokA)
 	poll(t, "A online", func() bool { return hub.mgr.Online(pa.ID) })
 	poll(t, "slowgamma relayed to A", func() bool {
 		return countRows(spokeA.db, `SELECT COUNT(*) FROM models m JOIN backends b ON b.id=m.backend_id
@@ -1136,7 +1150,7 @@ func TestTransitTargetDeathUnblocksRequester(t *testing.T) {
 			strings.NewReader(`{"model":"slowgamma","messages":[{"role":"user","content":"hello"}]}`))
 		req.Header.Set("Authorization", "Bearer "+spokeA.key)
 		req.Header.Set("Content-Type", "application/json")
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := spokeA.client.Do(req)
 		if err != nil {
 			done <- res{err: err}
 			return

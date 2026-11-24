@@ -14,7 +14,7 @@ All `/api/*` except login require `Authorization: Bearer <jwt>`. The embedded SP
 - `GET /api/me` → `{"id":1,"username":"a","display_name":"Ada","role":"admin"|"user","disabled":false,"created_at":"..."}`
 - `PATCH /api/me` — `{"display_name":"..."}` (≤64 chars) → updated user object
 - `POST /api/auth/change_password` — `{"old_password","new_password"}` (new ≥8, ≤72 bytes) → `204`; `401` when the old password is wrong, `400` on validation. Changing a password revokes every JWT issued earlier for that user (they must sign in again).
-- `GET /api/info` → `{"relay_url":"https://relay.example.fi","dashboard_url":"https://llm-relay.example.fi","currency":"EUR"}` (`currency` defaults to `EUR` when unset; empty `relay_url`/`dashboard_url` = not configured; `relay_url` is the configured `PUBLIC_RELAY_URL` root **verbatim** — the dashboard appends `/v1` for the copy field users paste into their apps. The values are not validated: include the scheme, and a hostname or a plain IP:port origin both work (LAN hosting: `http://192.0.2.10:8080`))
+- `GET /api/info` → `{"relay_url":"https://relay.example.fi","dashboard_url":"https://llm-relay.example.fi","currency":"EUR"}` (`currency` defaults to `EUR` when unset; empty `relay_url`/`dashboard_url` = not configured; `relay_url` is the configured `PUBLIC_RELAY_URL` root **verbatim** — the dashboard appends `/v1` for the copy field users paste into their apps. The values are not validated: include the scheme, and a hostname or a plain IP:port origin both work (LAN hosting: `http://192.0.2.10:8080`). When the instance has a self-signed TLS cert, `tls_fingerprint` (`sha256:…`) is added — public-safe (a hash of a public cert), shown so a spoke can pin it; absent when no cert is configured)
 
 ### Model catalog (all users)
 - `GET /api/models` → `{"models":[{"kind":"model","name":"Qwen3.8-flash-next","price_in":100,"price_out":200,"price_cache_read":10,"price_cache_write":40,"context_length":262144,"concurrency_limit":4,"bench_tok_per_s":41.2,"bench_pp_tok_per_s":1850.4,"bench_at":"2026-11-20T12:00:00Z"}]}` — models usable right now (enabled model on an enabled backend); prices are micro-units per 1M tokens; `context_length`/`concurrency_limit` are admin-set (0 = unset); `bench_tok_per_s` (generation, TG) / `bench_pp_tok_per_s` (prompt processing, PP) / `bench_at` are the last admin benchmark (0/"" = never); either speed may also be set manually by an admin, which leaves `bench_at` empty. Internal wiring (backend, upstream id) is not exposed. `kind` is `"model"` or `"group"`: a group row advertises a pooled public name (several machines behind one name) and carries **zero** numeric fields — consumers must skip group rows for billing or speed display (cost and speed follow the member that actually serves each request).
@@ -100,8 +100,11 @@ Admin (JWT, admin — the **Servers** page):
 - `POST /api/admin/peers/{id}/rotate` → `{"token":"fed-…"}` · `PATCH /api/admin/peers/{id}` — `{"enabled":true|false}` → peer object (disable is the incident lever: it drops the peer's live channel at once, `1008 "disabled"`) · `DELETE /api/admin/peers/{id}` → `204` (live channel dropped too) — all `404` on unknown id
 
 Federation settings (JWT, admin):
-- `GET /api/admin/federation` → `{"role":"standalone","hub_url":"","hub_token":""}` — `role` is `standalone` (default) | `hub` | `spoke`; `hub_token` is echoed back (it is the hub's token the admin pasted, not a secret this server minted). Spoke config is plaintext-at-rest like other DB secrets here; the spoke must present it verbatim. When the stored role is `spoke` the response carries `"spoke":{"connected":bool,"hub_name":"…","hub_version":"…"}` — the live channel state and the hub's `hello_ack` identity (empty strings while disconnected).
-- `PUT /api/admin/federation` — full replacement `{"role","hub_url","hub_token"}` → same shape. `400` when the role is not one of the three, or a spoke lacks an http(s) `hub_url` or the `hub_token`. Leaving spoke mode clears `hub_url`/`hub_token`. Live-safe: the spoke dialer starts/stops with the role, and moving away from `hub` closes every live channel (`1008 "role changed"`) — no restart needed.
+- `GET /api/admin/federation` → `{"role":"standalone","hub_url":"","hub_token":"","hub_pin":""}` — `role` is `standalone` (default) | `hub` | `spoke`; `hub_token` is echoed back (it is the hub's token the admin pasted, not a secret this server minted). Spoke config is plaintext-at-rest like other DB secrets here; the spoke must present it verbatim. `hub_pin` (plan 2026-11-24-remote-tls-v1) is the optional hub cert fingerprint the spoke pins — public data, echoed for review. When the stored role is `spoke` the response carries `"spoke":{"connected":bool,"hub_name":"…","hub_version":"…"}` — the live channel state and the hub's `hello_ack` identity (empty strings while disconnected).
+- `PUT /api/admin/federation` — full replacement `{"role","hub_url","hub_token","hub_pin"}` → same shape. `400` when the role is not one of the three, or a spoke lacks an **https** `hub_url` (federation requires TLS — no cleartext, no opt-out) or the `hub_token`; a malformed `hub_pin` (not `sha256:` + 64 hex, colons/case tolerated) is `400`. Leaving spoke mode clears `hub_url`/`hub_token`/`hub_pin`. Live-safe: the spoke dialer starts/stops with the role, and moving away from `hub` closes every live channel (`1008 "role changed"`) — no restart needed.
+- `GET /api/admin/tls` → the instance TLS cert view (plan 2026-11-24-remote-tls-v1): `{"configured":false}` when none, else `{"configured":true,"fingerprint":"sha256:…","sans":["relay.example.fi"],"not_after":"…","created_at":"…"}`. The private key is **never** returned.
+- `POST /api/admin/tls` — `{"hosts":["relay.example.fi","192.0.2.10"]}` mints (or regenerates) a self-signed cert for those SANs → `200 {"tls":{...view},"cert_pem":"-----BEGIN CERTIFICATE-----…"}` (`cert_pem` is shown once, for an optional install in an external proxy). `400` no valid host. Regenerating replaces the key pair: live channels survive, every peer must re-pin before reconnecting.
+- `DELETE /api/admin/tls` → removes the row → `200 {"configured":false}`. TLS handshakes fail until a new cert exists (deliberate — no silent fallback).
 - `GET /api/federation/role` (JWT, any user) → `{"role":"hub"}` — the reconciled role only; the hub-only UI (setup guide) gates on it without needing the admin settings payload.
 
 Federation stats (plan task 4; `?days=N`, default 30, `1..365` else `400`;
@@ -143,6 +146,16 @@ switching to `"allowlist"` without `fed_peer_ids` keeps the stored list;
 switching to `"off"`/`"all"` clears it (those modes share with
 nobody/everybody). The model row surfaces both as `fed_visibility` +
 `fed_peer_ids`.
+
+**TLS gate (both channels, plan 2026-11-24-remote-tls-v1):** the three
+machine-channel endpoints — `/federation/v1/connect`, `/federation/v1/ping`
+and `/remote/v1/connect` — answer `403 "TLS required"` to any request that did
+not arrive over TLS: a direct TLS handshake (`r.TLS`), or `X-Forwarded-Proto:
+https` when `TRUST_PROXY_HEADERS` is on **and `TLS_PORT=0`** (the
+TLS-terminating-proxy deployment — a relay that binds its own TLS listener does
+not honour the forgeable header). No opt-out. The dialers require TLS too: a
+spoke's `hub_url` and a connector's `RELAY_URL` must be `https://`, and against
+a self-signed peer they pin its fingerprint (`hub_pin` / `RELAY_PIN`).
 
 Federation channel (relay port, `fed-` tokens):
 

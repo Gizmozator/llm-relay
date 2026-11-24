@@ -19,10 +19,13 @@ import (
 
 // setFedRole writes the federation settings through the admin API (also
 // proving the PUT → Manager.Reload path is live-safe).
-func setFedRole(t *testing.T, e *testEnv, admin, role, hubURL, hubToken string) {
+// setFedRole PUTs the federation settings block; hubPin is the TLS
+// fingerprint the spoke dials with (plan 2026-11-24-remote-tls-v1) — ""
+// where the dialer never connects (dead hub_url) or the role is not spoke.
+func setFedRole(t *testing.T, e *testEnv, admin, role, hubURL, hubToken, hubPin string) {
 	t.Helper()
 	body, _ := json.Marshal(map[string]string{
-		"role": role, "hub_url": hubURL, "hub_token": hubToken})
+		"role": role, "hub_url": hubURL, "hub_token": hubToken, "hub_pin": hubPin})
 	resp := e.do(t, "PUT", "/api/admin/federation", string(body), admin)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -36,6 +39,7 @@ func dialConnect(t *testing.T, e *testEnv, token string) (*websocket.Conn, error
 	defer cancel()
 	url := "ws" + strings.TrimPrefix(e.srv.URL, "http") + "/federation/v1/connect"
 	c, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{
+		HTTPClient: e.srv.Client(), // trusts the test server's TLS cert
 		HTTPHeader: http.Header{"Authorization": {"Bearer " + token}},
 	})
 	return c, err
@@ -59,7 +63,7 @@ func TestFederationConnectRoute(t *testing.T) {
 	}
 
 	// spoke role: still no accept side here.
-	setFedRole(t, e, admin, "spoke", "http://127.0.0.1:1", "fed-x")
+	setFedRole(t, e, admin, "spoke", "https://127.0.0.1:1", "fed-x", "")
 	if resp := e.do(t, "GET", "/federation/v1/connect", "", token); resp.StatusCode != http.StatusNotFound {
 		bodyString(t, resp)
 		t.Errorf("spoke connect = %d, want 404", resp.StatusCode)
@@ -68,7 +72,7 @@ func TestFederationConnectRoute(t *testing.T) {
 	}
 
 	// hub role: PeerAuth guards, then the handshake runs.
-	setFedRole(t, e, admin, "hub", "", "")
+	setFedRole(t, e, admin, "hub", "", "", "")
 	if resp := e.do(t, "GET", "/federation/v1/connect", "", "fed-wrong"); resp.StatusCode != http.StatusUnauthorized {
 		bodyString(t, resp)
 		t.Errorf("bad token connect = %d, want 401", resp.StatusCode)
@@ -169,7 +173,7 @@ func TestFederationKickOnMutations(t *testing.T) {
 	admin := login(t, e)
 	alice := userToken(t, e, "alice")
 	pid, token := createPeer(t, e, alice, "kickme")
-	setFedRole(t, e, admin, "hub", "", "")
+	setFedRole(t, e, admin, "hub", "", "", "")
 	peerPath := "/api/admin/peers/" + strconv.FormatInt(pid, 10)
 
 	// 1. admin disable → "disabled".

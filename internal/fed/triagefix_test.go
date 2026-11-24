@@ -23,7 +23,7 @@ func TestReloadKeepsDialerOnSettingsReadError(t *testing.T) {
 	// A hub that handshakes and then HOLDS the socket (the shared stubHub
 	// drops idle connections after 50 ms, which would fake a teardown).
 	handshakes := make(chan struct{}, 4)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 		if err != nil {
 			return
@@ -56,7 +56,7 @@ func TestReloadKeepsDialerOnSettingsReadError(t *testing.T) {
 	})
 	defer mgr.Close()
 	if err := store.PutFederationSettings(d, store.FederationSettings{
-		Role: store.FedRoleSpoke, HubURL: srv.URL, HubToken: "fed-tok",
+		Role: store.FedRoleSpoke, HubURL: srv.URL, HubToken: "fed-tok", HubPin: pinOf(srv),
 	}); err != nil {
 		t.Fatal(err)
 	}

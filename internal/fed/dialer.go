@@ -17,6 +17,7 @@ import (
 
 	"github.com/coder/websocket"
 	"llm-relay/internal/store"
+	"llm-relay/internal/tlscert"
 )
 
 type dialer struct {
@@ -24,20 +25,39 @@ type dialer struct {
 	mgr     *Manager
 	hubURL  string
 	token   string
+	pin     string // optional hub cert fingerprint (plan 2026-11-24-remote-tls-v1)
 	opts    Options
 	ctx     context.Context
 	cancel  context.CancelFunc
 	done    chan struct{}
 	dialSem chan struct{} // cap 1: one attempt at a time; also dial counter seam
+	// httpClient is built once from pin (the pin is fixed for the dialer's
+	// lifetime) and reused across reconnects, so the backoff loop does not
+	// leak a fresh Transport — and its idle sockets — on every dial attempt.
+	// nil when no pin (library default client, normal CA verification).
+	httpClient *http.Client
+	// pinErr holds a pin-parse failure surfaced per dial. The store validates
+	// hub_pin on write, so this is nil in practice.
+	pinErr error
 }
 
 func newDialer(db *sql.DB, f store.FederationSettings, opts Options, mgr *Manager) *dialer {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &dialer{
-		db: db, mgr: mgr, hubURL: f.HubURL, token: f.HubToken, opts: opts,
+	d := &dialer{
+		db: db, mgr: mgr, hubURL: f.HubURL, token: f.HubToken, pin: f.HubPin, opts: opts,
 		ctx: ctx, cancel: cancel, done: make(chan struct{}),
 		dialSem: make(chan struct{}, 1),
 	}
+	if f.HubPin != "" {
+		tlsCfg, err := tlscert.DialConfig(f.HubPin)
+		if err != nil {
+			d.pinErr = err
+		} else {
+			// coder/websocket takes TLS via the HTTP client's transport.
+			d.httpClient = &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg}}
+		}
+	}
+	return d
 }
 
 func (d *dialer) start() { go d.run() }
@@ -91,10 +111,22 @@ func (d *dialer) dialOnce() error {
 	defer func() { <-d.dialSem }()
 
 	url := strings.TrimSuffix(d.hubURL, "/") + "/federation/v1/connect"
-	dctx, dcancel := context.WithTimeout(d.ctx, d.opts.DialTimeout)
-	ws, _, err := websocket.Dial(dctx, url, &websocket.DialOptions{
+	// Hard TLS rule: a hub_url that slipped through validation (a DB row
+	// predating the https requirement) must never be dialed in the clear.
+	if !strings.HasPrefix(d.hubURL, "https://") {
+		return fmt.Errorf("hub_url %q is not https://: federation requires TLS (set an https hub_url on the Federation page)", d.hubURL)
+	}
+	if d.pinErr != nil {
+		return fmt.Errorf("hub_pin: %w", d.pinErr)
+	}
+	dialOpts := &websocket.DialOptions{
 		HTTPHeader: http.Header{"Authorization": {"Bearer " + d.token}},
-	})
+		// nil when no pin → coder/websocket's default client (normal CA
+		// verification). Built once in newDialer and reused across dials.
+		HTTPClient: d.httpClient,
+	}
+	dctx, dcancel := context.WithTimeout(d.ctx, d.opts.DialTimeout)
+	ws, _, err := websocket.Dial(dctx, url, dialOpts)
 	dcancel()
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", url, err)

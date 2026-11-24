@@ -17,11 +17,15 @@ set -u
 cd "$(dirname "$0")/.."
 
 # ---- topology (localhost only, 18xxx, never a deployed instance) ----------
-HUB_RELAY=18080  HUB_ADMIN=18090
+HUB_RELAY=18080  HUB_ADMIN=18090  HUB_TLS=18443
 SPOKE_RELAY=18081 SPOKE_ADMIN=18091
 ENG_HUB=18180    ENG_SPOKE=18181
 ADMIN_PW='e2e-adminpass'
+# The spoke dials the hub's federation channel over TLS (plan
+# 2026-11-24-remote-tls-v1): the hub's TLS listener port + its self-signed
+# cert fingerprint (pinned as hub_pin). The plain relay URL stays for /v1.
 HUB_URL="http://127.0.0.1:${HUB_RELAY}"
+HUB_TLS_URL="https://127.0.0.1:${HUB_TLS}"
 
 PASS=0; FAIL=0; FAILED=(); FATAL=0
 PIDS=()
@@ -167,12 +171,14 @@ login() { # login ADMIN_URL → token on stdout; stdout stays EMPTY on failure
   fi
 }
 
-# start_relay NAME RELAY_PORT ADMIN_PORT DB → pid in $RELAY_PID. Called
-# plainly, never inside $(...): the relay must be a child of THIS shell or
-# the cleanup trap's `wait` cannot reap it.
+# start_relay NAME RELAY_PORT ADMIN_PORT DB TLS_PORT → pid in $RELAY_PID.
+# TLS_PORT=0 disables the TLS listener (the spoke needs none: it only dials
+# out). Called plainly, never inside $(...): the relay must be a child of
+# THIS shell or the cleanup trap's `wait` cannot reap it.
 start_relay() {
-  local name=$1 rp=$2 ap=$3 db=$4
+  local name=$1 rp=$2 ap=$3 db=$4 tls=$5
   LISTEN_ADDR="127.0.0.1:$rp" ADMIN_ADDR="127.0.0.1:$ap" DB_PATH="$db" \
+  TLS_PORT="$tls" \
   JWT_SECRET="e2e-secret-not-for-production-xx" \
   ADMIN_USERNAME=admin ADMIN_PASSWORD="$ADMIN_PW" \
     "./llm-relay" >"$WORK/$name.log" 2>&1 &
@@ -200,7 +206,7 @@ say "== federation e2e — workdir $WORK =="
 # ---- preflight: every port must be free ------------------------------------
 # A foreign listener on 18xxx would make relays fail to bind (or worse, let
 # checks talk to the wrong instance). Fail loudly up front, naming the port.
-for p in "$HUB_RELAY" "$HUB_ADMIN" "$SPOKE_RELAY" "$SPOKE_ADMIN" "$ENG_HUB" "$ENG_SPOKE"; do
+for p in "$HUB_RELAY" "$HUB_ADMIN" "$HUB_TLS" "$SPOKE_RELAY" "$SPOKE_ADMIN" "$ENG_HUB" "$ENG_SPOKE"; do
   if (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; then
     die "preflight: 127.0.0.1:$p is already in use — free it before running the e2e"
   fi
@@ -226,8 +232,8 @@ for ep in "$ENG_HUB" "$ENG_SPOKE"; do
     }
 done
 
-start_relay hub "$HUB_RELAY" "$HUB_ADMIN" "$WORK/hub.db"; HUB_PID=$RELAY_PID; PIDS+=("$HUB_PID")
-start_relay spoke "$SPOKE_RELAY" "$SPOKE_ADMIN" "$WORK/spoke.db"; SPOKE_PID=$RELAY_PID; PIDS+=("$SPOKE_PID")
+start_relay hub "$HUB_RELAY" "$HUB_ADMIN" "$WORK/hub.db" "$HUB_TLS"; HUB_PID=$RELAY_PID; PIDS+=("$HUB_PID")
+start_relay spoke "$SPOKE_RELAY" "$SPOKE_ADMIN" "$WORK/spoke.db" 0; SPOKE_PID=$RELAY_PID; PIDS+=("$SPOKE_PID")
 
 for hp in "$HUB_ADMIN" "$SPOKE_ADMIN"; do
   wait_for "relay admin :$hp answers /healthz" 30 \
@@ -283,8 +289,16 @@ expect 'setup: peer enrolled' 201
 extract FED_TOKEN '.token' "$b" secret
 extract PEER_ID '.peer.id' "$b" secret
 
+# Generate the hub's self-signed TLS cert (plan 2026-11-24-remote-tls-v1):
+# the spoke dials the hub's TLS listener and pins this fingerprint. The
+# pinned dialer skips hostname checks, so 127.0.0.1 as the SAN is enough.
+api POST "http://127.0.0.1:$HUB_ADMIN/api/admin/tls" b '{"hosts":["127.0.0.1"]}' "$HUB"
+expect 'setup: hub TLS cert generated' 200
+extract HUB_PIN '.tls.fingerprint' "$b"
+check 'setup: hub cert fingerprint present' '.tls.configured == true and (.tls.fingerprint|startswith("sha256:"))' "$b"
+
 api PUT "http://127.0.0.1:$SPOKE_ADMIN/api/admin/federation" b \
-  "{\"role\":\"spoke\",\"hub_url\":\"$HUB_URL\",\"hub_token\":\"$FED_TOKEN\"}" "$SPOKE"
+  "{\"role\":\"spoke\",\"hub_url\":\"$HUB_TLS_URL\",\"hub_token\":\"$FED_TOKEN\",\"hub_pin\":\"$HUB_PIN\"}" "$SPOKE"
 expect 'setup: spoke role PUT accepted' 200
 wait_for 'enroll: spoke channel connects to the hub' 30 \
   bash -c "curl -s -H 'Authorization: Bearer $SPOKE' \
@@ -328,7 +342,7 @@ kill "$SPOKE_PID" 2>/dev/null; wait "$SPOKE_PID" 2>/dev/null
 wait_for 'd: spoke offline → mock-a disappears from /v1/models' 30 hub_lacks mock-a
 
 # ---- e: spoke restarts → models return; peer disable drops the channel ----
-start_relay spoke "$SPOKE_RELAY" "$SPOKE_ADMIN" "$WORK/spoke.db"; SPOKE_PID=$RELAY_PID; PIDS+=("$SPOKE_PID")
+start_relay spoke "$SPOKE_RELAY" "$SPOKE_ADMIN" "$WORK/spoke.db" 0; SPOKE_PID=$RELAY_PID; PIDS+=("$SPOKE_PID")
 wait_for 'e: restarted spoke answers /healthz' 30 \
   curl -sf -m 2 "http://127.0.0.1:$SPOKE_ADMIN/healthz" || exit 1
 SPOKE=$(login "http://127.0.0.1:$SPOKE_ADMIN")

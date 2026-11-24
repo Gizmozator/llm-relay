@@ -90,7 +90,7 @@ func newHubEnv(t *testing.T, opts *fed.Options) *hubEnv {
 		}
 		mgr.ServeHub(w, r, p)
 	}))
-	srv := httptest.NewServer(mux)
+	srv := httptest.NewTLSServer(mux)
 	t.Cleanup(srv.Close)
 
 	hash, _ := auth.HashPassword("x")
@@ -110,7 +110,7 @@ func (e *hubEnv) setRole(t *testing.T, role string) {
 	in := store.FederationSettings{Role: role}
 	if role == store.FedRoleSpoke {
 		// Nothing listens on :1 — the dialer just retries quietly.
-		in.HubURL, in.HubToken = "http://127.0.0.1:1", "fed-x"
+		in.HubURL, in.HubToken = "https://127.0.0.1:1", "fed-x"
 	}
 	if err := store.PutFederationSettings(e.db, in); err != nil {
 		t.Fatal(err)
@@ -122,11 +122,12 @@ func wsURL(srv *httptest.Server) string {
 	return "ws" + strings.TrimPrefix(srv.URL, "http") + "/federation/v1/connect"
 }
 
-func wsDial(t *testing.T, url, token string) (*websocket.Conn, error) {
+func wsDial(t *testing.T, url, token string, client *http.Client) (*websocket.Conn, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	c, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{
+		HTTPClient: client,
 		HTTPHeader: http.Header{"Authorization": {"Bearer " + token}},
 	})
 	return c, err
@@ -166,7 +167,7 @@ func expectRejected(t *testing.T, e *hubEnv, token string, want int) {
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := e.srv.Client().Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +175,7 @@ func expectRejected(t *testing.T, e *hubEnv, token string, want int) {
 	if resp.StatusCode != want {
 		t.Errorf("gate status = %d, want %d", resp.StatusCode, want)
 	}
-	if _, err := wsDial(t, wsURL(e.srv), token); err == nil {
+	if _, err := wsDial(t, wsURL(e.srv), token, e.srv.Client()); err == nil {
 		t.Errorf("ws dial accepted, want rejection %d", want)
 	}
 }
@@ -191,7 +192,7 @@ func TestConnectRoleAndAuthMatrix(t *testing.T) {
 	expectRejected(t, e, "", http.StatusUnauthorized)
 
 	// hub + good token: upgrade + hello/hello_ack exchange.
-	c, err := wsDial(t, wsURL(e.srv), e.token)
+	c, err := wsDial(t, wsURL(e.srv), e.token, e.srv.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +214,7 @@ func TestConnectRoleAndAuthMatrix(t *testing.T) {
 func TestProtoMismatch(t *testing.T) {
 	e := newHubEnv(t, nil)
 	e.setRole(t, store.FedRoleHub)
-	c, err := wsDial(t, wsURL(e.srv), e.token)
+	c, err := wsDial(t, wsURL(e.srv), e.token, e.srv.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +237,7 @@ func TestProtoMismatch(t *testing.T) {
 func TestHelloTimeout(t *testing.T) {
 	e := newHubEnv(t, &fed.Options{HelloTimeout: 100 * time.Millisecond})
 	e.setRole(t, store.FedRoleHub)
-	c, err := wsDial(t, wsURL(e.srv), e.token)
+	c, err := wsDial(t, wsURL(e.srv), e.token, e.srv.Client())
 	if err != nil {
 		t.Fatal(err) // the upgrade itself succeeds; hello is what times out
 	}
@@ -255,7 +256,7 @@ func TestHelloTimeout(t *testing.T) {
 func TestReplaceSamePeer(t *testing.T) {
 	e := newHubEnv(t, nil)
 	e.setRole(t, store.FedRoleHub)
-	a, err := wsDial(t, wsURL(e.srv), e.token)
+	a, err := wsDial(t, wsURL(e.srv), e.token, e.srv.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +264,7 @@ func TestReplaceSamePeer(t *testing.T) {
 	clientHello(t, a, fed.Protocol)
 
 	// A spoke restart (second connect, same token) takes over at once.
-	b, err := wsDial(t, wsURL(e.srv), e.token)
+	b, err := wsDial(t, wsURL(e.srv), e.token, e.srv.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,7 +301,7 @@ func TestLivenessAndTouch(t *testing.T) {
 		TouchThrottle: 10 * time.Millisecond,
 	})
 	e.setRole(t, store.FedRoleHub)
-	c, err := wsDial(t, wsURL(e.srv), e.token)
+	c, err := wsDial(t, wsURL(e.srv), e.token, e.srv.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -430,7 +431,7 @@ func waitOffline(t *testing.T, e *hubEnv) bool {
 // before acting on it (kick/close must find the entry).
 func liveChannel(t *testing.T, e *hubEnv) *websocket.Conn {
 	t.Helper()
-	c, err := wsDial(t, wsURL(e.srv), e.token)
+	c, err := wsDial(t, wsURL(e.srv), e.token, e.srv.Client())
 	if err != nil {
 		t.Fatal(err)
 	}

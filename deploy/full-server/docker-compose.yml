@@ -9,6 +9,9 @@ services:
     ports:
       - "8080:8080"   # relay API (/v1/*) — apps point here
       - "8081:8081"   # dashboard + admin API
+      - "8443:8443"   # machine channels over TLS (federation + remote backends);
+                      # drop this line and set TLS_PORT=0 in .env when a reverse
+                      # proxy terminates TLS instead
     env_file: .env
     volumes:
       - ./data:/data

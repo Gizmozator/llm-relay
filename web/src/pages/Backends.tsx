@@ -392,9 +392,11 @@ function RemoteCreateModal({
           <TokenReveal token={token} label="Connect token" />
           <p className="dim">
             Put it in the remote box’s env as <code>RELAY_TOKEN</code>, together with{' '}
-            <code>HEADLESS=true</code>, <code>RELAY_URL</code> (this relay’s public URL) and{' '}
-            <code>ENGINE_URL</code> (the engine it should expose). The box dials in and shows
-            online here.
+            <code>HEADLESS=true</code>, <code>RELAY_URL</code> (this relay’s public URL,
+            which must be <code>https://</code>) and <code>ENGINE_URL</code> (the engine it
+            should expose). If this relay uses a self-signed cert (see Settings → TLS), also
+            set <code>RELAY_PIN</code> to its fingerprint. The box dials in and shows online
+            here.
           </p>
           <div className="modal-actions">
             <button className="btn primary" onClick={onCreated}>

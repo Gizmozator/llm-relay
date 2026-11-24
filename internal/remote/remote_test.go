@@ -25,6 +25,7 @@ import (
 	"llm-relay/internal/fed"
 	"llm-relay/internal/remote"
 	"llm-relay/internal/store"
+	"llm-relay/internal/tlscert"
 )
 
 // fastOpts shrinks the channel timers so the test does not sleep on
@@ -90,12 +91,16 @@ func newFakeEngine(t *testing.T) *fakeEngine {
 }
 
 // remoteEnv wires a registry behind the connect route (token-checked like
-// RemoteAuth) plus a running connector.
+// RemoteAuth) plus a running connector. The connect server is TLS (plan
+// 2026-11-24-remote-tls-v1: the channel is TLS-only); pin is its cert
+// fingerprint, which the connector dials with. The fake engine stays plain
+// HTTP — ENGINE_URL is the box's own local hop.
 type remoteEnv struct {
 	db     *sql.DB
 	reg    *remote.Registry
 	eng    *fakeEngine
 	srvURL string
+	pin    string
 }
 
 func newRemoteEnv(t *testing.T, firstOpts fed.Options) (*remoteEnv, *store.Backend, string) {
@@ -126,16 +131,17 @@ func newRemoteEnv(t *testing.T, firstOpts fed.Options) (*remoteEnv, *store.Backe
 		}
 		reg.ServeConn(w, r, b, auth.HashKey(token))
 	}))
-	srv := httptest.NewServer(mux)
+	srv := httptest.NewTLSServer(mux)
 	t.Cleanup(srv.Close)
 
+	pin := tlscert.Fingerprint(srv.Certificate().Raw)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go remote.RunClient(ctx, remote.ClientConfig{
-		ServerURL: srv.URL, Token: token, EngineURL: eng.URL,
+		ServerURL: srv.URL, Token: token, Pin: pin, EngineURL: eng.URL,
 		Version: "v1", Options: firstOpts,
 	}, nil)
-	return &remoteEnv{db: d, reg: reg, eng: eng, srvURL: srv.URL}, b, token
+	return &remoteEnv{db: d, reg: reg, eng: eng, srvURL: srv.URL, pin: pin}, b, token
 }
 
 func waitFor(t *testing.T, d time.Duration, what string, cond func() bool) {
@@ -295,7 +301,7 @@ func TestRemoteReplaceOnReconnect(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go remote.RunClient(ctx, remote.ClientConfig{
-		ServerURL: env.srvURL, Token: token, EngineURL: env.eng.URL, Version: "v2",
+		ServerURL: env.srvURL, Token: token, Pin: env.pin, EngineURL: env.eng.URL, Version: "v2",
 		Options: fed.Options{BackoffMin: 50 * time.Millisecond, BackoffMax: 200 * time.Millisecond},
 	}, nil)
 	waitFor(t, 5*time.Second, "second connector takes over", func() bool {

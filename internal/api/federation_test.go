@@ -488,7 +488,7 @@ func TestFedRoleEndpoint(t *testing.T) {
 
 	// Spoke role: still role-only — the stored hub_url/token must not ride
 	// this endpoint (it is readable by every user, the admin pair is not).
-	setFedRole(t, e, admin, "spoke", "http://127.0.0.1:1", "fed-secret-token")
+	setFedRole(t, e, admin, "spoke", "https://127.0.0.1:1", "fed-secret-token", "")
 	resp = e.do(t, "GET", "/api/federation/role", "", alice)
 	body = bodyString(t, resp)
 	if resp.StatusCode != http.StatusOK {
@@ -549,8 +549,8 @@ func TestSpokeStatusAndPeerOnline(t *testing.T) {
 	sadmin := login(t, sp)
 
 	_, token := createPeer(t, hub, hadmin, "home")
-	setFedRole(t, hub, hadmin, "hub", "", "")
-	setFedRole(t, sp, sadmin, "spoke", hub.srv.URL, token)
+	setFedRole(t, hub, hadmin, "hub", "", "", "")
+	setFedRole(t, sp, sadmin, "spoke", hub.srv.URL, token, pinOf(hub))
 
 	type spokeBranch struct {
 		Connected  bool   `json:"connected"`

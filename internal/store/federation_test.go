@@ -35,6 +35,13 @@ func TestFederationSettingsPut(t *testing.T) {
 	}); !errors.Is(err, store.ErrFedConfig) {
 		t.Errorf("non-http hub_url = %v, want ErrFedConfig", err)
 	}
+	// Hard TLS rule (plan 2026-11-24-remote-tls-v1): http is a valid URL
+	// scheme but no longer an acceptable hub_url.
+	if err := store.PutFederationSettings(d, store.FederationSettings{
+		Role: "spoke", HubURL: "http://hub.example.fi", HubToken: "fed-x",
+	}); !errors.Is(err, store.ErrFedConfig) {
+		t.Errorf("http hub_url = %v, want ErrFedConfig", err)
+	}
 	if err := store.PutFederationSettings(d, store.FederationSettings{Role: "nonsense"}); !errors.Is(err, store.ErrFedConfig) {
 		t.Errorf("bad role = %v, want ErrFedConfig", err)
 	}
@@ -51,6 +58,40 @@ func TestFederationSettingsPut(t *testing.T) {
 	}
 	if f.Role != "spoke" || f.HubURL != "https://hub.example.fi" || f.HubToken != "fed-secret" {
 		t.Errorf("round-trip = %+v", f)
+	}
+
+	// An uppercase scheme passes validation (url.Parse lowercases the scheme
+	// for the check) and is canonicalized to lowercase https on store, so the
+	// spoke dialer's case-sensitive https:// prefix check accepts it (ocr
+	// finding: a stored "HTTPS://…" would otherwise never connect).
+	if err := store.PutFederationSettings(d, store.FederationSettings{
+		Role: "spoke", HubURL: "HTTPS://hub.example.fi", HubToken: "fed-x",
+	}); err != nil {
+		t.Fatalf("uppercase scheme = %v, want accepted", err)
+	}
+	f, err = store.GetFederationSettings(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.HubURL != "https://hub.example.fi" {
+		t.Errorf("uppercase scheme stored as %q, want canonical https://", f.HubURL)
+	}
+
+	// hub_pin: malformed refused, formatted normalized to bare lowercase
+	// hex (the dialer parses the stored value directly).
+	if err := store.PutFederationSettings(d, store.FederationSettings{
+		Role: "spoke", HubURL: "https://hub.example.fi", HubToken: "fed-x", HubPin: "sha256:zz",
+	}); !errors.Is(err, store.ErrFedConfig) {
+		t.Errorf("malformed hub_pin = %v, want ErrFedConfig", err)
+	}
+	if err := store.PutFederationSettings(d, store.FederationSettings{
+		Role: "spoke", HubURL: "https://hub.example.fi", HubToken: "fed-x",
+		HubPin: "SHA256:" + strings.Repeat("AB", 32),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if f, _ = store.GetFederationSettings(d); f.HubPin != strings.Repeat("ab", 32) {
+		t.Errorf("hub_pin = %q, want normalized lowercase hex", f.HubPin)
 	}
 
 	// A failed Put is all-or-nothing (one tx): a rejected write must leave

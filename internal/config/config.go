@@ -3,9 +3,12 @@ package config
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/caarlos0/env/v11"
+
+	"llm-relay/internal/tlscert"
 )
 
 type Config struct {
@@ -29,6 +32,14 @@ type Config struct {
 	PublicRelayURL     string `env:"PUBLIC_RELAY_URL"`
 	PublicDashboardURL string `env:"PUBLIC_DASHBOARD_URL"`
 
+	// TLS listener for machine channels (plan 2026-11-24-remote-tls-v1):
+	// the relay mux is ALSO served over TLS on this port using the
+	// dashboard-generated (or installed) self-signed certificate; peers pin
+	// its fingerprint. "0" disables the listener (e.g. when a reverse
+	// proxy terminates TLS instead). The plain relay port is untouched.
+	TLSListenAddr string `env:"TLS_ADDR"`
+	TLSPort       string `env:"TLS_PORT" envDefault:"8443"`
+
 	// Headless connector mode (plan 2026-11-24-remote-backend-v1): the box
 	// binds nothing and runs one job — dial a relay's /remote/v1/connect
 	// and expose ENGINE_URL through it as a remote backend. When
@@ -36,9 +47,13 @@ type Config struct {
 	// (fail-fast at config.Load); when false (the default) every var in
 	// this block is ignored and behavior is unchanged. A headless box
 	// needs no JWT_SECRET — it never serves the admin surface.
+	// RELAY_PIN (plan 2026-11-24-remote-tls-v1) is the optional
+	// sha256 fingerprint the relay cert must match — required in practice
+	// for self-signed relays, empty for a CA-issued cert (proxy case).
 	Headless    bool   `env:"HEADLESS" envDefault:"false"`
 	RelayURL    string `env:"RELAY_URL"`
 	RelayToken  string `env:"RELAY_TOKEN"`
+	RelayPin    string `env:"RELAY_PIN"`
 	EngineURL   string `env:"ENGINE_URL"`
 	EngineToken string `env:"ENGINE_TOKEN"`
 }
@@ -101,6 +116,22 @@ func Load() (*Config, error) {
 				return nil, fmt.Errorf("config: %s must start with http:// or https:// (got %q)", u.key, u.val)
 			}
 		}
+		// Hard TLS rule (plan 2026-11-24-remote-tls-v1): the connect token
+		// and all tunneled traffic ride this URL — cleartext is never
+		// acceptable, and there is deliberately no opt-out. ENGINE_URL may
+		// stay http: that hop is the box's own LAN/loopback.
+		if !strings.HasPrefix(c.RelayURL, "https://") {
+			return nil, fmt.Errorf("config: RELAY_URL must be https:// — remote connections require TLS (got %q)", c.RelayURL)
+		}
+		// Validate the pin at boot: a typo in a fingerprint on a box with
+		// no dashboard would otherwise surface as an endless
+		// handshake-failure redial loop.
+		c.RelayPin = strings.TrimSpace(c.RelayPin)
+		if c.RelayPin != "" {
+			if _, err := tlscert.ParsePin(c.RelayPin); err != nil {
+				return nil, fmt.Errorf("config: RELAY_PIN: %w", err)
+			}
+		}
 		c.EngineToken = strings.TrimSpace(c.EngineToken)
 	}
 	// A connector binds no listeners at all, so the clash rule is moot
@@ -108,6 +139,22 @@ func Load() (*Config, error) {
 	// addresses would be refusing for an irrelevant reason.
 	if !c.Headless && c.ListenAddr == c.AdminListenAddr {
 		return nil, fmt.Errorf("config: relay and admin listeners must not share an address (%s)", c.ListenAddr)
+	}
+	// TLS listener (server modes only): "0" disables; anything else must
+	// be a real port, checked at boot rather than at first handshake.
+	if !c.Headless {
+		if c.TLSListenAddr == "" {
+			c.TLSListenAddr = ":" + c.TLSPort
+		}
+		if c.TLSPort != "0" {
+			p, err := strconv.Atoi(c.TLSPort)
+			if err != nil || p < 1 || p > 65535 {
+				return nil, fmt.Errorf("config: TLS_PORT must be 0 (off) or a port number (got %q)", c.TLSPort)
+			}
+			if c.TLSListenAddr == c.ListenAddr || c.TLSListenAddr == c.AdminListenAddr {
+				return nil, fmt.Errorf("config: TLS listener must not share an address (%s)", c.TLSListenAddr)
+			}
+		}
 	}
 	return c, nil
 }

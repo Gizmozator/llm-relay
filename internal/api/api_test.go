@@ -20,6 +20,7 @@ import (
 	"llm-relay/internal/fed"
 	"llm-relay/internal/remote"
 	"llm-relay/internal/store"
+	"llm-relay/internal/tlscert"
 )
 
 type testEnv struct {
@@ -90,23 +91,26 @@ func newTestEnv(t *testing.T, upstream http.Handler) *testEnv {
 	mux.Handle("GET /api/admin/federation/stats", s.Admin(s.AdminFedStats))
 	mux.Handle("GET /api/federation/stats", s.Auth(s.FedStats))
 	mux.Handle("GET /api/federation/role", s.Auth(s.FedRole))
-	mux.Handle("GET /federation/v1/ping", s.PeerAuth(s.FederationPing))
+	mux.Handle("GET /federation/v1/ping", s.RequireTLS(s.PeerAuth(s.FederationPing)))
 	// Federation channel: the real Manager (production defaults) behind
 	// the same PeerAuth + role-gate wiring main.go uses.
 	fedMgr := fed.NewManager(d, &fed.Options{Log: log.New(io.Discard, "", 0)})
 	t.Cleanup(fedMgr.Close)
 	s.Fed = fedMgr
-	mux.Handle("GET /federation/v1/connect", s.PeerAuth(s.FederationConnect))
+	mux.Handle("GET /federation/v1/connect", s.RequireTLS(s.PeerAuth(s.FederationConnect)))
 	// Remote backends (plan 2026-11-24-remote-backend-v1): the real registry
 	// behind the same RemoteAuth + route wiring main.go uses. Tests that do
 	// not dial a connector simply see every remote backend offline.
 	remoteReg := remote.NewRegistry(d, nil, "test-relay", "test")
 	t.Cleanup(func() { remoteReg.CloseAll("test teardown") })
 	s.Remote = remoteReg
-	mux.Handle("GET /remote/v1/connect", s.RemoteAuth(s.RemoteConnect))
+	mux.Handle("GET /remote/v1/connect", s.RequireTLS(s.RemoteAuth(s.RemoteConnect)))
 	mux.Handle("POST /api/admin/backends/remote", s.Admin(s.AdminCreateRemoteBackend))
 	mux.Handle("POST /api/admin/backends/{id}/remote/rotate", s.Admin(s.AdminRotateRemoteToken))
-	srv := httptest.NewServer(mux)
+	mux.Handle("GET /api/admin/tls", s.Admin(s.AdminGetTLS))
+	mux.Handle("POST /api/admin/tls", s.Admin(s.AdminGenerateTLS))
+	mux.Handle("DELETE /api/admin/tls", s.Admin(s.AdminDeleteTLS))
+	srv := httptest.NewTLSServer(mux)
 	t.Cleanup(srv.Close)
 	return &testEnv{db: d, srv: srv}
 }
@@ -124,7 +128,7 @@ func (e *testEnv) do(t *testing.T, method, path, body string, token string) *htt
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := e.srv.Client().Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1184,4 +1188,10 @@ func TestModelNameTrimmed(t *testing.T) {
 	if resp.StatusCode != 200 || m.Name != "Padded" {
 		t.Errorf("model rename = %d %q, want 200 \"Padded\"", resp.StatusCode, m.Name)
 	}
+}
+
+// pinOf is the fingerprint an httptest TLS server presents — the value a
+// spoke's hub_pin (or a connector's RELAY_PIN) must carry to trust it.
+func pinOf(e *testEnv) string {
+	return tlscert.Fingerprint(e.srv.Certificate().Raw)
 }

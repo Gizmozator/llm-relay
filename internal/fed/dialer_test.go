@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -38,7 +39,7 @@ func newStubHub(t *testing.T) (*stubHub, *httptest.Server) {
 		kick:         make(chan chan struct{}, 16),
 		remoteClosed: make(chan chan struct{}, 16),
 	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/federation/v1/connect" {
 			http.NotFound(w, r)
 			return
@@ -106,6 +107,32 @@ func recv[T any](t *testing.T, ch <-chan T, what string) T {
 	}
 }
 
+// A wrong hub_pin must never bring the channel up: the TLS handshake fails
+// before the upgrade, so the stub hub sees no hello at all (and the dialer
+// retries rather than falling back to cleartext).
+func TestSpokeDialerWrongPinNeverConnects(t *testing.T) {
+	stub, url := newStubHub(t)
+	d := migratedDB(t)
+	mgr := fed.NewManager(d, &fed.Options{
+		Log:        log.New(io.Discard, "", 0),
+		BackoffMin: 50 * time.Millisecond,
+		BackoffMax: 200 * time.Millisecond,
+	})
+	defer mgr.Close()
+	if err := store.PutFederationSettings(d, store.FederationSettings{
+		Role: store.FedRoleSpoke, HubURL: url.URL, HubToken: "fed-tok",
+		HubPin: "sha256:" + strings.Repeat("cd", 32),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	mgr.Reload()
+	select {
+	case h := <-stub.hellos:
+		t.Fatalf("wrong pin must not reach the hub, got hello %+v", h)
+	case <-time.After(600 * time.Millisecond):
+	}
+}
+
 func TestSpokeDialerLifecycle(t *testing.T) {
 	stub, url := newStubHub(t)
 	d := migratedDB(t)
@@ -118,7 +145,7 @@ func TestSpokeDialerLifecycle(t *testing.T) {
 	defer mgr.Close()
 
 	if err := store.PutFederationSettings(d, store.FederationSettings{
-		Role: store.FedRoleSpoke, HubURL: url.URL, HubToken: "fed-tok",
+		Role: store.FedRoleSpoke, HubURL: url.URL, HubToken: "fed-tok", HubPin: pinOf(url),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +232,7 @@ func TestConcurrentReloadConverges(t *testing.T) {
 					role = store.FedRoleSpoke
 				}
 				if err := store.PutFederationSettings(d, store.FederationSettings{
-					Role: role, HubURL: url.URL, HubToken: "fed-tok"}); err != nil {
+					Role: role, HubURL: url.URL, HubToken: "fed-tok", HubPin: pinOf(url)}); err != nil {
 					return // busy DB under stress: this flipper is done
 				}
 				mgr.Reload()

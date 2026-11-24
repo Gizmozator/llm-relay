@@ -108,10 +108,20 @@ export default function SetupGuidePage() {
               hint="Not configured by the hub admin (PUBLIC_RELAY_URL) — ask the admin for the hub’s base URL."
             />
           )}
+          {info.data?.tls_fingerprint ? (
+            <CopyField
+              label="Hub pin (this hub uses a self-signed cert — paste as hub_pin)"
+              value={info.data.tls_fingerprint}
+              hint="No certificate configured."
+            />
+          ) : null}
         </div>
         <p className="dim">
-          and paste your <code className="mono">fed-…</code> token. Save — the
-          channel comes up within seconds; the page shows its live status.
+          and paste your <code className="mono">fed-…</code> token
+          {info.data?.tls_fingerprint
+            ? ' and the hub pin above'
+            : ''}
+          . Save — the channel comes up within seconds; the page shows its live status.
         </p>
       </section>
 

@@ -31,6 +31,18 @@ type Server struct {
 	// Remote drives remote-backend connections (nil = connect 404s and
 	// remote probes report not wired).
 	Remote RemoteController
+	// TrustProxy lets X-Forwarded-Proto: https satisfy the machine-channel
+	// TLS gate (the TLS-terminating reverse-proxy deployment). Same trust
+	// boundary as the proxy's XFF handling; off by default.
+	TrustProxy bool
+	// SelfTLS is set when the relay binds its own TLS listener (TLS_PORT!=0).
+	// It narrows the TrustProxy branch of the gate: a relay that serves its
+	// own TLS has no proxy terminating TLS in front of the machine channels,
+	// so a cleartext request on the plain port claiming X-Forwarded-Proto is
+	// a forged bypass, not a proxied TLS session — peers must use the wss
+	// listener instead. X-Forwarded-Proto is honoured only when SelfTLS is
+	// false (the proxied deployment, TLS_PORT=0).
+	SelfTLS bool
 
 	loginLimit *loginLimiter
 	limitOnce  sync.Once
@@ -224,11 +236,27 @@ func (s *Server) Info(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{
+	out := map[string]string{
 		"relay_url":     s.RelayURL,
 		"dashboard_url": s.DashboardURL,
 		"currency":      currency,
-	})
+	}
+	// The instance cert fingerprint, when one is configured (plan
+	// 2026-11-24-remote-tls-v1). Public-safe: a fingerprint is a hash of a
+	// public certificate, and the SetupGuide must show it to any user
+	// connecting a spoke to a self-signed hub (they need it as hub_pin).
+	// Absent only when no cert exists (a CA-cert / proxied hub); a real
+	// lookup failure is logged, not silently rendered as "no cert" (which
+	// would tell a spoke admin to skip hub_pin on a transient DB error).
+	switch t, err := store.RemoteTLSGet(s.DB); {
+	case err == nil:
+		out["tls_fingerprint"] = t.Fingerprint
+	case errors.Is(err, store.ErrNotFound):
+		// no certificate configured — omit the key
+	default:
+		log.Printf("api: info TLS fingerprint lookup failed: %v", err)
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // PublicModels serves GET /api/models: the catalog every user may call —

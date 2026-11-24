@@ -346,7 +346,8 @@ func (s *Server) AdminGetFederation(w http.ResponseWriter, r *http.Request, c *a
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	resp := map[string]any{"role": f.Role, "hub_url": f.HubURL, "hub_token": f.HubToken}
+	resp := map[string]any{"role": f.Role, "hub_url": f.HubURL, "hub_token": f.HubToken,
+		"hub_pin": f.HubPin}
 	if f.Role == store.FedRoleSpoke {
 		connected, hubName, hubVersion := false, "", ""
 		if s.Fed != nil {

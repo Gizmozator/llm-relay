@@ -20,16 +20,22 @@ Env reference: README **Remote backends** section + `.env.example`.
 2. **Remote box**: copy `deploy/remote-backend/docker-compose.yml` and
    `deploy/remote-backend/.env.example` (rename the latter to `.env`) onto
    the machine that runs the engine, and fill in `.env`: `RELAY_URL` (the
-   relay's public **relay-port** URL, with scheme), `RELAY_TOKEN` (the
-   `rb-…` token) and `ENGINE_URL` (the local engine root). `ENGINE_TOKEN`
+   relay's public **relay-port** URL, **must be `https://`**), `RELAY_TOKEN`
+   (the `rb-…` token) and `ENGINE_URL` (the local engine root). `ENGINE_TOKEN`
    only if the engine needs a key. No `JWT_SECRET`, no data volume, no
    published ports — the connector dials out only. The compose file uses
    `network_mode: host` so `ENGINE_URL=http://localhost:PORT` reaches the
    engine on the host; drop that line and put the engine on a shared docker
    network instead if you prefer.
 
+   **TLS**: the channel is TLS-only. If the relay uses a **self-signed** cert
+   (generated on its *Settings → TLS* page), also set `RELAY_PIN` to the
+   fingerprint shown there. If the relay sits behind a TLS-terminating proxy
+   with a real CA cert, leave `RELAY_PIN` empty — the cert verifies normally.
+
    Missing/empty `RELAY_URL`, `RELAY_TOKEN` or `ENGINE_URL` = the connector
-   refuses to start (`config: X is required when HEADLESS=true`).
+   refuses to start (`config: X is required when HEADLESS=true`); a
+   non-`https` `RELAY_URL` or a malformed `RELAY_PIN` is refused the same way.
 3. **Start it.** The connector log shows
    `headless: connected to https://relay…; engine http://localhost:…`.
 4. **Back on the relay**: the Backends page shows the row **online** (health
@@ -64,6 +70,12 @@ token in the env and restart the connector. Disable or delete does the same.
   rotate on the Backends page and restart the connector with the new one.
 - **403 at connect** (`backend disabled`): the backend row is disabled;
   enable it on the Backends page.
+- **TLS handshake failure / `bad certificate` in the connector log**: the
+  relay uses a self-signed cert and `RELAY_PIN` is missing or wrong — paste
+  the fingerprint from the relay's *Settings → TLS* page. A `403 "TLS
+  required"` means the relay is not serving TLS where you dial: it needs a
+  cert (Settings → TLS) or, behind a TLS-terminating proxy, `TLS_PORT=0` **and**
+  `TRUST_PROXY_HEADERS=true` so `X-Forwarded-Proto: https` satisfies the gate.
 - **Online but Sync models fails**: the engine is down on the remote box
   (`ENGINE_URL` wrong or the engine not up) — the connector answers the
   probe from the engine, so a dead engine reads as a probe error, not a

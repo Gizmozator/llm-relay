@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -74,7 +75,8 @@ func main() {
 	defer remoteReg.CloseAll("shutdown")
 
 	apiSrv := &api.Server{DB: d, JWTSecret: cfg.JWTSecret, JWTTTL: 12 * time.Hour,
-		RelayURL: cfg.PublicRelayURL, DashboardURL: cfg.PublicDashboardURL}
+		RelayURL: cfg.PublicRelayURL, DashboardURL: cfg.PublicDashboardURL,
+		TrustProxy: cfg.TrustProxyHeaders, SelfTLS: cfg.TLSPort != "0"}
 	apiSrv.Fed = fedMgr
 	apiSrv.Remote = remoteReg
 	ph := proxy.New(d, rec, cfg.TrustProxyHeaders)
@@ -114,12 +116,15 @@ func main() {
 	// URL. connect is the WS channel (task 2): PeerAuth verifies the
 	// token on the upgrade request, the Manager role-gates (404 unless
 	// hub) and runs the handshake. ping stays as the token-path probe.
-	relayMux.Handle("GET /federation/v1/ping", apiSrv.PeerAuth(apiSrv.FederationPing))
-	relayMux.Handle("GET /federation/v1/connect", apiSrv.PeerAuth(apiSrv.FederationConnect))
+	// Both are gated to TLS (plan 2026-11-24-remote-tls-v1): the fed-
+	// token must never cross a network in the clear.
+	relayMux.Handle("GET /federation/v1/ping", apiSrv.RequireTLS(apiSrv.PeerAuth(apiSrv.FederationPing)))
+	relayMux.Handle("GET /federation/v1/connect", apiSrv.RequireTLS(apiSrv.PeerAuth(apiSrv.FederationConnect)))
 	// Remote backends (plan 2026-11-24-remote-backend-v1): the connect
 	// channel a headless box dials in on (rb- token). Not role-gated — a
-	// remote backend is a backend, any relay can host one.
-	relayMux.Handle("GET /remote/v1/connect", apiSrv.RemoteAuth(apiSrv.RemoteConnect))
+	// remote backend is a backend, any relay can host one. TLS-gated for
+	// the same reason as the fed endpoints.
+	relayMux.Handle("GET /remote/v1/connect", apiSrv.RequireTLS(apiSrv.RemoteAuth(apiSrv.RemoteConnect)))
 	relayMux.HandleFunc("POST /mcp", ph.MCP)
 	// Tunneled (federation) requests are served from this same mux; the
 	// fed frame server restricts them to /v1/* paths (see serve.go).
@@ -186,6 +191,12 @@ func main() {
 	adminMux.Handle("GET /api/admin/federation", apiSrv.Admin(apiSrv.AdminGetFederation))
 	adminMux.Handle("PUT /api/admin/federation", apiSrv.Admin(apiSrv.AdminPutFederation))
 	adminMux.Handle("GET /api/admin/federation/stats", apiSrv.Admin(apiSrv.AdminFedStats))
+	// Instance TLS certificate (plan 2026-11-24-remote-tls-v1): generate /
+	// view / delete the self-signed cert the TLS listener serves and peers
+	// pin.
+	adminMux.Handle("GET /api/admin/tls", apiSrv.Admin(apiSrv.AdminGetTLS))
+	adminMux.Handle("POST /api/admin/tls", apiSrv.Admin(apiSrv.AdminGenerateTLS))
+	adminMux.Handle("DELETE /api/admin/tls", apiSrv.Admin(apiSrv.AdminDeleteTLS))
 	adminMux.Handle("GET /api/federation/stats", apiSrv.Auth(apiSrv.FedStats))
 	adminMux.Handle("GET /api/federation/role", apiSrv.Auth(apiSrv.FedRole))
 	adminMux.Handle("GET /api/admin/usage/summary", apiSrv.Admin(apiSrv.UsageSummary))
@@ -214,7 +225,7 @@ func main() {
 	servers := []*http.Server{relaySrv}
 	// Bind failures go to main (log.Fatalf here would skip the deferred
 	// recorder/DB cleanup and leave the other port half-alive).
-	srvErr := make(chan error, 2)
+	srvErr := make(chan error, 3)
 	go func() {
 		log.Printf("relay API listening on %s", cfg.ListenAddr)
 		if err := relaySrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -228,6 +239,45 @@ func main() {
 			srvErr <- fmt.Errorf("admin listen: %w", err)
 		}
 	}()
+
+	// TLS listener for machine channels (plan 2026-11-24-remote-tls-v1):
+	// the same relay mux over TLS with the dashboard-generated cert.
+	// GetCertificate reads the row per handshake — generate, rotate or
+	// delete apply without restart, and a missing row fails handshakes
+	// (deliberately: no silent fallback). TLS_PORT=0 skips the listener
+	// entirely (the reverse-proxy deployment).
+	if cfg.TLSPort != "0" {
+		tlsSrv := &http.Server{
+			Addr:              cfg.TLSListenAddr,
+			Handler:           relayMux,
+			ReadHeaderTimeout: 30 * time.Second,
+			IdleTimeout:       120 * time.Second,
+			TLSConfig: &tls.Config{
+				MinVersion: tls.VersionTLS12,
+				GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+					t, err := store.RemoteTLSGet(d)
+					if errors.Is(err, store.ErrNotFound) {
+						return nil, fmt.Errorf("no TLS certificate configured (generate one on the Settings page)")
+					}
+					if err != nil {
+						return nil, fmt.Errorf("TLS certificate lookup failed: %w", err)
+					}
+					cert, err := tls.X509KeyPair([]byte(t.CertPEM), []byte(t.KeyPEM))
+					if err != nil {
+						return nil, fmt.Errorf("stored TLS certificate unusable: %w", err)
+					}
+					return &cert, nil
+				},
+			},
+		}
+		servers = append(servers, tlsSrv)
+		go func() {
+			log.Printf("relay API (TLS) listening on %s", cfg.TLSListenAddr)
+			if err := tlsSrv.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				srvErr <- fmt.Errorf("tls listen: %w", err)
+			}
+		}()
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -263,6 +313,7 @@ func runHeadless(cfg *config.Config) {
 	_ = remote.RunClient(ctx, remote.ClientConfig{
 		ServerURL:   cfg.RelayURL,
 		Token:       cfg.RelayToken,
+		Pin:         cfg.RelayPin,
 		EngineURL:   cfg.EngineURL,
 		EngineToken: cfg.EngineToken,
 	}, log.Printf)

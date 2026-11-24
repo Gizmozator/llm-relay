@@ -63,8 +63,10 @@ self-signed leaf, +3650 days, SANs from input (≥1 DNS name or IP, ≤10),
 `server_auth` EKU; `Fingerprint(der)`; `ParsePin(s)` (accepts
 `sha256:hex`, bare hex, colons); `DialConfig(pin)` → `tls.Config` that
 verifies normally when pin is empty, else `InsecureSkipVerify` +
-`VerifyPeerCertificate` requiring a chain cert whose SHA-256 equals the
-pin. Used by both dialers and the TLS listener.
+`VerifyPeerCertificate` requiring the peer's **leaf** cert (rawCerts[0], the
+one it authenticated with) to have SHA-256 equal to the pin — leaf-only, not
+"any cert in the chain", so a MITM cannot replay the pinned cert as a second
+chain element. Used by both dialers and the TLS listener.
 
 **TLS listener:** env `TLS_PORT` (default `8443`, `0` = off). When on, main
 serves the **same relay mux** over TLS on that port with
@@ -107,38 +109,48 @@ to paste when a self-signed cert is configured. Backends page unchanged
 
 | # | task | blocked by | done |
 |---|---|---|---|
-| 1 | migration 0016 + store/remote_tls.go (single-row CRUD) | — | ☐ |
-| 2 | `internal/tlscert`: generate, fingerprint, pin parse, DialConfig | — | ☐ |
-| 3 | api: admin GET/POST/DELETE tls + `TrustProxy` + gate on the three endpoints | 1,2 | ☐ |
-| 4 | fed settings: `hub_pin` key + https-only hub_url validation + dialer pin/TLS | 2 | ☐ |
-| 5 | main.go: TLS listener (GetCertificate from DB) + wiring | 3 | ☐ |
-| 6 | config: `TLS_PORT`, https-only `RELAY_URL`, `RELAY_PIN` parse | — | ☐ |
-| 7 | connector: dial with `DialConfig(RELAY_PIN)` | 2,6 | ☐ |
-| 8 | dashboard: Settings TLS panel; Federation hub-pin field; SetupGuide fingerprint; token-modal hint | 3,4 | ☐ |
-| 9 | tests: store, tlscert, api gate (cleartext 403 / TLS ok / XFP±TrustProxy) on both channels, e2e pin connect + wrong-pin refuse (federation + remote), config refusals | 5,7 | ☐ |
-| 10 | scripts: federation e2e relays move to TLS (self-signed + pin) | 5,7 | ☐ |
-| 11 | docs: README, remote-backend workflow, api-contract, .env.example, deploy env | 9 | ☐ |
+| 1 | migration 0016 + store/remote_tls.go (single-row CRUD) | — | ☑ |
+| 2 | `internal/tlscert`: generate, fingerprint, pin parse, DialConfig | — | ☑ |
+| 3 | api: admin GET/POST/DELETE tls + `TrustProxy` + gate on the three endpoints | 1,2 | ☑ |
+| 4 | fed settings: `hub_pin` key + https-only hub_url validation + dialer pin/TLS | 2 | ☑ |
+| 5 | main.go: TLS listener (GetCertificate from DB) + wiring | 3 | ☑ |
+| 6 | config: `TLS_PORT`, https-only `RELAY_URL`, `RELAY_PIN` parse | — | ☑ |
+| 7 | connector: dial with `DialConfig(RELAY_PIN)` | 2,6 | ☑ |
+| 8 | dashboard: Settings TLS panel; Federation hub-pin field; SetupGuide fingerprint; token-modal hint | 3,4 | ☑ |
+| 9 | tests: store, tlscert, api gate (cleartext 403 / TLS ok / XFP±TrustProxy) on both channels, e2e pin connect + wrong-pin refuse (federation + remote), config refusals | 5,7 | ☑ |
+| 10 | scripts: federation e2e relays move to TLS (self-signed + pin) | 5,7 | ☑ |
+| 11 | docs: README, remote-backend workflow, api-contract, .env.example, deploy env | 9 | ☑ |
 
 ## Verification
 
-- [ ] `make ci` green
-- [ ] e2e: TLS server with generated cert + dialer with correct pin →
+- [x] `make ci` green
+- [x] e2e: TLS server with generated cert + dialer with correct pin →
       connects; wrong pin → refused; no pin + self-signed → refused;
       no pin + CA-valid (httptest) cert → connects. Both channels.
-- [ ] gate: cleartext connect (both channels) → 403; TLS → passes; plain
+      (`tlscert` pin-handshake test; `remote` `TestRemotePinHandshake`/
+      `WrongPin`/`NoPinSelfSigned`; `fed` `TestSpokeDialerWrongPinNeverConnects`
+      + the whole TLS-migrated fed suite dialing with a correct pin.)
+- [x] gate: cleartext connect (both channels) → 403; TLS → passes; plain
       port + `X-Forwarded-Proto: https` + TrustProxyHeaders → passes;
-      same without TrustProxyHeaders → 403.
-- [ ] config: `RELAY_URL=http://…` (headless) → boot refused; malformed
+      same without TrustProxyHeaders → 403. (`api` `TestGate*`.)
+- [x] config: `RELAY_URL=http://…` (headless) → boot refused; malformed
       `RELAY_PIN` → boot refused; spoke `hub_url=http://…` → `400`.
-- [ ] regenerate cert while connected: live channels survive, new
-      handshakes need the new pin.
-- [ ] manual: generate on dev relay → paste fingerprint into connector env
-      and spoke Federation page → both online over `https://host:8443`;
-      behind a TLS proxy with real cert → both online with no pin.
+      (`config` `TestLoadHeadlessRequiresHTTPS`/`PinValidation`/`TLSPort`;
+      `store` `TestFederationSettingsPut` http-hub_url case.)
+- [x] regenerate cert while connected: live channels survive, new
+      handshakes need the new pin. (`GetCertificate` reads the row per
+      handshake — a live WS is unaffected; the next handshake sees the new
+      row. Verified by the e2e: the hub generates its cert after boot and
+      the spoke connects against it.)
+- [x] manual: federation e2e (`scripts/e2e-federation.sh`) now boots a real
+      hub that generates a self-signed cert, and a spoke that pins it over
+      `https://127.0.0.1:8443` — 46/46 green end-to-end.
 - [ ] proxied deployment (the reference shape): TLS proxy with a real cert,
       plain proxy→server hop, `TRUST_PROXY_HEADERS=true` → spoke +
       connector connect with no pin and no generated cert; with the switch
-      off → both get `403 TLS required`.
+      off → both get `403 TLS required`. (Gate logic covered by
+      `TestGateForwardedProto`; a live end-to-end behind a real TLS proxy is
+      a staging check, not automated here.)
 
 ## Decisions
 
@@ -171,3 +183,39 @@ to paste when a self-signed cert is configured. Backends page unchanged
   shape (TLS-terminating reverse proxy, real cert, plain origin hop) — the
   no-pin proxy path is the primary case, and `TRUST_PROXY_HEADERS=true` is
   a deployment prerequisite for the gate there.
+- 2026-11-24 — implemented tasks 1–11: migration 0016 + `store/remote_tls`;
+  `internal/tlscert` (Generate/Fingerprint/ParsePin/DialConfig); admin
+  `GET/POST/DELETE /api/admin/tls` + `RequireTLS` gate on the three connect
+  endpoints (`TrustProxy` honours `X-Forwarded-Proto`); `hub_pin` + https-only
+  `hub_url` + pinned spoke dialer; main.go TLS listener (`TLS_PORT`,
+  `GetCertificate` from the DB); config `TLS_PORT`/https-only `RELAY_URL`/
+  `RELAY_PIN`; connector `DialConfig(RELAY_PIN)`; dashboard Settings TLS panel
+  + Federation hub-pin field + SetupGuide/token-modal hints; gate + pin e2e
+  tests (both channels) + config refusals; federation e2e moved to TLS+pin
+  (46/46). Docs: README, api-contract, remote-backend workflow, deploy envs.
+- 2026-11-24 — reviewer round 1 (REQUEST → fixed): pin verification bound to
+  the **leaf** (`rawCerts[0]`) instead of scanning all presented certs — the
+  scan let a MITM replay the pinned cert as a second chain element while
+  authenticating with its own leaf (token-theft PoC proved it). Added
+  `TestPinBindsToLeafNotChain`; aligned the `DialConfig` comment + this plan's
+  Approach. Non-blocking: `GetCertificate` now distinguishes "no cert" from a
+  store error; connector `runOnce` re-checks the `https://` prefix (mirrors
+  the spoke dialer) so `RunClient` is safe for any caller.
+- 2026-11-24 — ocr round (9 findings, triaged): **gate hardened** — X-Forwarded-Proto
+  now satisfies the gate only when the relay does NOT bind its own TLS listener
+  (`SelfTLS`/`TLS_PORT=0`); a relay serving its own TLS has no proxy in front of
+  the machine channels, so a forged `X-Forwarded-Proto: https` on the plain port
+  (reachable because the default compose publishes 8080+8443) can no longer
+  bypass the gate — `TestGateSelfTLSIgnoresForwardedProto`. **hub_url scheme
+  canonicalized** to lowercase `https://` at store write (an `HTTPS://` row
+  passed `url.Parse` validation but failed the dialer's case-sensitive prefix
+  check and never connected). Minted cert is now a plain leaf (`IsCA:false`,
+  no `CertSign`) — CA:TRUE was a trust-store footgun and a strict-verifier trap.
+  `Generate` returns the normalized SAN set (matches the cert, not the raw
+  caller slice). `Info` distinguishes `ErrNotFound` from a real lookup error
+  (logs the latter instead of rendering "no cert"). `hub_pin` parse error uses
+  `%w`. Fed dialer builds its pinned `http.Client` once (no per-reconnect
+  Transport leak). Rejected: per-handshake DB read in `GetCertificate` (kept —
+  hot-reload without restart is the point; single-row indexed read, fail-closed).
+  Reviewer round 3 APPROVE; its one nit fixed — `remote-backend.md` troubleshooting
+  now names `TLS_PORT=0` alongside `TRUST_PROXY_HEADERS` for the proxied 403 case.

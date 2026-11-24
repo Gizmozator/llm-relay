@@ -26,6 +26,7 @@ import (
 
 	"github.com/coder/websocket"
 	"llm-relay/internal/fed"
+	"llm-relay/internal/tlscert"
 )
 
 // ClientConfig is one connector's whole configuration.
@@ -34,8 +35,13 @@ type ClientConfig struct {
 	Token       string // rb- connect token (shown once at backend create)
 	EngineURL   string // local engine root, e.g. http://localhost:8080
 	EngineToken string // optional upstream API key, sent as Authorization: Bearer
-	Name        string // hello identity (default: hostname set by caller)
-	Version     string
+	// Pin is the optional relay certificate fingerprint ("sha256:<hex>"):
+	// required in practice for self-signed relays (plan
+	// 2026-11-24-remote-tls-v1); empty means normal CA verification, which
+	// is the reverse-proxy-with-real-cert case.
+	Pin     string
+	Name    string // hello identity (default: hostname set by caller)
+	Version string
 	// Options tunes the channel (dial timeout, backoff ladder, ping).
 	Options fed.Options
 }
@@ -80,11 +86,28 @@ func RunClient(ctx context.Context, c ClientConfig, logf func(string, ...any)) e
 // runOnce performs one full connect: upgrade, hello/hello_ack, then serve
 // frames until the channel dies.
 func runOnce(ctx context.Context, c ClientConfig, o fed.Options, logf func(string, ...any)) error {
+	// Hard TLS rule (plan 2026-11-24-remote-tls-v1): the connect token and
+	// all tunneled traffic ride this URL — cleartext is never acceptable.
+	// config.Load already refuses a non-https RELAY_URL at boot; this is the
+	// belt-and-braces check so RunClient is safe for any caller, mirroring
+	// the spoke dialer.
+	if !strings.HasPrefix(c.ServerURL, "https://") {
+		return fmt.Errorf("relay URL %q is not https://: remote connections require TLS", c.ServerURL)
+	}
 	url := strings.TrimSuffix(c.ServerURL, "/") + "/remote/v1/connect"
-	dctx, dcancel := context.WithTimeout(ctx, o.DialTimeout)
-	ws, _, err := websocket.Dial(dctx, url, &websocket.DialOptions{
+	tlsCfg, err := tlscert.DialConfig(c.Pin)
+	if err != nil {
+		return fmt.Errorf("relay pin: %w", err)
+	}
+	dialOpts := &websocket.DialOptions{
 		HTTPHeader: http.Header{"Authorization": {"Bearer " + c.Token}},
-	})
+	}
+	if tlsCfg != nil {
+		// coder/websocket takes TLS via the HTTP client's transport.
+		dialOpts.HTTPClient = &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg}}
+	}
+	dctx, dcancel := context.WithTimeout(ctx, o.DialTimeout)
+	ws, _, err := websocket.Dial(dctx, url, dialOpts)
 	dcancel()
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", url, err)

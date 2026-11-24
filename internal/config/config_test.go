@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestLoadValidatesSecret(t *testing.T) {
 	t.Setenv("JWT_SECRET", "short")
@@ -174,5 +177,57 @@ func TestLoadHeadlessIgnoresAddressClash(t *testing.T) {
 	t.Setenv("ADMIN_ADDR", ":8080")
 	if _, err := Load(); err != nil {
 		t.Fatalf("headless with colliding addresses rejected: %v", err)
+	}
+}
+
+// Hard TLS rule (plan 2026-11-24-remote-tls-v1): the connector never dials
+// cleartext — no opt-out exists, so an http:// RELAY_URL must refuse boot
+// (the shape check alone would happily accept it).
+func TestLoadHeadlessRequiresHTTPS(t *testing.T) {
+	headlessEnv(t)
+	t.Setenv("RELAY_URL", "http://relay.example.fi")
+	if _, err := Load(); err == nil {
+		t.Fatal("http:// RELAY_URL must be refused")
+	}
+}
+
+// A fingerprint typo on a dashboard-less box would otherwise loop forever
+// on handshake failures — ParsePin validates at boot.
+func TestLoadHeadlessPinValidation(t *testing.T) {
+	headlessEnv(t)
+	t.Setenv("RELAY_PIN", "sha256:"+strings.Repeat("ab", 32))
+	if _, err := Load(); err != nil {
+		t.Fatalf("valid pin refused: %v", err)
+	}
+	t.Setenv("RELAY_PIN", "sha256:not-hex")
+	if _, err := Load(); err == nil {
+		t.Fatal("malformed RELAY_PIN must be refused")
+	}
+}
+
+// TLS_PORT: 0 (off) or a real port, and never colliding with the other
+// listeners — checked at boot, not at first handshake.
+func TestLoadTLSPort(t *testing.T) {
+	t.Setenv("JWT_SECRET", "0123456789abcdef0123456789abcdef")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.TLSPort != "8443" || c.TLSListenAddr != ":8443" {
+		t.Fatalf("default TLS = %s / %s, want 8443", c.TLSPort, c.TLSListenAddr)
+	}
+	t.Setenv("TLS_PORT", "0")
+	if c, err := Load(); err != nil || c.TLSPort != "0" {
+		t.Fatalf("TLS_PORT=0: (%v, %v)", c, err)
+	}
+	for _, bad := range []string{"abc", "-1", "70000"} {
+		t.Setenv("TLS_PORT", bad)
+		if _, err := Load(); err == nil {
+			t.Fatalf("TLS_PORT=%q must be refused", bad)
+		}
+	}
+	t.Setenv("TLS_PORT", "8080")
+	if _, err := Load(); err == nil {
+		t.Fatal("TLS port colliding with the relay port must be refused")
 	}
 }

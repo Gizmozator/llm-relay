@@ -185,7 +185,43 @@ not billing.
 channel, never `/v1/*` (and API keys never the channel); they are hashed,
 shown once, rotatable, and disabling a peer drops its live channel at once.
 Spoke-local usernames never leave the spoke — the hub stamps its own identity
-onto forwarded traffic and is the attribution authority for the ledger.
+onto forwarded traffic and is the attribution authority for the ledger. The
+channel is **TLS-only**: a spoke's hub URL must be `https://`, and against a
+self-signed hub it pins the hub's certificate fingerprint (the **Hub pin**
+field, from the hub's Settings → TLS page) so an on-path attacker cannot
+steal the token. See **TLS for machine channels**.
+
+## TLS for machine channels
+
+Both machine-to-machine channels — spoke→hub federation connect and
+connector→relay remote-backend connect — run over **TLS only**. There is no
+cleartext opt-out: the connect endpoints answer `403 TLS required` to any
+request that did not arrive over TLS. Two deployment shapes are supported:
+
+- **Self-signed (the relay holds its own cert).** On the admin **Settings**
+  page, the **TLS certificate** panel mints an ECDSA self-signed cert for the
+  host names peers dial, and shows its **fingerprint** (`sha256:…`). The relay
+  serves the relay mux over TLS on `TLS_PORT` (default `8443`) with that cert.
+  Each peer pins the fingerprint: a spoke pastes it into the Federation page's
+  **Hub pin** field; a connector sets `RELAY_PIN` in its `.env`. Regenerating
+  replaces the key pair (every peer must re-pin); deleting stops all handshakes
+  until a new cert exists.
+- **TLS-terminating reverse proxy (the reference shape).** The proxy holds a
+  real CA cert and forwards to the relay over plain HTTP. Then set
+  `TLS_PORT=0` (no TLS listener) and **`TRUST_PROXY_HEADERS=true`** — with
+  `TLS_PORT=0`, `X-Forwarded-Proto: https` from the proxy satisfies the gate.
+  Peers dial the proxy's `https://` URL and verify normally against the system
+  CA store: no pin, no generated cert. **Without `TRUST_PROXY_HEADERS` a
+  proxied relay refuses its own spokes and connectors with 403** — set it.
+  (`X-Forwarded-Proto` is honoured *only* with `TLS_PORT=0`: a relay that binds
+  its own TLS listener has no proxy in front of the machine channels, so a
+  forged header on the plain port must not bypass the gate — peers there dial
+  the `wss` listener instead.)
+
+The plain relay port (`PORT`) is untouched and keeps serving `/v1/*` over
+whatever it always did; only the two connect endpoints are gated. The cert
+lives in the database (single row), its private key plaintext-at-rest like every
+other secret there — the file's permissions are the boundary.
 
 ## Remote backends
 
@@ -207,8 +243,9 @@ on its own.
 | var | default | meaning |
 |---|---|---|
 | `HEADLESS` | `false` | connector mode: binds nothing, owns no state; when true the three vars below are **required** (missing = boot error) |
-| `RELAY_URL` | — **required** | the relay to dial in to (server root) |
+| `RELAY_URL` | — **required** | the relay to dial in to (server root); **must be `https://`** — remote connections require TLS |
 | `RELAY_TOKEN` | — **required** | the `rb-…` connect token minted on the Backends page |
+| `RELAY_PIN` | — | the relay cert fingerprint (`sha256:…`) to pin when the relay uses a self-signed cert; empty verifies against the system CA store (a TLS-terminating proxy with a real cert) |
 | `ENGINE_URL` | — **required** | the local OpenAI-compatible engine to expose |
 | `ENGINE_TOKEN` | — | bearer token for the engine (optional) |
 
@@ -285,7 +322,8 @@ Environment (or `.env`, see `.env.example`):
 | `DB_PATH` | `/data/llm-relay.db` | SQLite file (parent dir auto-created) |
 | `JWT_SECRET` | — **required** | dashboard JWT signing key (≥32 chars, HS256 floor; `openssl rand -hex 32`); **not needed when `HEADLESS=true`** — a connector has no dashboard to sign into |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | — | bootstrap admin, first run on empty DB only |
-| `TRUST_PROXY_HEADERS` | `false` | trust `X-Forwarded-For` on the relay port (set behind a reverse proxy); the login rate limiter always keys on the peer address |
+| `TRUST_PROXY_HEADERS` | `false` | trust `X-Forwarded-For` on the relay port (set behind a reverse proxy); the login rate limiter always keys on the peer address. **Also required for a TLS-terminating proxy**: with it on **and `TLS_PORT=0`**, `X-Forwarded-Proto: https` satisfies the machine-channel TLS gate (see **TLS for machine channels**) |
+| `TLS_PORT` / `TLS_ADDR` | `8443` | TLS listener for the machine channels (federation + remote-backend connect), serving the same relay mux with the dashboard-generated cert. `0` disables it (the TLS-terminating-proxy deployment, where the proxy holds the real cert) |
 | `PUBLIC_RELAY_URL` / `PUBLIC_DASHBOARD_URL` | — | URLs shown in the dashboard copy buttons and interpolated into the agent guide; **include the scheme**, and a hostname or a plain IP:port both work (LAN hosting: `http://192.0.2.10:8080`); relay is the **root** (no `/v1` — the dashboard appends `/v1` for the OpenAI base) |
 | `HEADLESS` (+ `RELAY_URL`/`RELAY_TOKEN`/`ENGINE_URL`/`ENGINE_TOKEN`) | `false` | remote-backend connector: dial in to a relay and expose a local engine — see **Remote backends** |
 | `TZ` | `Europe/Helsinki` | timezone |
@@ -322,7 +360,9 @@ llm-relay
 ├── internal/pricing       cost snapshots (integer micro-units)
 ├── internal/usage         buffered usage recorder
 ├── internal/proxy         dialect forwarder, SSE scanning, backend discovery
+├── internal/fed           federation: hub/spoke channel, dialer, peer registry
 ├── internal/remote        remote backends: server registry + headless connector
+├── internal/tlscert       self-signed cert mint + SHA-256 pin dialing (machine channels)
 ├── internal/api           dashboard JSON API (user + admin)
 ├── web/                   Vite + React + Chart.js dashboard (embedded via go:embed)
 ├── scripts/               manual tools: federation e2e (two relays + mock engines)
