@@ -4,8 +4,8 @@ A **headless spoke** is for "I have one local model on one machine and want
 to add it to a federation": pure env config, no dashboard interaction,
 exactly one model (`MODEL_NAME`), restart to change anything. The **full
 relay server** is everything beyond that: several models/machines, pricing
-per model, users/keys, the dashboard. The headless box is still a full relay
-internally — it just never needs the dashboard.
+per model, users/keys, the dashboard. A headless box does not expose the
+dashboard at all — the admin listener is never bound, only the relay port.
 
 Design + decisions: `docs/plans/2026-11-24-headless-spoke-v1.md`.
 Env reference: README **Headless spoke** section + `.env.example`.
@@ -18,7 +18,7 @@ Env reference: README **Headless spoke** section + `.env.example`.
 2. **Spoke side**: set the env (see `.env.example`):
 
    ```
-   JWT_SECRET=…            # still required (the dashboard exists, unused)
+   JWT_SECRET=…            # still required by config (≥32 chars)
    HEADLESS=true
    BACKEND_URL=http://engine.example.fi:8080
    MODEL_NAME=qwen3-coder
@@ -65,8 +65,9 @@ Env reference: README **Headless spoke** section + `.env.example`.
   — check the id (it must match the upstream id exactly) or restart after a
   hot-swap. Requests for a model the backend does not have fail at request
   time until the env is corrected.
-- **Boot refused with `model name … already belongs to another backend`**:
-  a catalog row on a different backend owns that name. Rename that row in
-  the dashboard or change `MODEL_NAME`.
+- **Boot refused with `model name … already belongs to another backend`**: a
+  catalog row on a different backend owns that name — only possible if this
+  box ran as a full server first (a headless box has just the one backend).
+  Change `MODEL_NAME`, or start from a fresh data volume.
 - **Prices look wrong on the hub**: they are the spoke's — fix `PRICE_*` on
   the spoke and restart; the hub mirrors the next catalog push.

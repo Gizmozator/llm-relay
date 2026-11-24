@@ -6,9 +6,10 @@
 // federation settings block. The env is the source of truth — a restart
 // re-applies it; changing anything means editing the env and restarting.
 //
-// A headless box is still a full relay: the dashboard stays served and
-// usable, the dialer and catalog push are the ordinary federation code.
-// Nothing here duplicates their logic.
+// A headless box has no operator to log in, so the dashboard + admin API
+// listener is never bound (see cmd/llm-relay/main.go); the relay port still
+// serves /v1/* and the federation tunnel, and the dialer and catalog push are
+// the ordinary federation code. Nothing here duplicates their logic.
 package headless
 
 import (

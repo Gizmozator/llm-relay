@@ -199,7 +199,7 @@ func main() {
 		ReadHeaderTimeout: 30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
-	servers := []*http.Server{relaySrv, adminSrv}
+	servers := []*http.Server{relaySrv}
 	// Bind failures go to main (log.Fatalf here would skip the deferred
 	// recorder/DB cleanup and leave the other port half-alive).
 	srvErr := make(chan error, 2)
@@ -209,12 +209,22 @@ func main() {
 			srvErr <- fmt.Errorf("relay listen: %w", err)
 		}
 	}()
-	go func() {
-		log.Printf("dashboard + admin API listening on %s", cfg.AdminListenAddr)
-		if err := adminSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			srvErr <- fmt.Errorf("admin listen: %w", err)
-		}
-	}()
+	// A headless box has no operator to log in: the dashboard + admin API
+	// listener stays closed entirely (plan 2026-11-24-headless-spoke). The
+	// relay port still serves /v1/* and the federation tunnel, and the spoke
+	// dialer runs in the manager goroutines, so joining the federation needs
+	// none of the admin surface.
+	if cfg.Headless {
+		log.Printf("headless: dashboard + admin API disabled (%s not bound)", cfg.AdminListenAddr)
+	} else {
+		servers = append(servers, adminSrv)
+		go func() {
+			log.Printf("dashboard + admin API listening on %s", cfg.AdminListenAddr)
+			if err := adminSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				srvErr <- fmt.Errorf("admin listen: %w", err)
+			}
+		}()
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

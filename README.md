@@ -199,9 +199,10 @@ options, run the full server and use the dashboard.
 With `HEADLESS=true` the relay boots fully configured by env: it creates (or
 re-applies) one backend, one shared model and the spoke federation settings,
 then the ordinary federation machinery dials the hub and shares the model.
-The dashboard stays served and usable — it is simply not needed. Every boot
-re-applies the env over the stored rows, so changing anything means editing
-the env and restarting.
+The dashboard + admin API listener stays **closed** — there is no operator to
+log in, so the admin port is never bound (the relay port still serves `/v1/*`
+and the federation tunnel). Every boot re-applies the env over the stored
+rows, so changing anything means editing the env and restarting.
 
 | var | default | meaning |
 |---|---|---|

@@ -14,7 +14,8 @@ config, no dashboard interaction, exactly one model (`MODEL_NAME`), restart
 to change anything. Everything beyond that — several models or machines,
 per-model pricing, users/keys, the dashboard — is the **full relay server**.
 The headless box joins the federation and shares its one model with the hub;
-the dashboard stays served and usable, it is simply not needed.
+the dashboard + admin API listener is never bound (no operator to log in),
+while the relay port still serves `/v1/*` and the federation tunnel.
 
 ## Non-goals
 
@@ -113,3 +114,11 @@ None open. (Hub-side price overrides: out of scope, Decision 2.)
 - 2026-11-24 — plan created; implemented same day, including the owner's
   mid-flight amendment to the single-model design (discovery + periodic sync
   removed from scope before any of it was written).
+- 2026-11-24 — owner follow-ups folded in before merge: (1) with
+  `HEADLESS=true` the dashboard + admin API listener is **not bound** at all
+  (no operator to log in); the relay port still serves `/v1/*` and the
+  federation tunnel, and the spoke dialer runs in the manager goroutines, so
+  federation is unaffected. (2) config guards: negative `PRICE_*` refused
+  (the admin API already refuses them; headless writes the row directly), and
+  the four required vars are trimmed in place so a padded value cannot
+  surface later as a probe/dial failure.
