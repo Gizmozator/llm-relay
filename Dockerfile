@@ -11,6 +11,10 @@ WORKDIR /web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY web/ ./
+# The connect-your-server page imports these spoke templates with Vite ?raw
+# (web/src/pages/SetupGuide.tsx reaches ../../../deploy/...), so they must be
+# present at that path for the build to resolve them — web/ alone is not enough.
+COPY deploy/headless-spoke/ /deploy/headless-spoke/
 RUN npm run build
 
 # ---------- go binary ----------
