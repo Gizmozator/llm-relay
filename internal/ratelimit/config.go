@@ -31,6 +31,14 @@ type Config struct {
 	// before proxy work. 50 req/s sustained per API key: honest clients
 	// on one key are limited by generation latency, not by this.
 	V1Key Rate
+	// RemoteChannel is tier 5: per-remote-backend bucket on client
+	// requests forwarded over a remote backend's live channel (ticket #17
+	// edge proxy). Keyed on the backend id, NOT the socket IP: every
+	// client behind one box shares the connector's source address, so a
+	// per-IP bucket cannot tell users on the box apart and one abuser
+	// would poison the bucket for everyone on it. Sized like tier 3a —
+	// one box behaves like one client IP.
+	RemoteChannel Rate
 	// Admin is tier 4: per-user bucket on the authenticated dashboard API.
 	// Deliberately generous — dashboard polling is chatty but human: even
 	// a page load firing a dozen parallel fetches every few seconds uses
@@ -51,11 +59,12 @@ type Config struct {
 // DefaultConfig returns the production defaults (see field comments).
 func DefaultConfig() Config {
 	return Config{
-		Login:   Rate{Rate: 0.2, Burst: 10},
-		Connect: Rate{Rate: 0.2, Burst: 10},
-		V1IP:    Rate{Rate: 100, Burst: 200},
-		V1Key:   Rate{Rate: 50, Burst: 100},
-		Admin:   Rate{Rate: 100, Burst: 200},
+		Login:         Rate{Rate: 0.2, Burst: 10},
+		Connect:       Rate{Rate: 0.2, Burst: 10},
+		V1IP:          Rate{Rate: 100, Burst: 200},
+		V1Key:         Rate{Rate: 50, Burst: 100},
+		RemoteChannel: Rate{Rate: 100, Burst: 200},
+		Admin:         Rate{Rate: 100, Burst: 200},
 		Lockout: Lockout{
 			Threshold:  5,
 			Base:       30 * time.Second,

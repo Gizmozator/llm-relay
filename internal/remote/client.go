@@ -42,6 +42,11 @@ type ClientConfig struct {
 	Pin     string
 	Name    string // hello identity (default: hostname set by caller)
 	Version string
+	// Edge, when non-nil, is the opt-in local proxy listener (PROXY_LISTEN,
+	// ticket #17): runOnce publishes each live channel to it and unpublishes
+	// it on death, so LAN clients can reach the relay through this box.
+	// nil (the default) keeps the connector binding nothing.
+	Edge *Edge
 	// Options tunes the channel (dial timeout, backoff ladder, ping).
 	Options fed.Options
 }
@@ -121,6 +126,14 @@ func runOnce(ctx context.Context, c ClientConfig, o fed.Options, logf func(strin
 		return err
 	}
 	conn := fed.NewConn(ws, o)
+	// The edge listener (if configured) rides this channel: publish it now
+	// that the handshake proved the relay, unpublish when it dies. The
+	// detach CAS in Edge.detach keeps a replaced channel safe (see the
+	// registry's unregister for the same rule).
+	if c.Edge != nil {
+		c.Edge.attach(conn)
+		defer c.Edge.detach(conn)
+	}
 	srv := &engineServer{
 		cfg:  c,
 		conn: conn,

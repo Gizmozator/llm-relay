@@ -175,6 +175,13 @@ func main() {
 	// Tunneled (federation) requests are served from this same mux; the
 	// fed frame server restricts them to /v1/* paths (see serve.go).
 	fedMgr.AttachServe(relayMux)
+	// Remote-backend edge proxy (ticket #17): client requests forwarded
+	// over a backend's channel run through this same mux — the client's
+	// sk- key is authenticated here like any other request, and usage
+	// lands on the real key/user. Tier 5 (the per-channel bucket) keys on
+	// the remote-backend id, never the socket IP: one box shares one
+	// source for all its users.
+	remoteReg.AttachServe(relayMux, ratelimit.NewStore(lim.RemoteChannel, ratelimit.StoreMax))
 	// Start federation only now that the tunnel's target mux is complete:
 	// the stored role comes alive (spoke dialer starts, hub purges stale
 	// materialized rows) with every route in place. A failed reconcile
@@ -379,17 +386,36 @@ func main() {
 }
 
 // runHeadless is the whole headless box: dial the relay, expose the engine,
-// redial forever. It returns only when SIGINT/SIGTERM arrives.
+// redial forever. It returns only when SIGINT/SIGTERM arrives. With
+// PROXY_LISTEN set it ALSO binds the opt-in edge listener (ticket #17):
+// a /v1 gateway for the box's LAN whose traffic rides the channel. Empty
+// (the default) keeps the "connector binds nothing" invariant.
 func runHeadless(cfg *config.Config) {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	log.Printf("headless: %s → %s (engine %s)", cfg.RelayURL, "/remote/v1/connect", cfg.EngineURL)
+	var edge *remote.Edge
+	if cfg.ProxyListen != "" {
+		var err error
+		edge, err = remote.NewEdge(cfg.ProxyListen, log.Printf)
+		if err != nil {
+			log.Fatalf("startup: %v", err)
+		}
+		go func() {
+			// A bind failure is fatal on purpose: an operator who asked
+			// for the edge expects it up, not silently absent.
+			if err := edge.Serve(ctx); err != nil {
+				log.Fatalf("edge: %v", err)
+			}
+		}()
+	}
 	_ = remote.RunClient(ctx, remote.ClientConfig{
 		ServerURL:   cfg.RelayURL,
 		Token:       cfg.RelayToken,
 		Pin:         cfg.RelayPin,
 		EngineURL:   cfg.EngineURL,
 		EngineToken: cfg.EngineToken,
+		Edge:        edge,
 	}, log.Printf)
 	log.Println("bye")
 }

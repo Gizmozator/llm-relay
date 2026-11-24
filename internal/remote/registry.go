@@ -30,6 +30,7 @@ import (
 
 	"github.com/coder/websocket"
 	"llm-relay/internal/fed"
+	"llm-relay/internal/ratelimit"
 	"llm-relay/internal/store"
 )
 
@@ -60,6 +61,20 @@ type Registry struct {
 	db   *sql.DB
 	opts fed.Options
 
+	// Edge serving (ticket #17): the relay's own proxy mux that client
+	// requests forwarded over a backend's channel run through, and the
+	// tier-5 per-channel limiter keyed on the backend id. Both are nil
+	// until AttachServe — a channel that arrives before the wiring is
+	// told so explicitly, never silently dropped.
+	serveMu    sync.Mutex
+	serve      http.Handler
+	channelLim *ratelimit.Store
+
+	// edgeServed maps an in-flight forwarded request id to its cancel,
+	// so Cancel frames from the connector can abort the served work.
+	edgeMu     sync.Mutex
+	edgeServed map[string]context.CancelFunc
+
 	mu      sync.Mutex
 	entries map[int64]*entry
 }
@@ -86,7 +101,7 @@ func NewRegistry(db *sql.DB, opts *Options, name, version string) *Registry {
 	if o.Version == "" {
 		o.Version = "dev"
 	}
-	return &Registry{db: db, opts: o, entries: map[int64]*entry{}}
+	return &Registry{db: db, opts: o, entries: map[int64]*entry{}, edgeServed: map[string]context.CancelFunc{}}
 }
 
 // Online reports whether the backend currently holds a live channel.
@@ -180,6 +195,17 @@ func (r *Registry) ServeConn(w http.ResponseWriter, req *http.Request, b *store.
 		}
 	}
 	conn = fed.NewConn(ws, opts)
+	// Edge proxy serving (ticket #17): Req frames arriving on this
+	// channel are client traffic forwarded by the box's local listener,
+	// and Cancel frames abort them. Registered unconditionally — before
+	// AttachServe the handler answers an explicit "not wired" error,
+	// and a channel that connected before the wiring still gains the
+	// handlers. remoteAddr is the connector box's socket address: the
+	// honest peer metering sees when the relay does not trust forwarded
+	// headers (the edge listener appends the LAN client to XFF).
+	remoteAddr := req.RemoteAddr
+	conn.On(fed.TReq, func(c *fed.Conn, f fed.Frame) { r.onEdgeReq(c, b.ID, b.Name, remoteAddr, f) })
+	conn.On(fed.TCancel, func(c *fed.Conn, f fed.Frame) { r.onEdgeCancel(f) })
 	e := &entry{conn: conn, backendID: b.ID, name: b.Name, version: ver, connectedAt: time.Now()}
 	r.register(e)
 	log.Printf("remote: backend %q (#%d) connected (client %s)", b.Name, b.ID, orUnknown(ver))
@@ -300,6 +326,16 @@ func (r *Registry) RoundTrip(req *http.Request) (*http.Response, error) {
 	backendID, err := parseRemoteHost(req.URL)
 	if err != nil {
 		return nil, err
+	}
+	// Loop guard (ticket #17): a request that arrived over backend X's
+	// channel must never be routed back to X. The edge frame handler
+	// stamps the origin channel on the internal request's context (the
+	// fed path's fedMemberFilter pattern, applied at the transport seam:
+	// receiver-derived, never sender-supplied). A dial-class error here
+	// makes the group walk fail over to the next member exactly like a
+	// refused socket; a single-model request surfaces as a 502.
+	if origin := edgeOriginFrom(req.Context()); origin != 0 && origin == backendID {
+		return nil, fmt.Errorf("remote: loop guard: request arrived over backend %d", backendID)
 	}
 	conn := r.connFor(backendID)
 	if conn == nil {

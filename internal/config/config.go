@@ -58,6 +58,13 @@ type Config struct {
 	RelayPin    string `env:"RELAY_PIN"`
 	EngineURL   string `env:"ENGINE_URL"`
 	EngineToken string `env:"ENGINE_TOKEN"`
+	// ProxyListen (ticket #17) opts the connector into a local edge proxy:
+	// a /v1/* listener that forwards client traffic over the channel to
+	// the relay (the relay authenticates each request's sk- key itself).
+	// Empty (the default) keeps the connector's "binds nothing" invariant.
+	// A bare port or ":port" binds 127.0.0.1; only an explicit host binds
+	// elsewhere — see remote.NewEdge and the README warning.
+	ProxyListen string `env:"PROXY_LISTEN"`
 
 	// Abuse/DDoS protection tiers (ticket #18): one rate/burst pair per
 	// tier plus the login lockout and the global in-flight cap. Every
@@ -66,19 +73,21 @@ type Config struct {
 	// (the dev/LAN escape). The envDefault strings below must match
 	// ratelimit.DefaultConfig — TestRateLimitDefaultsMatchesPackage
 	// guards the pairing so the two lists cannot drift.
-	RateLoginRate    float64 `env:"RATELIMIT_LOGIN_RATE" envDefault:"0.2"`
-	RateLoginBurst   float64 `env:"RATELIMIT_LOGIN_BURST" envDefault:"10"`
-	RateConnectRate  float64 `env:"RATELIMIT_CONNECT_RATE" envDefault:"0.2"`
-	RateConnectBurst float64 `env:"RATELIMIT_CONNECT_BURST" envDefault:"10"`
-	RateV1IPRate     float64 `env:"RATELIMIT_V1_IP_RATE" envDefault:"100"`
-	RateV1IPBurst    float64 `env:"RATELIMIT_V1_IP_BURST" envDefault:"200"`
-	RateV1KeyRate    float64 `env:"RATELIMIT_V1_KEY_RATE" envDefault:"50"`
-	RateV1KeyBurst   float64 `env:"RATELIMIT_V1_KEY_BURST" envDefault:"100"`
-	RateAdminRate    float64 `env:"RATELIMIT_ADMIN_RATE" envDefault:"100"`
-	RateAdminBurst   float64 `env:"RATELIMIT_ADMIN_BURST" envDefault:"200"`
-	RateLockAfter    int     `env:"RATELIMIT_LOGIN_LOCK_AFTER" envDefault:"5"`
-	RateLockSeconds  int     `env:"RATELIMIT_LOGIN_LOCK_SECONDS" envDefault:"30"`
-	RateGlobalMax    int64   `env:"RATELIMIT_GLOBAL_MAX_INFLIGHT" envDefault:"1024"`
+	RateLoginRate       float64 `env:"RATELIMIT_LOGIN_RATE" envDefault:"0.2"`
+	RateLoginBurst      float64 `env:"RATELIMIT_LOGIN_BURST" envDefault:"10"`
+	RateConnectRate     float64 `env:"RATELIMIT_CONNECT_RATE" envDefault:"0.2"`
+	RateConnectBurst    float64 `env:"RATELIMIT_CONNECT_BURST" envDefault:"10"`
+	RateV1IPRate        float64 `env:"RATELIMIT_V1_IP_RATE" envDefault:"100"`
+	RateV1IPBurst       float64 `env:"RATELIMIT_V1_IP_BURST" envDefault:"200"`
+	RateV1KeyRate       float64 `env:"RATELIMIT_V1_KEY_RATE" envDefault:"50"`
+	RateV1KeyBurst      float64 `env:"RATELIMIT_V1_KEY_BURST" envDefault:"100"`
+	RateRemoteChanRate  float64 `env:"RATELIMIT_REMOTE_CHANNEL_RATE" envDefault:"100"`
+	RateRemoteChanBurst float64 `env:"RATELIMIT_REMOTE_CHANNEL_BURST" envDefault:"200"`
+	RateAdminRate       float64 `env:"RATELIMIT_ADMIN_RATE" envDefault:"100"`
+	RateAdminBurst      float64 `env:"RATELIMIT_ADMIN_BURST" envDefault:"200"`
+	RateLockAfter       int     `env:"RATELIMIT_LOGIN_LOCK_AFTER" envDefault:"5"`
+	RateLockSeconds     int     `env:"RATELIMIT_LOGIN_LOCK_SECONDS" envDefault:"30"`
+	RateGlobalMax       int64   `env:"RATELIMIT_GLOBAL_MAX_INFLIGHT" envDefault:"1024"`
 }
 
 // RateLimits assembles the resolved tier configuration from the environment.
@@ -88,11 +97,12 @@ type Config struct {
 func (c *Config) RateLimits() ratelimit.Config {
 	d := ratelimit.DefaultConfig()
 	return ratelimit.Config{
-		Login:   ratelimit.Rate{Rate: c.RateLoginRate, Burst: c.RateLoginBurst},
-		Connect: ratelimit.Rate{Rate: c.RateConnectRate, Burst: c.RateConnectBurst},
-		V1IP:    ratelimit.Rate{Rate: c.RateV1IPRate, Burst: c.RateV1IPBurst},
-		V1Key:   ratelimit.Rate{Rate: c.RateV1KeyRate, Burst: c.RateV1KeyBurst},
-		Admin:   ratelimit.Rate{Rate: c.RateAdminRate, Burst: c.RateAdminBurst},
+		Login:         ratelimit.Rate{Rate: c.RateLoginRate, Burst: c.RateLoginBurst},
+		Connect:       ratelimit.Rate{Rate: c.RateConnectRate, Burst: c.RateConnectBurst},
+		V1IP:          ratelimit.Rate{Rate: c.RateV1IPRate, Burst: c.RateV1IPBurst},
+		V1Key:         ratelimit.Rate{Rate: c.RateV1KeyRate, Burst: c.RateV1KeyBurst},
+		RemoteChannel: ratelimit.Rate{Rate: c.RateRemoteChanRate, Burst: c.RateRemoteChanBurst},
+		Admin:         ratelimit.Rate{Rate: c.RateAdminRate, Burst: c.RateAdminBurst},
 		Lockout: ratelimit.Lockout{
 			Threshold: c.RateLockAfter,
 			Base:      time.Duration(c.RateLockSeconds) * time.Second,
@@ -181,6 +191,10 @@ func Load() (*Config, error) {
 			}
 		}
 		c.EngineToken = strings.TrimSpace(c.EngineToken)
+		// The edge listener address is optional; trimmed so a padded value
+		// does not fail NewEdge's host:port parse with a confusing message
+		// at boot on a box nobody can open a dashboard on.
+		c.ProxyListen = strings.TrimSpace(c.ProxyListen)
 	}
 	// A connector binds no listeners at all, so the clash rule is moot
 	// there — refusing boot over a stale server env file's identical
