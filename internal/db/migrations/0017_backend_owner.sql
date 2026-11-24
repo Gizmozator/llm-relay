@@ -1,0 +1,19 @@
+-- 0017: backend owner user (ticket #12) — the account credited when a hub
+-- backend's own hardware serves federated traffic.
+--
+-- The fairness ledger credits a spoke's served capacity to the peer's owner
+-- user (peers.owner_user_id, 0011): every cross-peer flow writes a served row
+-- naming the hosting peer, and that peer maps to one hub user. The hub's own
+-- hardware had no such owner — a hub-hardware serve leaves fed_peer_id NULL
+-- with no served credit — so hub capacity never appeared in the per-user
+-- fairness table. This adds an OPTIONAL owner to a backend; usage that backend
+-- serves is then credited to that user, mirroring the peer-owner crediting.
+--
+-- Nullable + plain ADD COLUMN: every existing backend keeps NULL (no owner)
+-- and behaves exactly as before (hub-hardware usage stays uncredited). The FK
+-- mirrors peers.owner_user_id's style (REFERENCES users(id), no cascade — a
+-- user who owns a backend cannot be deleted out from under it, same contract
+-- as peers). SQLite permits ADD COLUMN with a REFERENCES clause only when the
+-- column default is NULL, which this is, so it applies cleanly to an existing
+-- database and to a fresh one alike.
+ALTER TABLE backends ADD COLUMN owner_user_id INTEGER REFERENCES users(id);

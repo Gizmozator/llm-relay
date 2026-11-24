@@ -310,10 +310,14 @@ type Backend struct {
 	ServerVersion  *string `json:"server_version"`
 	CreatedAt      string  `json:"created_at"`
 	ModelCount     int     `json:"model_count"`
-	APIKey         string  `json:"-"`
+	// OwnerUserID is the fairness-credit owner (ticket #12): the user credited
+	// in the federation ledger when this backend's own hardware serves. nil =
+	// no owner (hub-hardware usage stays uncredited, the pre-#12 behaviour).
+	OwnerUserID *int64 `json:"owner_user_id"`
+	APIKey      string `json:"-"`
 }
 
-const backendCols = `id, name, base_url, COALESCE(api_key,''), enabled, draining, last_probe_at, last_probe_error, server_version, created_at`
+const backendCols = `id, name, base_url, COALESCE(api_key,''), enabled, draining, last_probe_at, last_probe_error, server_version, created_at, owner_user_id`
 
 func scanBackend(row interface{ Scan(...any) error }) (*Backend, error) {
 	b := &Backend{}
@@ -335,7 +339,7 @@ func backendScanTargets(b *Backend) (targets []any, finalize func()) {
 	var en, dr int
 	targets = []any{
 		&b.ID, &b.Name, &b.BaseURL, &key, &en, &dr, &b.LastProbeAt, &b.LastProbeError,
-		&b.ServerVersion, &b.CreatedAt,
+		&b.ServerVersion, &b.CreatedAt, &b.OwnerUserID,
 	}
 	finalize = func() {
 		b.HasKey = key != ""
@@ -347,8 +351,25 @@ func backendScanTargets(b *Backend) (targets []any, finalize func()) {
 }
 
 func CreateBackend(db *sql.DB, name, baseURL, apiKey string) (*Backend, error) {
-	res, err := db.Exec(`INSERT INTO backends(name, base_url, api_key, created_at) VALUES(?,?,?,?)`,
-		name, strings.TrimRight(baseURL, "/"), nullable(apiKey), now())
+	return CreateBackendWithOwner(db, name, baseURL, apiKey, nil)
+}
+
+// CreateBackendWithOwner inserts a backend and, when owner is non-nil, points
+// its fairness credit at that user in the same INSERT (ticket #12). A
+// non-existent owner is rejected with ErrInvalid before the row is written, so
+// a bad owner never leaves a half-configured backend behind.
+func CreateBackendWithOwner(db *sql.DB, name, baseURL, apiKey string, owner *int64) (*Backend, error) {
+	if owner != nil {
+		ok, err := UserExists(db, *owner)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, fmt.Errorf("%w: owner user does not exist", ErrInvalid)
+		}
+	}
+	res, err := db.Exec(`INSERT INTO backends(name, base_url, api_key, owner_user_id, created_at) VALUES(?,?,?,?,?)`,
+		name, strings.TrimRight(baseURL, "/"), nullable(apiKey), owner, now())
 	if err != nil {
 		if isUniqueErr(err) {
 			return nil, ErrExists
@@ -356,6 +377,47 @@ func CreateBackend(db *sql.DB, name, baseURL, apiKey string) (*Backend, error) {
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
+	return BackendByID(db, id)
+}
+
+// UserExists reports whether a user id is present. Used to validate an
+// owner_user_id before a write so the caller gets a clear ErrInvalid instead
+// of a raw foreign-key violation from the driver.
+func UserExists(db *sql.DB, id int64) (bool, error) {
+	var one int
+	err := db.QueryRow(`SELECT 1 FROM users WHERE id=?`, id).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// SetBackendOwner points a backend's fairness credit at a user (ticket #12):
+// usage this backend's own hardware serves is credited to owner in the
+// federation ledger, mirroring how a spoke's capacity credits the peer's
+// owner. owner nil clears it (back to uncredited hub hardware). A non-existent
+// owner is ErrInvalid (the FK is the backstop; the explicit check is the clear
+// error); an unknown backend is ErrNotFound.
+func SetBackendOwner(db *sql.DB, id int64, owner *int64) (*Backend, error) {
+	if owner != nil {
+		ok, err := UserExists(db, *owner)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, fmt.Errorf("%w: owner user does not exist", ErrInvalid)
+		}
+	}
+	res, err := db.Exec(`UPDATE backends SET owner_user_id=? WHERE id=?`, owner, id)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, ErrNotFound
+	}
 	return BackendByID(db, id)
 }
 
@@ -508,7 +570,7 @@ const modelCols = `m.id, m.backend_id, b.name, m.name, m.upstream_model, m.visib
 
 // backendJoinCols is backendCols qualified for joins where backends is b.
 const backendJoinCols = `b.id, b.name, b.base_url, COALESCE(b.api_key,''), b.enabled, b.draining,
-	b.last_probe_at, b.last_probe_error, b.server_version, b.created_at`
+	b.last_probe_at, b.last_probe_error, b.server_version, b.created_at, b.owner_user_id`
 
 func scanModel(row interface{ Scan(...any) error }) (*Model, error) {
 	m := &Model{}
