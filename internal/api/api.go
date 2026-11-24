@@ -563,10 +563,12 @@ func (s *Server) UsageDetail(w http.ResponseWriter, r *http.Request, c *auth.Cla
 	}
 	if scope != 0 {
 		// model_upstream is internal wiring (the engine-side model id, which
-		// tells group members apart): personal views must not learn it, so
-		// it is zeroed here rather than filtered in the frontend.
+		// tells group members apart) and fed_peer names another user's
+		// hosting peer: personal views must not learn either, so they are
+		// zeroed here rather than filtered in the frontend.
 		for i := range rows {
 			rows[i].ModelUpstream = nil
+			rows[i].FedPeer = nil
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"total": total, "rows": rows})

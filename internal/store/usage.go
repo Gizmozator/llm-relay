@@ -181,9 +181,17 @@ type UsageGroup struct {
 }
 
 var groupExprs = map[string]string{
-	"day":      `substr(u.ts, 1, 10)`,
-	"user":     `COALESCE(us.username, '(deleted user)')`,
-	"key":      `COALESCE(k.name, '(deleted key)')`,
+	"day":  `substr(u.ts, 1, 10)`,
+	"user": `COALESCE(us.username, '(deleted user)')`,
+	// A row with no local key (api_key_id 0/NULL — the synthetic federation
+	// key) never had a key to delete: it is federation/spoke traffic and
+	// buckets under the federation marker, naming the hosting peer when the
+	// row carries one. Only a row whose local key row is gone prints
+	// "(deleted key)".
+	"key": `CASE WHEN k.name IS NOT NULL THEN k.name
+			WHEN u.api_key_id IS NULL OR u.api_key_id = 0
+				THEN COALESCE('federation · ' || p.name, 'federation')
+			ELSE '(deleted key)' END`,
 	"model":    `COALESCE(u.model_requested, '(unknown)')`,
 	"ip":       `COALESCE(u.client_ip, '(unknown)')`,
 	"endpoint": `u.endpoint`,
@@ -233,7 +241,8 @@ func SummarizeUsage(db *sql.DB, f *UsageFilter, groupBy string) (UsageGroup, []U
 			COALESCE(SUM(cache_write_tokens),0), COALESCE(SUM(cost_total),0)
 		FROM usage_log u
 		LEFT JOIN api_keys k ON k.id = u.api_key_id
-		LEFT JOIN users us ON us.id = u.user_id`+where+
+		LEFT JOIN users us ON us.id = u.user_id
+		LEFT JOIN peers p ON p.id = u.fed_peer_id`+where+
 		` GROUP BY gk ORDER BY gk`, append(exprArgs, args...)...)
 	if err != nil {
 		return totals, nil, err
@@ -407,10 +416,20 @@ func BusyByModel(db *sql.DB, f *UsageFilter, now time.Time, minutes int) ([]Mode
 
 // UsageRow is one detailed usage record for the detail table.
 type UsageRow struct {
-	ID        int64   `json:"id"`
-	TS        string  `json:"ts"`
-	Username  string  `json:"username"`
-	KeyName   string  `json:"key_name"`
+	ID       int64  `json:"id"`
+	TS       string `json:"ts"`
+	Username string `json:"username"`
+	KeyName  string `json:"key_name"`
+	// KeyLocal reports whether the row ever referenced a LOCAL api key
+	// (api_key_id non-zero). With an empty KeyName it separates the two
+	// "no key name" cases: true = the key row is gone (a genuinely deleted
+	// key); false = the row never had a local key — it arrived through the
+	// federation and carries the synthetic federation key (api_key_id 0).
+	KeyLocal bool `json:"key_local"`
+	// FedPeer names the hosting peer of a federation row (nil for plain
+	// local traffic): the marker label's "where it came from". Personal
+	// routes zero it (peer names are wiring), like ModelUpstream.
+	FedPeer   *string `json:"fed_peer"`
 	ClientIP  *string `json:"client_ip"`
 	SessionID *string `json:"session_id"`
 	Endpoint  string  `json:"endpoint"`
@@ -449,12 +468,14 @@ func UsageDetail(db *sql.DB, f *UsageFilter, page, pageSize int) (int64, []Usage
 		pageSize = 50
 	}
 	rows, err := db.Query(`SELECT u.id, u.ts, COALESCE(us.username,''), COALESCE(k.name,''),
+			(u.api_key_id IS NOT NULL AND u.api_key_id != 0), p.name,
 			u.client_ip, u.session_id, u.endpoint, u.model_requested, u.model_upstream,
 			u.prompt_tokens, u.completion_tokens, u.cached_tokens, u.cache_write_tokens,
 			u.cost_total, u.streamed, u.usage_estimated, u.status_code, u.latency_ms, u.error
 		FROM usage_log u
 		LEFT JOIN users us ON us.id = u.user_id
-		LEFT JOIN api_keys k ON k.id = u.api_key_id`+where+
+		LEFT JOIN api_keys k ON k.id = u.api_key_id
+		LEFT JOIN peers p ON p.id = u.fed_peer_id`+where+
 		` ORDER BY u.id DESC LIMIT ? OFFSET ?`, append(args, pageSize, (page-1)*pageSize)...)
 	if err != nil {
 		return total, nil, err
@@ -463,14 +484,15 @@ func UsageDetail(db *sql.DB, f *UsageFilter, page, pageSize int) (int64, []Usage
 	out := []UsageRow{}
 	for rows.Next() {
 		var r UsageRow
-		var streamed, est int
-		if err := rows.Scan(&r.ID, &r.TS, &r.Username, &r.KeyName, &r.ClientIP, &r.SessionID, &r.Endpoint,
+		var streamed, est, keyLocal int
+		if err := rows.Scan(&r.ID, &r.TS, &r.Username, &r.KeyName, &keyLocal, &r.FedPeer, &r.ClientIP, &r.SessionID, &r.Endpoint,
 			&r.ModelRequ, &r.ModelUpstream, &r.Prompt, &r.Completion, &r.Cached, &r.CacheWrite,
 			&r.CostMicro, &streamed, &est, &r.Status, &r.LatencyMS, &r.Error); err != nil {
 			return total, out, err
 		}
 		r.Streamed = streamed != 0
 		r.Estimated = est != 0
+		r.KeyLocal = keyLocal != 0
 		out = append(out, r)
 	}
 	return total, out, rows.Err()

@@ -3,6 +3,7 @@
 package store_test
 
 import (
+	"database/sql"
 	"testing"
 	"time"
 
@@ -367,5 +368,131 @@ func TestSummarizeUsageDayLocalMidnight(t *testing.T) {
 	got = byKey(&store.UsageFilter{AllUsers: true, From: "2026-11-20", To: "2026-11-20"})
 	if len(got) != 1 || got["2026-11-20"] != 1 {
 		t.Errorf("bounded offset 0 groups = %v, want one Nov 20 row", got)
+	}
+}
+
+// fedSeed creates the four Key-column cases on one user: a real key, a
+// deleted key (row references a key id that has no api_keys row), a
+// spoke-origin consumed row (synthetic federation key, api_key_id 0,
+// hosting peer known) and a federation served row without a local peer.
+// Returns the peer name the consumed row must surface.
+func fedSeed(t *testing.T, d *sql.DB) string {
+	t.Helper()
+	alice, err := store.CreateUser(d, "alice", "", "hash", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := store.CreateKey(d, alice.ID, "laptop", "hash-a", "sk-aaaa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer, _, err := store.CreatePeer(d, "spoke-a", alice.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := func(ev *store.UsageEvent) {
+		ev.TS = "2026-11-21T12:00:00Z"
+		ev.Endpoint = "chat"
+		ev.UserID = alice.ID
+		ev.Prompt = 1
+		ev.CostTotal = 1
+		ev.Status = 200
+		if err := store.InsertUsage(d, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed(&store.UsageEvent{KeyID: key.ID})
+	seed(&store.UsageEvent{KeyID: 4242}) // key row gone: a genuinely deleted key
+	seed(&store.UsageEvent{KeyID: 0, FedDirection: "consumed", FedPeerID: &peer.ID})
+	seed(&store.UsageEvent{KeyID: 0, FedDirection: "served", FedUser: "hub-alice"})
+	return peer.Name
+}
+
+// The by-key grouping must tell a deleted key apart from federation
+// traffic (ticket #15): spoke-origin rows carry the synthetic federation
+// key (api_key_id 0), never a local key that could have been deleted, so
+// they bucket under the federation marker — with the hosting peer's name
+// when the row names one — and only rows whose local key row is gone
+// print "(deleted key)".
+func TestSummarizeUsageKeyGroupOrigins(t *testing.T) {
+	d, err := db.Open(t.TempDir() + "/keyorigins.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Migrate(d); err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	peerName := fedSeed(t, d)
+
+	_, groups, err := store.SummarizeUsage(d, &store.UsageFilter{AllUsers: true}, "key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]int64{
+		"laptop":                   1, // real key keeps its name
+		"(deleted key)":            1, // only the row whose key row is gone
+		"federation · " + peerName: 1, // spoke-origin names the host
+		"federation":               1, // federation row without a local peer
+	}
+	got := map[string]int64{}
+	for _, g := range groups {
+		got[g.Key] = g.Requests
+	}
+	if len(got) != len(want) {
+		t.Fatalf("key groups = %v, want %v", got, want)
+	}
+	for k, w := range want {
+		if got[k] != w {
+			t.Errorf("key bucket %q = %d, want %d (buckets: %v)", k, got[k], w, got)
+		}
+	}
+}
+
+// The detail rows expose the same distinction as fields: key_local says
+// whether the row ever had a LOCAL key (the deleted-vs-federation signal)
+// and fed_peer names the hosting peer, so the frontend never has to
+// guess the origin from the username.
+func TestUsageDetailKeyOriginSignals(t *testing.T) {
+	d, err := db.Open(t.TempDir() + "/keydetail.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Migrate(d); err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	peerName := fedSeed(t, d)
+
+	total, rows, err := store.UsageDetail(d, &store.UsageFilter{AllUsers: true}, 1, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 4 || len(rows) != 4 {
+		t.Fatalf("detail = %d/%d, want 4/4", total, len(rows))
+	}
+	// Newest first: served, consumed, deleted, real key.
+	type want struct {
+		keyName  string
+		keyLocal bool
+		fedPeer  *string
+	}
+	wants := []want{
+		{"", false, nil},
+		{"", false, &peerName},
+		{"", true, nil},
+		{"laptop", true, nil},
+	}
+	for i, r := range rows {
+		w := wants[i]
+		if r.KeyName != w.keyName || r.KeyLocal != w.keyLocal {
+			t.Errorf("row %d = key %q local=%v, want %q local=%v", i, r.KeyName, r.KeyLocal, w.keyName, w.keyLocal)
+		}
+		switch {
+		case w.fedPeer == nil && r.FedPeer != nil:
+			t.Errorf("row %d fed_peer = %q, want nil", i, *r.FedPeer)
+		case w.fedPeer != nil && (r.FedPeer == nil || *r.FedPeer != *w.fedPeer):
+			t.Errorf("row %d fed_peer = %v, want %q", i, r.FedPeer, *w.fedPeer)
+		}
 	}
 }

@@ -674,6 +674,90 @@ func TestUsageDetailUpstreamAdminOnly(t *testing.T) {
 	}
 }
 
+// The detail rows carry the deleted-key vs federation-origin signals on the
+// wire (key_local, fed_peer — ticket #15): key_local is every viewer's own
+// row data and stays, but fed_peer names another user's hosting peer (wiring
+// like model_upstream), so the handler zeroes it on the personal route.
+func TestUsageDetailKeyOriginFields(t *testing.T) {
+	e := newTestEnv(t, http.NotFoundHandler())
+	admin := login(t, e)
+	resp := e.do(t, "POST", "/api/admin/users",
+		`{"username":"alice","password":"pass123456","role":"user"}`, admin)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create alice = %d, want 201", resp.StatusCode)
+	}
+	var users struct {
+		Users []store.User `json:"users"`
+	}
+	resp = e.do(t, "GET", "/api/admin/users", "", admin)
+	json.NewDecoder(resp.Body).Decode(&users)
+	resp.Body.Close()
+	var aliceID int64
+	for _, u := range users.Users {
+		if u.Username == "alice" {
+			aliceID = u.ID
+		}
+	}
+	if aliceID == 0 {
+		t.Fatal("alice not found")
+	}
+	peer, _, err := store.CreatePeer(e.db, "spoke-a", aliceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Deleted key first, spoke-origin row second (detail is newest-first).
+	if err := store.InsertUsage(e.db, &store.UsageEvent{
+		TS: "2026-11-20T10:00:00Z", UserID: aliceID, KeyID: 99, Endpoint: "chat",
+		ModelRequ: "m", Prompt: 1, Status: 200,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.InsertUsage(e.db, &store.UsageEvent{
+		TS: "2026-11-20T10:01:00Z", UserID: aliceID, KeyID: 0, Endpoint: "chat",
+		ModelRequ: "m", Prompt: 1, Status: 200,
+		FedDirection: "consumed", FedPeerID: &peer.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	type detail struct {
+		Total int              `json:"total"`
+		Rows  []store.UsageRow `json:"rows"`
+	}
+	decode := func(resp *http.Response) detail {
+		t.Helper()
+		var d detail
+		json.NewDecoder(resp.Body).Decode(&d)
+		resp.Body.Close()
+		if d.Total != 2 || len(d.Rows) != 2 {
+			t.Fatalf("detail = %+v, want two rows", d)
+		}
+		return d
+	}
+
+	alice := loginAs(t, e, "alice", "pass123456")
+	d := decode(e.do(t, "GET", "/api/usage/detail", "", alice))
+	if d.Rows[0].KeyLocal || !d.Rows[1].KeyLocal {
+		t.Errorf("personal key_local = %v/%v, want false/true (fed/deleted)",
+			d.Rows[0].KeyLocal, d.Rows[1].KeyLocal)
+	}
+	if d.Rows[0].FedPeer != nil {
+		t.Errorf("personal fed_peer = %q, want zeroed", *d.Rows[0].FedPeer)
+	}
+
+	d = decode(e.do(t, "GET", "/api/admin/usage/detail", "", admin))
+	if d.Rows[0].FedPeer == nil || *d.Rows[0].FedPeer != "spoke-a" {
+		t.Errorf("admin fed_peer = %v, want spoke-a", d.Rows[0].FedPeer)
+	}
+	if d.Rows[1].FedPeer != nil {
+		t.Errorf("admin deleted-key row fed_peer = %q, want nil", *d.Rows[1].FedPeer)
+	}
+	if d.Rows[0].KeyLocal || !d.Rows[1].KeyLocal {
+		t.Errorf("admin key_local = %v/%v, want false/true", d.Rows[0].KeyLocal, d.Rows[1].KeyLocal)
+	}
+}
+
 func TestUserMultiplierAndModelMeta(t *testing.T) {
 	e := newTestEnv(t, http.NotFoundHandler())
 	admin := login(t, e)
