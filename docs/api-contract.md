@@ -28,9 +28,10 @@ All `/api/*` except login require `Authorization: Bearer <jwt>`. The embedded SP
 Proxy requests may carry `X-Session-Id: <string>`; without it the relay derives a stable session id (hash of key+model+first user message) for conversation-shaped endpoints. Session ids appear on usage rows and as a `group_by` value.
 - `GET /api/usage/summary?from&to&model=&group_by=day|user|key|model|ip|endpoint|session&tz_offset=` (default `group_by=day`; `model` = exact `model_requested` match)
   → `{"currency":"EUR","totals":{"requests":0,"prompt_tokens":0,"completion_tokens":0,"cached_tokens":0,"cache_write_tokens":0,"cost_micro":0},"groups":[{"key":"2026-11-20","label":"2026-11-20","requests":0,"prompt_tokens":0,"completion_tokens":0,"cached_tokens":0,"cache_write_tokens":0,"cost_micro":0}]}`
-  (`key`/`label`: day → date string; user → username (`(deleted user)` when the account is gone); key → key name; model → model name; ip → client IP; endpoint → endpoint id)
+  (`key`/`label`: day → date string; user → username (`(deleted user)` when the account is gone); key → key name, or `federation` (`federation · <peer>` when the row names a hosting peer) for rows that never had a local key — the synthetic federation key, `api_key_id 0` — and `(deleted key)` only when the row's own local key row is gone; model → model name; ip → client IP; endpoint → endpoint id)
   `tz_offset` (optional, integer **minutes east of UTC**, `-1440..1440`; non-integer or out of range → `400`): the viewer's UTC offset. It moves the **day group key** to the viewer's local date (buckets split at the viewer's local midnight instead of UTC) and reads `from`/`to` as **local** dates (local midnight at the offset; the default last-30-days range anchors on the viewer's today). Absent = `0` = plain UTC, exactly the historical behaviour — callers that do not send it are unaffected. The day keys then carry local dates. **Known limitation (fixed-offset approximation):** one offset applies to the whole range — the viewer's offset of *now* — with no DST history per day. `GET /api/usage/detail` accepts the same parameter for consistent range bounds (it has no day grouping).
-- `GET /api/usage/detail?from&to&model=&page=1&page_size=50` (`model` = exact `model_requested` match) → `{"total":123,"rows":[{"id":1,"ts":"...","username":"bob","key_name":"laptop","client_ip":"1.2.3.4","session_id":"a1b2c3d4e5f6","endpoint":"chat","model_requested":"halogen","prompt_tokens":10,"completion_tokens":20,"cached_tokens":0,"cache_write_tokens":0,"cost_micro":300,"streamed":true,"usage_estimated":false,"status_code":200,"latency_ms":1200,"error":null}]}` (newest first)
+- `GET /api/usage/detail?from&to&model=&page=1&page_size=50` (`model` = exact `model_requested` match) → `{"total":123,"rows":[{"id":1,"ts":"...","username":"bob","key_name":"laptop","key_local":true,"fed_peer":null,"client_ip":"1.2.3.4","session_id":"a1b2c3d4e5f6","endpoint":"chat","model_requested":"halogen","prompt_tokens":10,"completion_tokens":20,"cached_tokens":0,"cache_write_tokens":0,"cost_micro":300,"streamed":true,"usage_estimated":false,"status_code":200,"latency_ms":1200,"error":null}]}` (newest first)
+  `key_local` says whether the row ever referenced a **local** API key: with an empty `key_name` it separates a genuinely deleted key (`key_local:true` — the key row is gone) from federation/spoke origin (`key_local:false` — the synthetic federation key, `api_key_id 0`; the dashboard labels those `federation`, appending ` · <peer>` from `fed_peer`, the hosting peer's name). `fed_peer` is admin-view data (another user's peer is wiring): the personal routes zero it, exactly like `model_upstream`.
 
 ### Live dashboard
 - `GET /api/live?window=60` and `GET /api/admin/live?window=60` (`window` in minutes, default 60, clamped to 5–360)
@@ -328,6 +329,9 @@ hub's ledger is **fully double-entry**: every hub row whose resolved
 upstream member lives on a synthetic `peer://` backend is mirrored by a
 `served` row crediting that backend's owner user with the same token/cost
 counts and the same model row (synthetic federation key, `api_key_id=0`).
+Because `api_key_id = 0` is exactly "never had a local key", the usage
+detail (`key_local`) and the `group_by=key` bucket label use it to tell a
+deleted key (a non-zero id whose key row is gone) from federation origin.
 Uniform rule: a `served` row credits the host (`fed_peer_id` = host); a
 `consumed` row identifies the consumer by its `user_id` and names the
 host it spent on (`NULL` when hub hardware served). Who stamps what, per
