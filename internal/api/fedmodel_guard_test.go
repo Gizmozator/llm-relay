@@ -1,7 +1,8 @@
 // Federated-model write guards on the admin model endpoints (ticket #9): a
-// materialized row mirrors a peer's catalog, so the API refuses the edits the
-// next catalog re-push would silently undo. Only `enabled` stays the hub
-// admin's own lever, and removal is per-peer on the Servers page.
+// materialized row mirrors a peer's catalog, so the API refuses every edit —
+// `enabled` included (a per-model disable silently reverts on the next
+// catalog re-push, so the durable kill switches are the peer/backend disable
+// in the Servers section, where removal is per-peer too).
 package api_test
 
 import (
@@ -120,43 +121,33 @@ func TestFederatedModelEditGuard(t *testing.T) {
 	}
 }
 
-// `enabled` is the hub admin's lever: an enabled-only PATCH on a federated
-// model goes through and lands in the row.
+// `enabled` is read-only on a federated row too: the next catalog push
+// re-enables it, so the API refuses the PATCH instead of promising a disable
+// that silently reverts. Even an empty body is refused — with no writable
+// field there is nothing a PATCH could legally say.
 func TestFederatedModelEnabledOnlyPATCH(t *testing.T) {
 	e := newTestEnv(t, http.NotFoundHandler())
 	tok := login(t, e)
 	m := newFederatedModel(t, e, "peer8", store.PeerBackendURL(8), "shared-off")
 
-	resp := e.do(t, "PATCH", pathf("/api/admin/models/%d", m.ID), `{"enabled":false}`, tok)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("enabled-only PATCH = %d, want 200 (%s)", resp.StatusCode, errMessage(t, resp))
+	for _, body := range []string{`{"enabled":false}`, `{"enabled":true}`, `{}`} {
+		resp := e.do(t, "PATCH", pathf("/api/admin/models/%d", m.ID), body, tok)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("PATCH %s on a federated model = %d, want 400 (%s)",
+				body, resp.StatusCode, errMessage(t, resp))
+			continue
+		}
+		if msg := errMessage(t, resp); msg == "" {
+			t.Errorf("PATCH %s: empty error message", body)
+		}
 	}
-	var view store.Model
-	json.NewDecoder(resp.Body).Decode(&view)
-	resp.Body.Close()
-	if view.Enabled {
-		t.Errorf("response still says enabled: %+v", view)
-	}
+	// Nothing committed: the row keeps the seeded enabled=true and name.
 	got, err := store.ModelByID(e.db, m.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Enabled {
-		t.Error("enabled=false did not reach the row")
-	}
-	// And back on, with an explicit no-op patch (no field mentioned): the
-	// guard is about peer-owned fields, not about demanding one.
-	if resp := e.do(t, "PATCH", pathf("/api/admin/models/%d", m.ID), `{"enabled":true}`, tok); resp.StatusCode != http.StatusOK {
-		t.Fatalf("re-enable = %d, want 200", resp.StatusCode)
-	} else {
-		resp.Body.Close()
-	}
-	if resp := e.do(t, "PATCH", pathf("/api/admin/models/%d", m.ID), `{}`, tok); resp.StatusCode != http.StatusOK {
-		t.Errorf("empty PATCH = %d, want 200 (%s)", resp.StatusCode, errMessage(t, resp))
-	}
-	got, err = store.ModelByID(e.db, m.ID)
-	if err != nil || !got.Enabled || got.Name != "shared-off" {
-		t.Errorf("row after enabled-only PATCHes = %+v, %v", got, err)
+	if !got.Enabled || got.Name != "shared-off" {
+		t.Errorf("federated row changed despite the guard: %+v", got)
 	}
 }
 

@@ -60,8 +60,9 @@ export default function AdminModelsPage() {
   // second membership with 409).
   const groups = useLoad(() => api.groups().then((r) => r.groups), []);
   // Synthetic (federation-materialized) backends: base_url peer://… or
-  // hub://…. Their model rows mirror another instance's catalog, so only
-  // the federation fields and the enabled flag are editable locally.
+  // hub://…. Their model rows mirror another instance's catalog, so every
+  // field is read-only here; the kill switches are the peer/backend disable
+  // in the Servers section.
   const backends = useLoad(() => api.backends().then((r) => r.backends), []);
   const fedRole = useLoad(() => api.fedRole(), []);
   const peers = useLoad(() => api.adminPeers().then((r) => r.peers), []);
@@ -313,7 +314,13 @@ export default function AdminModelsPage() {
                         )}
                       </td>
                       <td>
-                        <Toggle checked={m.enabled} onChange={(v) => patch(m.id, { enabled: v })} />
+                        {isSynthetic(m) ? (
+                          <span title="Managed by the peer — to stop serving this model, disable the peer in the Servers section">
+                            {m.enabled ? 'on' : 'off'}
+                          </span>
+                        ) : (
+                          <Toggle checked={m.enabled} onChange={(v) => patch(m.id, { enabled: v })} />
+                        )}
                       </td>
                       <td className="num">
                         {isSynthetic(m) ? (
