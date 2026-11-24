@@ -61,6 +61,7 @@ func newTestEnv(t *testing.T, upstream http.Handler) *testEnv {
 	mux.Handle("GET /api/admin/users", s.Admin(s.AdminListUsers))
 	mux.Handle("PATCH /api/admin/users/{id}", s.Admin(s.AdminUpdateUser))
 	mux.Handle("PATCH /api/admin/models/{id}", s.Admin(s.AdminUpdateModel))
+	mux.Handle("DELETE /api/admin/models/{id}", s.Admin(s.AdminDeleteModel))
 	mux.Handle("POST /api/admin/models/{id}/benchmark", s.Admin(s.AdminBenchmarkModel))
 	mux.Handle("POST /api/admin/users", s.Admin(s.AdminCreateUser))
 	mux.Handle("GET /api/admin/usage/detail", s.Admin(s.UsageDetail))

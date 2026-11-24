@@ -418,6 +418,26 @@ func (s *Server) AdminUpdateModel(w http.ResponseWriter, r *http.Request, c *aut
 		}
 		in.Name = &trimmed
 	}
+	// A federated (materialized) row mirrors a peer's catalog: an edit here
+	// "succeeds" and the next catalog push silently overwrites the damage, so
+	// the API refuses it the way the benchmark guard does. The hub admin's own
+	// lever stays: `enabled` alone (disabling a shared model locally is theirs
+	// to pull). Any other field in the patch rejects the whole PATCH, before a
+	// single column is written — a half-applied edit is worse than the refused
+	// one. Removal is per-peer on the Servers page.
+	federated, err := store.ModelIsFederated(s.DB, id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if federated && (in.Name != nil || in.Visibility != nil ||
+		in.PriceIn != nil || in.PriceOut != nil || in.PriceCacheRead != nil ||
+		in.PriceCacheWrite != nil || in.ContextLength != nil || in.ConcurrencyLimit != nil ||
+		in.BusyThresholdPct != nil || in.BenchTokPerS != nil || in.BenchPPTokPerS != nil ||
+		in.FedVisibility != nil || in.FedPeerIDs != nil) {
+		writeErr(w, http.StatusBadRequest, "cannot edit a federated model's settings - managed by the peer")
+		return
+	}
 	for _, p := range []*int64{in.PriceIn, in.PriceOut, in.PriceCacheRead, in.PriceCacheWrite} {
 		if p != nil && *p < 0 {
 			writeErr(w, http.StatusBadRequest, "prices cannot be negative")
@@ -784,6 +804,19 @@ func (s *Server) AdminDeleteModel(w http.ResponseWriter, r *http.Request, c *aut
 	id, err := pathID(r)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	// Federated rows belong to the peer that shares them: deleting one here
+	// only removes the local mirror until the next catalog push recreates it
+	// (and it drops the row the local usage history points at). Removal is
+	// per-peer on the Servers page.
+	federated, err := store.ModelIsFederated(s.DB, id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if federated {
+		writeErr(w, http.StatusBadRequest, "cannot delete a federated model - remove the peer that shares it")
 		return
 	}
 	if err := store.DeleteModel(s.DB, id); err == store.ErrNotFound {
