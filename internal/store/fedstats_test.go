@@ -288,3 +288,104 @@ func TestFedPeerModel(t *testing.T) {
 		t.Fatalf("other name = %+v, %v", miss, err)
 	}
 }
+
+// Ticket #12: a hub backend with an owner credits that user with the serving
+// when its own hardware serves a spoke (the consumed row with fed_peer_id
+// NULL). The spender's consumed credit is untouched — this is the hub mirror
+// of the peer-owner served credit, not a re-attribution.
+func TestFedUserTotalsHubOwner(t *testing.T) {
+	d := migratedDB(t)
+	hubOwner := fedUser(t, d, "hub-owner")
+	spokeOwner := fedUser(t, d, "spoke-owner")
+	be, err := store.CreateBackendWithOwner(d, "hub-gpu", "http://hub-gpu:8080", "", &hubOwner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := store.CreateModel(d, be.ID, "up", "hub-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A spoke user consumes the hub-local model: the hub meters the spender
+	// (spoke-owner) as consumed with fed_peer_id NULL (hub hardware served).
+	// Before #12 this row credited nobody with serving.
+	insertFed(t, d, &store.UsageEvent{UserID: spokeOwner, ModelID: m.ID,
+		FedDirection: "consumed", Prompt: 10, Completion: 5, CostTotal: 100})
+
+	all, err := store.FedUserTotals(d, ago(30*24*time.Hour), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]store.FedUserTotal{}
+	for _, e := range all {
+		byName[e.User] = e
+	}
+	ho := byName["hub-owner"]
+	if ho.UserID != hubOwner || ho.Served.Requests != 1 || ho.Served.Prompt != 10 ||
+		ho.Served.Completion != 5 || ho.Served.CostMicro != 100 || ho.Consumed.Requests != 0 {
+		t.Errorf("hub-owner = %+v, want served 1req/10p/5c/100micro, consumed 0", ho)
+	}
+	so := byName["spoke-owner"]
+	if so.UserID != spokeOwner || so.Consumed.Requests != 1 || so.Consumed.Prompt != 10 ||
+		so.Served.Requests != 0 {
+		t.Errorf("spoke-owner = %+v, want consumed 1req/10p, served 0", so)
+	}
+}
+
+// A backend with no owner must leave the ledger byte-identical to before #12:
+// the hub-hardware consumed row credits the spender only, and no phantom
+// served entry is invented for the ownerless backend.
+func TestFedUserTotalsNoOwnerUnchanged(t *testing.T) {
+	d := migratedDB(t)
+	spokeOwner := fedUser(t, d, "spoke-owner")
+	be, err := store.CreateBackend(d, "hub-gpu", "http://hub-gpu:8080", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := store.CreateModel(d, be.ID, "up", "hub-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertFed(t, d, &store.UsageEvent{UserID: spokeOwner, ModelID: m.ID,
+		FedDirection: "consumed", Prompt: 10, Completion: 5, CostTotal: 100})
+
+	all, err := store.FedUserTotals(d, ago(30*24*time.Hour), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("entries = %d, want 1 (only the spender): %+v", len(all), all)
+	}
+	if all[0].User != "spoke-owner" || all[0].Consumed.Prompt != 10 || all[0].Served.Requests != 0 {
+		t.Errorf("entry = %+v, want spoke-owner consumed 10p, served 0", all[0])
+	}
+}
+
+// The hub-owner pass keys on fed_peer_id IS NULL (hub hardware served). A
+// peer-hosted served row (fed_peer_id set) on a backend that happens to carry
+// an owner must NOT be credited again by that pass — the owner is credited
+// exactly once, through the normal served path. Guards against double-counting
+// a row on both the peer and hub-owner sides.
+func TestFedUserTotalsOwnerNotDoubleCounted(t *testing.T) {
+	d := migratedDB(t)
+	owner := fedUser(t, d, "owner")
+	be, err := store.CreateBackendWithOwner(d, "b", "http://b:1", "", &owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := store.CreateModel(d, be.ID, "up", "mm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	peerID := int64(7)
+	insertFed(t, d, &store.UsageEvent{UserID: owner, ModelID: m.ID,
+		FedDirection: "served", FedPeerID: &peerID, Prompt: 4})
+
+	all, err := store.FedUserTotals(d, ago(30*24*time.Hour), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 || all[0].User != "owner" || all[0].Served.Prompt != 4 ||
+		all[0].Served.Requests != 1 {
+		t.Fatalf("entries = %+v, want owner served 4p/1req exactly once", all)
+	}
+}

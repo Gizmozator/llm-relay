@@ -67,6 +67,10 @@ func FedUserTotals(db *sql.DB, since string, userID int64) ([]FedUserTotal, erro
 		where += ` AND u.user_id = ?`
 		args = append(args, userID)
 	}
+	// Keyed by user_id, never by the display name: several deleted users
+	// share the '(deleted user)' label and must not collapse into one
+	// entry (their totals would overwrite each other).
+	byUser := map[int64]*FedUserTotal{}
 	rows, err := db.Query(`SELECT u.user_id, COALESCE(us.username,'(deleted user)'), u.fed_direction, `+fedCountAggs+`
 		FROM usage_log u LEFT JOIN users us ON us.id = u.user_id
 		WHERE `+where+`
@@ -75,10 +79,6 @@ func FedUserTotals(db *sql.DB, since string, userID int64) ([]FedUserTotal, erro
 		return nil, err
 	}
 	defer rows.Close()
-	// Keyed by user_id, never by the display name: several deleted users
-	// share the '(deleted user)' label and must not collapse into one
-	// entry (their totals would overwrite each other).
-	byUser := map[int64]*FedUserTotal{}
 	for rows.Next() {
 		var id int64
 		var user, dir string
@@ -87,20 +87,59 @@ func FedUserTotals(db *sql.DB, since string, userID int64) ([]FedUserTotal, erro
 			&c.Cached, &c.CacheWrite, &c.CostMicro); err != nil {
 			return nil, err
 		}
-		e, ok := byUser[id]
-		if !ok {
-			e = &FedUserTotal{UserID: id, User: user}
-			byUser[id] = e
-		}
-		if dir == "served" {
-			addFedCounts(&e.Served, c)
-		} else {
-			addFedCounts(&e.Consumed, c)
-		}
+		foldFedUser(byUser, id, user, dir, c)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+
+	// Hub-hardware serving credit (ticket #12). A federated row whose
+	// fed_peer_id is NULL was served by THIS relay's own hardware — the
+	// uniform convention is that fed_peer_id names the hosting peer and is
+	// NULL exactly when hub hardware served (a spoke→hub-local serve leaves
+	// the consumed row with no peer to credit). When the model that served
+	// lives on a backend with an owner, that owner is credited with the
+	// serving: the hub mirror of the peer-owner served credit, so hub
+	// capacity finally appears in the per-user fairness table.
+	//
+	// Query-time join, not a write-time stamp: it leaves the metering path
+	// (usage.go) untouched and attributes historical rows the instant an
+	// owner is set, with no backfill. Backends without an owner contribute
+	// nothing (the join requires owner_user_id NOT NULL), so their ledger is
+	// byte-identical to before; peer-hosted rows carry fed_peer_id NOT NULL
+	// and are never seen here, so spoke crediting is unchanged and a row is
+	// never counted on both sides.
+	ownerWhere := `u.fed_direction != '' AND u.fed_peer_id IS NULL AND b.owner_user_id IS NOT NULL AND u.ts >= ?`
+	ownerArgs := []any{since}
+	if userID != 0 {
+		ownerWhere += ` AND b.owner_user_id = ?`
+		ownerArgs = append(ownerArgs, userID)
+	}
+	own, err := db.Query(`SELECT b.owner_user_id, COALESCE(us.username,'(deleted user)'), `+fedCountAggs+`
+		FROM usage_log u
+		JOIN models m ON m.id = u.model_id
+		JOIN backends b ON b.id = m.backend_id
+		LEFT JOIN users us ON us.id = b.owner_user_id
+		WHERE `+ownerWhere+`
+		GROUP BY b.owner_user_id, us.username`, ownerArgs...)
+	if err != nil {
+		return nil, err
+	}
+	defer own.Close()
+	for own.Next() {
+		var id int64
+		var user string
+		var c FedCounts
+		if err := own.Scan(&id, &user, &c.Requests, &c.Prompt, &c.Completion,
+			&c.Cached, &c.CacheWrite, &c.CostMicro); err != nil {
+			return nil, err
+		}
+		foldFedUser(byUser, id, user, "served", c)
+	}
+	if err := own.Err(); err != nil {
+		return nil, err
+	}
+
 	out := make([]FedUserTotal, 0, len(byUser))
 	for _, e := range byUser {
 		out = append(out, *e)
@@ -112,6 +151,24 @@ func FedUserTotals(db *sql.DB, since string, userID int64) ([]FedUserTotal, erro
 		return out[i].UserID < out[j].UserID
 	})
 	return out, nil
+}
+
+// foldFedUser adds one aggregated bucket to a user's served or consumed
+// rollup, creating the entry on first sight. Shared by the per-row pass and
+// the hub-owner pass so both accumulate into the same keyed entry (a user who
+// both owns a serving backend and has their own fed rows keeps one combined
+// entry, never two).
+func foldFedUser(byUser map[int64]*FedUserTotal, id int64, user, dir string, c FedCounts) {
+	e, ok := byUser[id]
+	if !ok {
+		e = &FedUserTotal{UserID: id, User: user}
+		byUser[id] = e
+	}
+	if dir == "served" {
+		addFedCounts(&e.Served, c)
+	} else {
+		addFedCounts(&e.Consumed, c)
+	}
 }
 
 // FedPeerTotals is one peer's served/consumed rollup (hub Servers page).
