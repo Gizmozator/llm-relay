@@ -60,6 +60,13 @@ export interface UsageRow {
   ts: string;
   username?: string;
   key_name: string;
+  /** False when the row never had a local key — it carries the synthetic
+   *  federation key (api_key_id 0). With an empty key_name it separates a
+   *  genuinely deleted key (true) from federation/spoke origin (false). */
+  key_local: boolean;
+  /** Hosting peer name for federation rows (admin views only; the personal
+   *  route zeroes it). Null for plain local traffic. */
+  fed_peer?: string | null;
   client_ip: string;
   session_id: string | null;
   endpoint: string;

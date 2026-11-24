@@ -5,6 +5,7 @@ import { daysAgoISO, fmtDateTime, fmtInt, fmtMoney, inNewTokens } from '../forma
 import { formatMetricValue, USAGE_METRICS } from '../metrics';
 import type { Metric } from '../metrics';
 import { useLoad } from '../useLoad';
+import { keyOrigin } from './usageKey';
 import { useToast } from '../components/Toast';
 import { Banner, Card, Empty, Loading } from '../components/ui';
 import LineChart from '../components/LineChart';
@@ -376,15 +377,19 @@ export default function UsagePage({ admin }: { admin: boolean }) {
                         )}
                       </td>
                     )}
-                    {/* The federation marker is the missing user (user_id 0
-                        rows never join one). key_name is empty for a deleted
-                        key too, so it must not decide the label. */}
+                    {/* Origin keys on whether the row ever had a LOCAL key
+                        (key_local), never on the username: spoke-origin rows
+                        carry the stamped hub-side identity with the synthetic
+                        federation key (api_key_id 0), so an empty key_name
+                        there is federation traffic, not a deleted key. */}
                     <td>
                       {r.key_name ||
-                        (r.username ? (
+                        (keyOrigin(r) === 'deleted' ? (
                           <span className="dim">deleted key</span>
                         ) : (
-                          <span className="dim">federation</span>
+                          <span className="badge fed" title="Served through the federation — this row carries the synthetic federation key, not a deleted one">
+                            federation{r.fed_peer ? ` · ${r.fed_peer}` : ''}
+                          </span>
                         ))}
                     </td>
                     <td className="mono">
