@@ -60,6 +60,10 @@ web: css ## build the web dashboard -> web/dist (Docker build does this automati
 test: ## run unit tests
 	go test -race ./...
 
+test-js: ## run web unit tests (node --test on *.test.ts)
+	@find web/src -name '*.test.ts' | grep -q . || { echo "test-js: no web tests"; exit 0; }
+	cd web && node --test "src/**/*.test.ts"
+
 vet: ## go vet
 	go vet ./...
 
@@ -77,7 +81,7 @@ run: build ## run locally: relay on :$(PORT), dashboard on :$(ADMIN_PORT)
 watch: build ## rebuild+restart on change (needs air: go install github.com/air-verse/air@latest)
 	air
 
-ci: fmt-check vet test ## everything a commit must pass
+ci: fmt-check vet test test-js ## everything a commit must pass
 
 clean: ## remove build artifacts
 	rm -f $(BIN)

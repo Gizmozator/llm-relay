@@ -185,18 +185,34 @@ var groupExprs = map[string]string{
 	"user": `COALESCE(us.username, '(deleted user)')`,
 	// A row with no local key (api_key_id 0/NULL — the synthetic federation
 	// key) never had a key to delete: it is federation/spoke traffic and
-	// buckets under the federation marker, naming the hosting peer when the
-	// row carries one. Only a row whose local key row is gone prints
-	// "(deleted key)".
-	"key": `CASE WHEN k.name IS NOT NULL THEN k.name
-			WHEN u.api_key_id IS NULL OR u.api_key_id = 0
-				THEN COALESCE('federation · ' || p.name, 'federation')
-			ELSE '(deleted key)' END`,
+	// buckets under the federation marker. Only a row whose local key row is
+	// gone prints "(deleted key)". The federation marker names the hosting
+	// peer ONLY in the admin all-users view (keyGroupExprAdmin); a personal
+	// route must not learn another user's peer name, so it uses the bare
+	// marker (keyGroupExprScoped). SummarizeUsage picks per scope.
+	"key":      keyGroupExprAdmin,
 	"model":    `COALESCE(u.model_requested, '(unknown)')`,
 	"ip":       `COALESCE(u.client_ip, '(unknown)')`,
 	"endpoint": `u.endpoint`,
 	"session":  `COALESCE(substr(u.session_id, 1, 12), '(none)')`,
 }
+
+// The by-key label has two shapes. Both keep a real key's name and reserve
+// "(deleted key)" for a row whose local key row is gone; they differ only in
+// the federation marker. The admin view names the hosting peer (it is
+// operator data); a personal scope must not, because a transit row's
+// fed_peer_id names a peer the caller may not own — the same leak the detail
+// route closes by zeroing fed_peer.
+const (
+	keyGroupExprAdmin = `CASE WHEN k.name IS NOT NULL THEN k.name
+			WHEN u.api_key_id IS NULL OR u.api_key_id = 0
+				THEN COALESCE('federation · ' || p.name, 'federation')
+			ELSE '(deleted key)' END`
+	keyGroupExprScoped = `CASE WHEN k.name IS NOT NULL THEN k.name
+			WHEN u.api_key_id IS NULL OR u.api_key_id = 0
+				THEN 'federation'
+			ELSE '(deleted key)' END`
+)
 
 // ValidGroupBy reports whether groupBy is a supported bucket dimension.
 // Handlers validate with it so a bad value is a 400, not a store error.
@@ -213,6 +229,13 @@ func SummarizeUsage(db *sql.DB, f *UsageFilter, groupBy string) (UsageGroup, []U
 	expr, ok := groupExprs[groupBy]
 	if !ok {
 		return UsageGroup{}, nil, fmt.Errorf("bad group_by %q", groupBy)
+	}
+	// The by-key label names the hosting peer only in the admin all-users
+	// view; a personal scope gets the bare federation marker so it cannot
+	// learn another user's peer name (mirrors the detail route zeroing
+	// fed_peer). See keyGroupExpr{Admin,Scoped}.
+	if groupBy == "key" && !f.AllUsers {
+		expr = keyGroupExprScoped
 	}
 	where, args := f.where()
 

@@ -449,6 +449,56 @@ func TestSummarizeUsageKeyGroupOrigins(t *testing.T) {
 	}
 }
 
+// A personal (scoped) by-key summary must NOT name the hosting peer: a
+// transit row's fed_peer_id can point at a peer the caller does not own, so
+// leaking its name is an information leak. The scoped view collapses every
+// federation row to the bare "federation" marker — the same rule the detail
+// route enforces by zeroing fed_peer.
+func TestSummarizeUsageKeyGroupScopedNoPeerName(t *testing.T) {
+	d, err := db.Open(t.TempDir() + "/keyscoped.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Migrate(d); err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	peerName := fedSeed(t, d)
+
+	// Scope to alice (the seeded user). Her rows include a consumed transit
+	// row whose fed_peer_id names a peer; the label must stay bare.
+	alice, _, err := store.UserByName(d, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, groups, err := store.SummarizeUsage(d, &store.UsageFilter{UserID: alice.ID}, "key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]int64{}
+	for _, g := range groups {
+		got[g.Key] = g.Requests
+	}
+	if _, leaked := got["federation · "+peerName]; leaked {
+		t.Errorf("scoped key summary leaked peer name %q; buckets: %v", peerName, got)
+	}
+	// Both federation rows (consumed-with-peer + served-without-peer) bucket
+	// as the bare marker; the real key and deleted key are unchanged.
+	want := map[string]int64{
+		"laptop":        1,
+		"(deleted key)": 1,
+		"federation":    2,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("scoped key buckets = %v, want %v", got, want)
+	}
+	for k, w := range want {
+		if got[k] != w {
+			t.Errorf("scoped key bucket %q = %d, want %d (buckets: %v)", k, got[k], w, got)
+		}
+	}
+}
+
 // The detail rows expose the same distinction as fields: key_local says
 // whether the row ever had a LOCAL key (the deleted-vs-federation signal)
 // and fed_peer names the hosting peer, so the frontend never has to
