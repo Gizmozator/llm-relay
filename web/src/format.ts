@@ -43,6 +43,21 @@ export function fmtDateTime(iso: string | null | undefined): string {
   return `${d.toLocaleDateString('en-GB')} ${d.toLocaleTimeString('en-GB', { hour12: false })}`;
 }
 
+/**
+ * "HH:MM" for a live-bucket minute label, shown in browser-local time.
+ * The backend's LiveBuckets emits "YYYY-MM-DDTHH:MM" as UTC wall-clock
+ * WITHOUT an offset (substr of the UTC-stamped rows), so a raw slice would
+ * render UTC hours on a local-time clock. Appending "Z" makes it a real UTC
+ * instant; hourCycle h23 keeps midnight at 00:00 (en-GB + hour12:false can
+ * print "24:00" on some engines). Locale matches fmtDateTime.
+ */
+export function fmtHourMinuteUTC(minute: string | null | undefined): string {
+  if (!minute) return '—';
+  const d = new Date(`${minute}Z`);
+  if (isNaN(d.getTime())) return minute.slice(11, 16);
+  return d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+}
+
 /** Compact elapsed time from seconds: "45s", "1m 23s", "2h 05m", "3d 4h". */
 export function fmtDurationSec(s: number): string {
   s = Math.max(0, Math.floor(s));
