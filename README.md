@@ -68,11 +68,14 @@ member does not reroute**: queueing at the engine beats cold caches for
 everyone. If a member dies before its first byte, the request retries on the
 next-ranked member; a stream that already started is never retried.
 
-**Visibility**: adding a model to a group makes it `internal` — hidden from
-`/v1/models` and the dashboard; the group name is what users request. Members
-stay directly requestable by name (pin/debug), and an admin can re-expose one.
-Users see a group badge on the **Models** page, one pooled row per group on
-the live dashboard, and usage billed under the requested group name.
+**Visibility** (the **Models** page's per-model switch) is *who can see a model
+on this relay*: `public` lists it on `/v1/models` and the dashboard; `internal`
+hides it from the catalog while leaving it directly requestable by name. Adding a
+model to a group makes its members `internal` — the group name is what users
+request; members stay directly requestable (pin/debug) and an admin can re-expose
+one. Users see a group badge on the **Models** page, one pooled row per group on
+the live dashboard, and usage billed under the requested group name. Sharing a
+model with *other relays* is a separate switch — **Share**, see **Federation**.
 
 The agent endpoints (`GET /v1/utilization`, MCP `check_utilization`) mirror
 this split: non-admin keys get the advertised catalog — group rows (negative
@@ -167,10 +170,14 @@ flowchart LR
 federation), `hub`, `spoke`. A spoke enters the hub URL + token there and sees
 its live channel status; every user mints their own `fed-…` server token on
 **My keys** and follows the **Connect server** guide (shown while the instance
-is a hub). What to share is a per-model switch on the admin **Models** page
-(`off` / `all` / `allowlist`) — nothing leaves the box until you opt a model
-in. Quickstart: hub → *My keys → Server token* → spoke → *Admin → Federation →
-spoke + hub URL + token* → spoke *Models* → set the models to share to `all`.
+is a hub). **Share** is a per-model switch on the admin **Models** page and is
+about *who can use the model in the federation* — a different question from
+**Visibility** (who can see it on *this* relay): `local` (stored `off`) shares
+nothing, `all` shares it with the hub and every peer, `allowlist` shares it with
+the selected peers only (on a spoke, effectively local — only `all` is pushed).
+Nothing leaves the box until you opt a model in. Quickstart: hub → *My keys →
+Server token* → spoke → *Admin → Federation → spoke + hub URL + token* → spoke
+*Models* → set the models to share to `all`.
 
 **Users see models, admins see the cluster**: a federated model behaves like
 any other row (its health *is* the channel; groups may pool several peers'
