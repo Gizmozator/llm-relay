@@ -24,7 +24,17 @@ export function useLoad<T>(loader: () => Promise<T>, deps: unknown[]): LoadState
     let cancelled = false;
     setLoading(true);
     setError(null);
-    loader()
+    // A synchronous throw from the loader (bad accessor, coding bug)
+    // must surface as the load error, not an unhandled rejection.
+    let pending: Promise<T>;
+    try {
+      pending = loader();
+    } catch (e: unknown) {
+      setError(errMsg(e));
+      setLoading(false);
+      return;
+    }
+    pending
       .then((d) => {
         if (!cancelled) {
           setData(d);

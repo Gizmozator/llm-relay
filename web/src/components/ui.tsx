@@ -109,10 +109,13 @@ export function ConfirmButton({
   onConfirm,
   label,
   className = 'btn small danger',
+  disabled = false,
 }: {
-  onConfirm: () => void;
+  onConfirm: () => void | Promise<void>;
   label: string;
   className?: string;
+  /** Blocks both the arm and the confirm (e.g. the action is in flight). */
+  disabled?: boolean;
 }) {
   const [armed, setArmed] = useState(false);
 
@@ -125,10 +128,19 @@ export function ConfirmButton({
   return (
     <button
       className={className}
+      disabled={disabled}
       onClick={() => {
         if (armed) {
           setArmed(false);
-          onConfirm();
+          // Callers pass async handlers; a rejected promise would be an
+          // unhandled rejection with the failure invisible. Surface it.
+          try {
+            void Promise.resolve(onConfirm()).catch((e: unknown) => {
+              console.error('confirm action failed:', e);
+            });
+          } catch (e: unknown) {
+            console.error('confirm action failed:', e);
+          }
         } else {
           setArmed(true);
         }

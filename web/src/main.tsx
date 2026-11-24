@@ -17,4 +17,8 @@ if (rootEl) {
       </BrowserRouter>
     </StrictMode>,
   );
+} else {
+  // A missing #root means a broken index.html — say so instead of
+  // rendering a blank page with no trace.
+  console.error('mount target #root not found; app not rendered');
 }

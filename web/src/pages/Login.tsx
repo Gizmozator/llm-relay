@@ -45,6 +45,7 @@ export default function LoginPage() {
             value={username}
             autoComplete="username"
             autoFocus
+            disabled={!ready}
             onChange={(e) => setUsername(e.target.value)}
           />
         </Field>
@@ -54,11 +55,15 @@ export default function LoginPage() {
             type="password"
             value={password}
             autoComplete="current-password"
+            disabled={!ready}
             onChange={(e) => setPassword(e.target.value)}
           />
         </Field>
-        <button className="btn primary login-btn" type="submit" disabled={busy}>
-          {busy ? 'Signing in…' : 'Sign in'}
+        {/* !ready: the stored token is still being revalidated — submitting
+            (or typing) into a session that is about to be confirmed or
+            dropped is a race the operator should not be able to hit. */}
+        <button className="btn primary login-btn" type="submit" disabled={busy || !ready}>
+          {busy ? 'Signing in…' : ready ? 'Sign in' : 'Checking…'}
         </button>
       </form>
     </div>

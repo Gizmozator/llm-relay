@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { api, errMsg, FED_ROLES } from '../api';
-import type { FedCounts, FedRole } from '../api';
+import type { FedCounts, FedRole, FedSettings } from '../api';
 import { fmtInt, fmtMoney, inNewTokens } from '../format';
 import { useLoad } from '../useLoad';
 import { useToast } from '../components/Toast';
@@ -36,12 +36,14 @@ export default function AdminFederationPage() {
   // the Backends page polls health — the dialer reconnects on its own, the
   // page just has to follow. A failed poll keeps the last good payload on
   // screen (useLoad retains data on error) and rides a banner instead —
-  // transient failures must not wipe a working page.
+  // transient failures must not wipe a working page. Keyed on the
+  // PERSISTED role (not the draft select): picking "spoke" in the dropdown
+  // before saving must not start polling a role the server does not have.
   useEffect(() => {
-    if (curRole !== 'spoke') return;
+    if (cur?.role !== 'spoke') return;
     const t = setInterval(() => settings.reload(), 10_000);
     return () => clearInterval(t);
-  }, [curRole, settings.reload]);
+  }, [cur?.role, settings.reload]);
 
   // Spoke panels need the share list and the served/consumed ledger.
   const models = useLoad(
@@ -71,6 +73,12 @@ export default function AdminFederationPage() {
   };
 
   const spokeStatus = cur?.spoke;
+  // A spoke without a usable dial-in target cannot connect: the URL must
+  // be http(s) and the token non-empty (the server validates too, but the
+  // Save button should not offer a guaranteed 400).
+  const spokeConfigValid =
+    curRole !== 'spoke' ||
+    (/^https?:\/\/\S+$/i.test(curUrl.trim()) && curToken.trim() !== '');
   // The server ships fed_visibility='all' AND model-enabled AND backend-
   // enabled; the model payload carries the model flag only, so a model on
   // a disabled backend can linger in this list (residual over-count, the
@@ -141,11 +149,17 @@ export default function AdminFederationPage() {
                     </button>
                   </div>
                 </Field>
+                {!spokeConfigValid && (
+                  <p className="dim">
+                    Hub URL must start with http:// or https://, and the hub token is
+                    required — Save stays disabled until both are filled.
+                  </p>
+                )}
               </>
             )}
 
             <div>
-              <button className="btn primary" type="submit" disabled={busy || !dirty}>
+              <button className="btn primary" type="submit" disabled={busy || !dirty || !spokeConfigValid}>
                 {busy ? 'Saving…' : 'Save'}
               </button>
             </div>
@@ -157,29 +171,7 @@ export default function AdminFederationPage() {
                 <h3>Connection</h3>
                 <StatsWindowSelect value={days} onChange={setDays} />
               </div>
-              {spokeStatus ? (
-                spokeStatus.connected ? (
-                  <div className="cards">
-                    <Card
-                      label="Channel"
-                      accent
-                      value={
-                        <span className="badge ok">
-                          connected{spokeStatus.hub_name ? ` → ${spokeStatus.hub_name}` : ''}
-                        </span>
-                      }
-                    />
-                    <Card label="Hub version" value={spokeStatus.hub_version || '—'} />
-                  </div>
-                ) : (
-                  <Banner kind="info">
-                    Not connected — the spoke keeps retrying with backoff; check the hub
-                    URL and token above, and that your token is still enabled on the hub.
-                  </Banner>
-                )
-              ) : (
-                <Empty label="No channel state yet." />
-              )}
+              <SpokeConnection status={spokeStatus} />
             </section>
           )}
 
@@ -266,6 +258,35 @@ export default function AdminFederationPage() {
           )}
         </>
       )}
+    </div>
+  );
+}
+
+/** Spoke channel state card: connected pair of cards, a retry hint when
+ *  down, an empty note before the first status arrives. A component with
+ *  early returns instead of a nested ternary in the page body. */
+function SpokeConnection({ status }: { status: FedSettings['spoke'] }) {
+  if (!status) return <Empty label="No channel state yet." />;
+  if (!status.connected) {
+    return (
+      <Banner kind="info">
+        Not connected — the spoke keeps retrying with backoff; check the hub URL and
+        token above, and that your token is still enabled on the hub.
+      </Banner>
+    );
+  }
+  return (
+    <div className="cards">
+      <Card
+        label="Channel"
+        accent
+        value={
+          <span className="badge ok">
+            connected{status.hub_name ? ` → ${status.hub_name}` : ''}
+          </span>
+        }
+      />
+      <Card label="Hub version" value={status.hub_version || '—'} />
     </div>
   );
 }

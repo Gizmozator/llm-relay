@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { FormEvent } from 'react';
-import { api, errMsg } from '../api';
+import { api, errMsg, MIN_PASSWORD_LEN, passwordTooShort } from '../api';
 import { useAuth } from '../auth';
 import { useToast } from './Toast';
 import { Banner, Field, Modal } from './ui';
@@ -45,8 +45,8 @@ export default function AccountModal({ onClose }: { onClose: () => void }) {
   const changePw = async (e: FormEvent) => {
     e.preventDefault();
     setPwError(null);
-    if (newPw.length < 8) {
-      setPwError('New password must be at least 8 characters.');
+    if (passwordTooShort(newPw)) {
+      setPwError(`New password must be at least ${MIN_PASSWORD_LEN} characters.`);
       return;
     }
     if (newPw !== confirmPw) {

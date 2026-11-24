@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
-import type { AdminUser, GroupBy, UsageSummary } from '../api';
+import type { AdminUser, GroupBy, UsageDetail, UsageSummary } from '../api';
 import { daysAgoISO, fmtDateTime, fmtInt, fmtMoney, inNewTokens } from '../format';
 import { useLoad } from '../useLoad';
 import { useToast } from '../components/Toast';
@@ -30,6 +30,10 @@ export default function UsagePage({ admin }: { admin: boolean }) {
 
   useEffect(() => setPage(1), [from, to, userId, groupBy, modelFilter]);
 
+  // ISO dates compare lexicographically: From after To is an empty range.
+  // Rejected up front — no query fires, and the filter bar says why.
+  const rangeInvalid = from !== '' && to !== '' && from > to;
+
   const users = useLoad(
     () => (admin ? api.users().then((r) => r.users) : Promise.resolve([] as AdminUser[])),
     [admin],
@@ -46,15 +50,17 @@ export default function UsagePage({ admin }: { admin: boolean }) {
   // the model filter so the list stays switchable while a model is selected.
   const modelOptions = useLoad(
     () =>
-      api
-        .usageSummary(admin, {
-          from,
-          to,
-          user_id: userId === '' ? undefined : userId,
-          group_by: 'model',
-        })
-        .then((r) => r.groups.map((g) => g.key)),
-    [admin, from, to, userId],
+      rangeInvalid
+        ? Promise.resolve([] as string[])
+        : api
+            .usageSummary(admin, {
+              from,
+              to,
+              user_id: userId === '' ? undefined : userId,
+              group_by: 'model',
+            })
+            .then((r) => r.groups.map((g) => g.key)),
+    [admin, from, to, userId, rangeInvalid],
   );
 
   const modelChoices = useMemo(() => {
@@ -65,22 +71,28 @@ export default function UsagePage({ admin }: { admin: boolean }) {
 
   // Day series drives the totals cards + the cost chart.
   const daySummary = useLoad(
-    () => api.usageSummary(admin, { ...baseQuery, group_by: 'day' }),
-    [admin, from, to, userId, modelFilter],
+    () =>
+      rangeInvalid
+        ? Promise.resolve(null as UsageSummary | null)
+        : api.usageSummary(admin, { ...baseQuery, group_by: 'day' }),
+    [admin, from, to, userId, modelFilter, rangeInvalid],
   );
 
   // Selected grouping drives the breakdown table (skipped when it is "day").
   const groupSummary = useLoad(
     () =>
-      groupBy === 'day'
+      rangeInvalid || groupBy === 'day'
         ? Promise.resolve(null as UsageSummary | null)
         : api.usageSummary(admin, { ...baseQuery, group_by: groupBy }),
-    [admin, from, to, userId, groupBy, modelFilter],
+    [admin, from, to, userId, groupBy, modelFilter, rangeInvalid],
   );
 
   const detail = useLoad(
-    () => api.usageDetail(admin, { ...baseQuery, page, page_size: PAGE_SIZE }),
-    [admin, from, to, userId, modelFilter, page],
+    () =>
+      rangeInvalid
+        ? Promise.resolve(null as UsageDetail | null)
+        : api.usageDetail(admin, { ...baseQuery, page, page_size: PAGE_SIZE }),
+    [admin, from, to, userId, modelFilter, page, rangeInvalid],
   );
 
   const currency = daySummary.data?.currency ?? '';
@@ -109,8 +121,11 @@ export default function UsagePage({ admin }: { admin: boolean }) {
 
   // Surface a load failure as a toast too (the inline banner already shows it),
   // once per message while it persists. The set is per-mount and resets when
-  // the error clears, so a later failure toasts again.
-  const loadError = daySummary.error || groupSummary.error || detail.error;
+  // the error clears, so a later failure toasts again. The user dropdown and
+  // the model choices are loads too: their failure must not be silent (an
+  // empty dropdown would read as "no users/models", not as a broken query).
+  const loadError =
+    daySummary.error || groupSummary.error || detail.error || users.error || modelOptions.error;
   const push = toast.push;
   const seen = useRef(new Set<string>());
   useEffect(() => {
@@ -124,6 +139,12 @@ export default function UsagePage({ admin }: { admin: boolean }) {
   }, [loadError, push]);
 
   const totalPages = detail.data ? Math.max(1, Math.ceil(detail.data.total / PAGE_SIZE)) : 1;
+
+  // A fresh total can be smaller than the page being viewed (range narrowed,
+  // rows deleted): clamp back into range instead of paging an empty window.
+  useEffect(() => {
+    if (detail.data && page > totalPages) setPage(totalPages);
+  }, [detail.data, page, totalPages]);
 
   return (
     <div className="page">
@@ -184,6 +205,10 @@ export default function UsagePage({ admin }: { admin: boolean }) {
           </select>
         </label>
       </div>
+
+      {rangeInvalid && (
+        <Banner>“From” must be on or before “To” — no query runs until the range is valid.</Banner>
+      )}
 
       {daySummary.loading && !daySummary.data ? (
         <Loading />

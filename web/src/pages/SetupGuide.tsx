@@ -76,11 +76,20 @@ export default function SetupGuidePage() {
           <b>spoke</b>, and fill in:
         </p>
         <div className="form-stack">
-          <CopyField
-            label="Hub URL"
-            value={hubUrl}
-            hint="Not configured by the hub admin (PUBLIC_RELAY_URL) — ask the admin for the hub’s base URL."
-          />
+          {/* Gate on the load: while info is in flight (or failed) hubUrl is
+              empty, and the CopyField hint would falsely claim the hub
+              admin left PUBLIC_RELAY_URL unset. */}
+          {info.loading && !info.data ? (
+            <Loading label="Loading hub URL…" />
+          ) : info.error ? (
+            <Banner>Could not load this relay’s URL: {info.error}</Banner>
+          ) : (
+            <CopyField
+              label="Hub URL"
+              value={hubUrl}
+              hint="Not configured by the hub admin (PUBLIC_RELAY_URL) — ask the admin for the hub’s base URL."
+            />
+          )}
         </div>
         <p className="dim">
           and paste your <code className="mono">fed-…</code> token. Save — the

@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
-import { api, errMsg } from '../api';
-import type { Role } from '../api';
+import { api, errMsg, MIN_PASSWORD_LEN, passwordTooShort } from '../api';
+import type { Role, User } from '../api';
 import { fmtDateTime } from '../format';
 import { useLoad } from '../useLoad';
 import { useToast } from '../components/Toast';
@@ -19,10 +19,13 @@ export default function UsersPage() {
   const [role, setRole] = useState<Role>('user');
   const [busy, setBusy] = useState(false);
   const [resetFor, setResetFor] = useState<number | null>(null);
+  // Row actions in flight (per user+action): a second click while a
+  // patch round-trip is running would double-submit.
+  const [pending, setPending] = useState<Record<string, boolean>>({});
 
   const create = async (e: FormEvent) => {
     e.preventDefault();
-    if (!username.trim() || !password) return;
+    if (!username.trim() || passwordTooShort(password)) return;
     setBusy(true);
     try {
       await api.createUser(username.trim(), password, role, displayName.trim() || undefined);
@@ -53,6 +56,20 @@ export default function UsersPage() {
     } catch (e: unknown) {
       toast.push('error', errMsg(e));
       return false;
+    }
+  };
+
+  const toggleDisabled = async (u: User) => {
+    const tag = `dis-${u.id}`;
+    if (pending[tag]) return;
+    setPending((p) => ({ ...p, [tag]: true }));
+    try {
+      await patch(u.id, { disabled: !u.disabled });
+    } finally {
+      setPending((p) => {
+        const { [tag]: _drop, ...rest } = p;
+        return rest;
+      });
     }
   };
 
@@ -88,13 +105,20 @@ export default function UsersPage() {
             onChange={(e) => setPassword(e.target.value)}
           />
         </Field>
+        {password !== '' && passwordTooShort(password) && (
+          <p className="dim">Password must be at least {MIN_PASSWORD_LEN} characters.</p>
+        )}
         <Field label="Role">
           <select className="input" value={role} onChange={(e) => setRole(e.target.value as Role)}>
             <option value="user">user</option>
             <option value="admin">admin</option>
           </select>
         </Field>
-        <button className="btn primary" type="submit" disabled={busy || !username.trim() || !password}>
+        <button
+          className="btn primary"
+          type="submit"
+          disabled={busy || !username.trim() || passwordTooShort(password)}
+        >
           {busy ? 'Creating…' : 'Create user'}
         </button>
       </form>
@@ -102,91 +126,103 @@ export default function UsersPage() {
       <section className="panel">
         {users.loading && !users.data ? (
           <Loading />
-        ) : users.error ? (
-          <Banner>{users.error}</Banner>
         ) : !users.data || users.data.length === 0 ? (
-          <Empty label="No users." />
+          users.error ? (
+            <Banner>{users.error}</Banner>
+          ) : (
+            <Empty label="No users." />
+          )
         ) : (
-          <div className="table-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th>ID</th>
-                  <th>Username</th>
-                  <th>Name</th>
-                  <th>Role</th>
-                  <th className="num">
-                    Multiplier
-                    <div className="th-sub">price ×</div>
-                  </th>
-                  <th>Status</th>
-                  <th>Created</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {users.data.map((u) => {
-                  const isSelf = me?.id === u.id;
-                  return (
-                    <tr key={u.id}>
-                      <td className="num">{u.id}</td>
-                      <td>
-                        {u.username}
-                        {isSelf && <span className="tag">you</span>}
-                      </td>
-                      <td>
-                        <EditableText
-                          value={u.display_name ?? ''}
-                          allowEmpty
-                          placeholder="—"
-                          ariaLabel={`Display name of ${u.username}`}
-                          onCommit={(v) => patch(u.id, { display_name: v })}
-                        />
-                      </td>
-                      <td>
-                        <select
-                          className="input input-inline"
-                          value={u.role}
-                          disabled={isSelf}
-                          onChange={(e) => patch(u.id, { role: e.target.value as Role })}
-                          aria-label={`Role of ${u.username}`}
-                        >
-                          <option value="user">user</option>
-                          <option value="admin">admin</option>
-                        </select>
-                      </td>
-                      <td className="num">
-                        <EditableNumber
-                          display={String(u.price_multiplier ?? 1)}
-                          max={1000}
-                          ariaLabel={`Price multiplier of ${u.username}`}
-                          onCommit={(n) => patch(u.id, { price_multiplier: n })}
-                        />
-                      </td>
-                      <td>
-                        {u.disabled ? (
-                          <span className="badge err">disabled</span>
-                        ) : (
-                          <span className="badge ok">active</span>
-                        )}
-                      </td>
-                      <td className="nowrap">{fmtDateTime(u.created_at)}</td>
-                      <td className="actions">
-                        <button className="btn small" onClick={() => setResetFor(u.id)}>
-                          Reset password
-                        </button>
-                        {!isSelf && (
-                          <button className="btn small" onClick={() => patch(u.id, { disabled: !u.disabled })}>
-                            {u.disabled ? 'Enable' : 'Disable'}
+          <>
+            {/* A failed background refetch must NOT replace the table: the
+                last good rows stay on screen (useLoad retains data) so
+                inline editors mid-edit are not unmounted — the per-cell
+                adopt rule already folds real server changes in by id. */}
+            {users.error && (
+              <Banner>Refresh failed — showing the last loaded values. {users.error}</Banner>
+            )}
+            <div className="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>Username</th>
+                    <th>Name</th>
+                    <th>Role</th>
+                    <th className="num">
+                      Multiplier
+                      <div className="th-sub">price ×</div>
+                    </th>
+                    <th>Status</th>
+                    <th>Created</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {users.data.map((u) => {
+                    const isSelf = me?.id === u.id;
+                    return (
+                      <tr key={u.id}>
+                        <td className="num">{u.id}</td>
+                        <td>
+                          {u.username}
+                          {isSelf && <span className="tag">you</span>}
+                        </td>
+                        <td>
+                          <EditableText
+                            value={u.display_name ?? ''}
+                            allowEmpty
+                            placeholder="—"
+                            ariaLabel={`Display name of ${u.username}`}
+                            onCommit={(v) => patch(u.id, { display_name: v })}
+                          />
+                        </td>
+                        <td>
+                          <RoleSelect
+                            user={u}
+                            disabled={isSelf}
+                            onPatch={(next) => patch(u.id, { role: next })}
+                          />
+                        </td>
+                        <td className="num">
+                          <EditableNumber
+                            display={String(u.price_multiplier ?? 1)}
+                            max={1000}
+                            ariaLabel={`Price multiplier of ${u.username}`}
+                            onCommit={(n) => patch(u.id, { price_multiplier: n })}
+                          />
+                        </td>
+                        <td>
+                          {u.disabled ? (
+                            <span className="badge err">disabled</span>
+                          ) : (
+                            <span className="badge ok">active</span>
+                          )}
+                        </td>
+                        <td className="nowrap">{fmtDateTime(u.created_at)}</td>
+                        <td className="actions">
+                          <button className="btn small" onClick={() => setResetFor(u.id)}>
+                            Reset password
                           </button>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+                          {!isSelf && (
+                            <button
+                              className="btn small"
+                              disabled={Boolean(pending[`dis-${u.id}`])}
+                              onClick={() => toggleDisabled(u)}
+                            >
+                              {pending[`dis-${u.id}`]
+                                ? u.disabled ? 'Enabling…' : 'Disabling…'
+                                : u.disabled ? 'Enable' : 'Disable'}
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </>
         )}
       </section>
 
@@ -201,6 +237,41 @@ export default function UsersPage() {
         />
       )}
     </div>
+  );
+}
+
+/** Role select with revert-on-failure: a plain controlled select keeps the
+ *  rejected choice on screen until some other render happens, so the pick
+ *  lives in local state and snaps back when the PATCH is refused (same
+ *  contract EditableText follows with its boolean return). */
+function RoleSelect({
+  user,
+  disabled,
+  onPatch,
+}: {
+  user: User;
+  disabled: boolean;
+  onPatch: (next: Role) => Promise<boolean>;
+}) {
+  const [val, setVal] = useState<Role>(user.role);
+  useEffect(() => setVal(user.role), [user.role]);
+  return (
+    <select
+      className="input input-inline"
+      value={val}
+      disabled={disabled}
+      onChange={(e) => {
+        const next = e.target.value as Role;
+        setVal(next);
+        void onPatch(next).then((ok) => {
+          if (!ok) setVal(user.role);
+        });
+      }}
+      aria-label={`Role of ${user.username}`}
+    >
+      <option value="user">user</option>
+      <option value="admin">admin</option>
+    </select>
   );
 }
 
@@ -219,7 +290,7 @@ function ResetPasswordModal({
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!password) return;
+    if (passwordTooShort(password)) return;
     setBusy(true);
     setError(null);
     try {
@@ -245,11 +316,18 @@ function ResetPasswordModal({
             onChange={(e) => setPassword(e.target.value)}
           />
         </Field>
+        {password !== '' && passwordTooShort(password) && (
+          <p className="dim">Password must be at least {MIN_PASSWORD_LEN} characters.</p>
+        )}
         <div className="modal-actions">
           <button type="button" className="btn" onClick={onClose}>
             Cancel
           </button>
-          <button type="submit" className="btn primary" disabled={busy || !password}>
+          <button
+            type="submit"
+            className="btn primary"
+            disabled={busy || passwordTooShort(password)}
+          >
             {busy ? 'Saving…' : 'Set password'}
           </button>
         </div>

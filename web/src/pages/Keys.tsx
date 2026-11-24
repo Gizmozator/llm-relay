@@ -36,6 +36,20 @@ export default function KeysPage() {
   const [credType, setCredType] = useState<CredType>('key');
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
+  // Row actions in flight, keyed per action+id: a second click while a
+  // rotate/revoke/delete round-trip is still running would double-submit
+  // (rotate mints a second token, delete 404s noisily).
+  const [pending, setPending] = useState<Record<string, boolean>>({});
+  const begin = (tag: string) => {
+    if (pending[tag]) return false;
+    setPending((p) => ({ ...p, [tag]: true }));
+    return true;
+  };
+  const end = (tag: string) =>
+    setPending((p) => {
+      const { [tag]: _drop, ...rest } = p;
+      return rest;
+    });
   const [shown, setShown] = useState<ShownSecret | null>(null);
   const [copied, setCopied] = useState(false);
 
@@ -72,16 +86,20 @@ export default function KeysPage() {
   };
 
   const revoke = async (id: number) => {
+    if (!begin(`revoke-${id}`)) return;
     try {
       await api.deleteKey(id);
       toast.push('success', 'Key revoked.');
       keys.reload();
     } catch (err: unknown) {
       toast.push('error', errMsg(err));
+    } finally {
+      end(`revoke-${id}`);
     }
   };
 
   const rotatePeer = async (id: number, peerName: string) => {
+    if (!begin(`rotate-${id}`)) return;
     try {
       const r = await api.rotateMyPeer(id);
       setShown({ title: `Token rotated — ${peerName}`, secret: r.token });
@@ -89,16 +107,21 @@ export default function KeysPage() {
       peers.reload();
     } catch (err: unknown) {
       toast.push('error', errMsg(err));
+    } finally {
+      end(`rotate-${id}`);
     }
   };
 
   const deletePeer = async (id: number) => {
+    if (!begin(`delete-${id}`)) return;
     try {
       await api.deleteMyPeer(id);
       toast.push('success', 'Server removed.');
       peers.reload();
     } catch (err: unknown) {
       toast.push('error', errMsg(err));
+    } finally {
+      end(`delete-${id}`);
     }
   };
 
@@ -114,6 +137,16 @@ export default function KeysPage() {
       <div className="page-head">
         <h2>My API keys</h2>
       </div>
+
+      {/* fedRole drives the server-token UI; on failure the conservative
+          default (not a hub) applies, but the operator must know why the
+          federation controls are missing rather than silently misled. */}
+      {fedRole.error && (
+        <Banner>
+          Could not load the federation role ({fedRole.error}) — assuming this relay is
+          not a hub, so server-token controls are hidden.
+        </Banner>
+      )}
 
       <section className="panel">
         <h3>API base URL for your apps</h3>
@@ -199,7 +232,11 @@ export default function KeysPage() {
                     </td>
                     <td className="actions">
                       {!k.revoked_at && (
-                        <ConfirmButton label="Revoke" onConfirm={() => revoke(k.id)} />
+                        <ConfirmButton
+                          label="Revoke"
+                          disabled={Boolean(pending[`revoke-${k.id}`])}
+                          onConfirm={() => revoke(k.id)}
+                        />
                       )}
                     </td>
                   </tr>
@@ -247,10 +284,18 @@ export default function KeysPage() {
                         )}
                       </td>
                       <td className="actions">
-                        <button className="btn small" onClick={() => rotatePeer(p.id, p.name)}>
-                          Rotate token
+                        <button
+                          className="btn small"
+                          disabled={Boolean(pending[`rotate-${p.id}`])}
+                          onClick={() => rotatePeer(p.id, p.name)}
+                        >
+                          {pending[`rotate-${p.id}`] ? 'Rotating…' : 'Rotate token'}
                         </button>
-                        <ConfirmButton label="Delete" onConfirm={() => deletePeer(p.id)} />
+                        <ConfirmButton
+                          label="Delete"
+                          disabled={Boolean(pending[`delete-${p.id}`])}
+                          onConfirm={() => deletePeer(p.id)}
+                        />
                       </td>
                     </tr>
                   ))}

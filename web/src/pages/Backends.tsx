@@ -187,6 +187,10 @@ export default function BackendsPage() {
 
       {syncTarget && (
         <SyncModal
+          // Keyed on the backend id: the modal seeds its probe/checked state
+          // per mount, so a re-render that swaps the target must remount it
+          // rather than carry one backend's checked ids into another.
+          key={syncTarget.id}
           backend={syncTarget}
           catalog={models.data ?? []}
           onClose={() => setSyncTarget(null)}
@@ -235,6 +239,10 @@ function BackendFormModal({
       await onSubmit(name.trim(), baseUrl.trim(), apiKey.trim(), clearKey);
     } catch (err: unknown) {
       setError(errMsg(err));
+    } finally {
+      // Cleared on every path: on success the parent unmounts this modal,
+      // but a handler that keeps it open must not leave the form stuck in
+      // "Saving…".
       setBusy(false);
     }
   };
@@ -355,13 +363,18 @@ function SyncModal({
     const ids = [...checked];
     if (ids.length === 0) return;
     setAdding(true);
+    let res: Awaited<ReturnType<typeof api.addBackendModels>>;
     try {
-      const res = await api.addBackendModels(backend.id, ids);
-      onAdded(res.created.length, res.skipped ?? []);
+      res = await api.addBackendModels(backend.id, ids);
     } catch (e: unknown) {
       setError(errMsg(e));
       setAdding(false);
+      return;
     }
+    // OUTSIDE the try: the add succeeded, so a throw from the parent's
+    // handler must not surface as an add-failure banner (and re-arm the
+    // button for a duplicate submit).
+    onAdded(res.created.length, res.skipped ?? []);
   };
 
   const newCount = discovered.filter((m) => !m.in_catalog).length;

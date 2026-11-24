@@ -468,6 +468,14 @@ export function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+/** Server-side password rule (internal/api: create user, reset, change
+ *  own password): at least 8 characters. Shared so every form rejects the
+ *  same way before a round-trip. */
+export const MIN_PASSWORD_LEN = 8;
+export function passwordTooShort(pw: string): boolean {
+  return pw.length < MIN_PASSWORD_LEN;
+}
+
 // ---------- session storage ----------
 
 const TOKEN_KEY = 'llmrel…oken';

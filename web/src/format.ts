@@ -29,9 +29,11 @@ export function fmtMoney(micro: number, currency: string): string {
   return currency ? `${s} ${currency}` : s;
 }
 
-/** Micro-units per 1M tokens → plain number string for price inputs. */
+/** Micro-units per 1M tokens → plain number string for price inputs.
+ * Fixed notation only: String() switches to exponential below 1e-6
+ * (0.5 micro → "5e-7"), which the price inputs would choke on. */
 export function microToPerM(micro: number): string {
-  return String(micro / 1e6);
+  return (micro / 1e6).toFixed(10).replace(/\.?0+$/, '');
 }
 
 export function fmtDateTime(iso: string | null | undefined): string {

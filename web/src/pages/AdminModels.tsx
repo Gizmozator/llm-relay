@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { api, errMsg, FED_VISIBILITIES, isSyntheticBackendUrl, VISIBILITIES } from '../api';
 import type { CatalogModel, FedVisibility, GroupPatch, ModelGroup, ModelPatch, Visibility } from '../api';
@@ -704,15 +704,26 @@ function PriceCalcModal({
   const parsed = PRICE_KEYS.map((k) => parseFloat(prices[k]));
   const pricesValid = parsed.every((v) => Number.isFinite(v) && v >= 0);
   const [busy, setBusy] = useState(false);
+  const toast = useToast();
 
   const apply = async () => {
     setBusy(true);
     try {
-      localStorage.setItem(CALC_LS_KEY, JSON.stringify(inp));
+      try {
+        localStorage.setItem(CALC_LS_KEY, JSON.stringify(inp));
+      } catch (e: unknown) {
+        // Quota/private-mode storage failure: worth a note, but the price
+        // commit below must still run.
+        toast.push('error', `Could not remember calculator inputs: ${errMsg(e)}`);
+      }
       const [price_in, price_out, price_cache_read, price_cache_write] = parsed.map((v) =>
         Math.round(v * 1e6),
       );
       await onApply({ price_in, price_out, price_cache_read, price_cache_write });
+    } catch (e: unknown) {
+      // setItem or onApply rejecting must not vanish as an unhandled
+      // rejection behind `void apply()` — the operator needs to see it.
+      toast.push('error', errMsg(e));
     } finally {
       setBusy(false);
     }
@@ -932,16 +943,30 @@ function GroupMembersModal({
   const [members, setMembers] = useState<{ model_id: number; weight: string }[]>(
     () => seedMembers(group),
   );
-  // Re-seed whenever the group object changes (a groups.reload() hands in a
-  // fresh object): the PATCH is a full replace, so a draft seeded from a
-  // stale copy could commit members that no longer exist. The modal overlay
-  // blocks NEW reload triggers, but a groups.reload() fired just BEFORE the
-  // modal opened can still land here — the re-seed is what keeps that late
-  // refresh from leaving a stale draft behind (same adopt-external-updates
-  // rule EditableText follows).
+  // Re-seed rules (the PATCH is a full replace, so a draft seeded from a
+  // stale copy could commit members that no longer exist):
+  //  - a DIFFERENT group id always reseeds (the editor moved to another
+  //    group);
+  //  - the SAME group arriving as a fresh object from a late-landing
+  //    groups.reload() (one fired just BEFORE the modal opened) reseeds
+  //    only while the draft is UNTOUCHED. Keyed on the group id plus a
+  //    touched flag, not object identity: identity alone would discard an
+  //    in-progress member/weight draft on any reload of the same group.
+  const touched = useRef(false);
+  const seededId = useRef(group.id);
   useEffect(() => {
-    setMembers(seedMembers(group));
+    if (group.id !== seededId.current) {
+      seededId.current = group.id;
+      touched.current = false;
+    }
+    if (!touched.current) setMembers(seedMembers(group));
   }, [group]);
+  // Every draft mutation goes through here so the re-seed above knows the
+  // operator is mid-edit.
+  const mutate = (next: { model_id: number; weight: string }[]) => {
+    touched.current = true;
+    setMembers(next);
+  };
   const [addId, setAddId] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -970,7 +995,7 @@ function GroupMembersModal({
 
   const add = () => {
     if (!addId) return;
-    setMembers([...members, { model_id: Number(addId), weight: '' }]);
+    mutate([...members, { model_id: Number(addId), weight: '' }]);
     setAddId('');
   };
 
@@ -979,7 +1004,7 @@ function GroupMembersModal({
   const move = (from: number, to: number) => {
     const next = [...members];
     [next[from], next[to]] = [next[to], next[from]];
-    setMembers(next);
+    mutate(next);
   };
 
   // Health hints with the shared wording (memberHealthTags), from the
@@ -1105,7 +1130,7 @@ function GroupMembersModal({
                           value={mem.weight}
                           aria-label={`Weight of ${label(mem.model_id)}`}
                           onChange={(e) =>
-                            setMembers(members.map((x, j) => (j === i ? { ...x, weight: e.target.value } : x)))
+                            mutate(members.map((x, j) => (j === i ? { ...x, weight: e.target.value } : x)))
                           }
                         />
                       </td>
@@ -1133,7 +1158,7 @@ function GroupMembersModal({
                         <button
                           type="button"
                           className="btn small"
-                          onClick={() => setMembers(members.filter((_, j) => j !== i))}
+                          onClick={() => mutate(members.filter((_, j) => j !== i))}
                         >
                           Remove
                         </button>

@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
   api,
+  ApiError,
   clearSession,
   getToken,
   loadStoredUser,
@@ -38,9 +39,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         saveSession({ token: getToken() ?? '', user: u });
         setUser(u);
       })
-      .catch(() => {
-        clearSession();
-        setUser(null);
+      .catch((e: unknown) => {
+        // Only an auth rejection means the token is dead. A network blip
+        // or a 5xx must NOT wipe a valid session — the user would be
+        // logged out by a server hiccup.
+        if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
+          clearSession();
+          setUser(null);
+        } else {
+          console.error('session revalidation failed (keeping session):', e);
+        }
       })
       .finally(() => setReady(true));
   }, []);

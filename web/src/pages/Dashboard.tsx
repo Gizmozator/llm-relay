@@ -60,7 +60,10 @@ const METRIC_OPTIONS: { value: Metric; label: string }[] = [
 function groupConnections(rows: LiveConnection[]): LiveConnection[][] {
   const map = new Map<string, LiveConnection[]>();
   for (const c of rows) {
-    const k = [c.user, c.key, c.model, c.endpoint, c.session ?? '', c.ip ?? ''].join('|');
+    // NUL separator (see keyTwin): usernames, key names and session ids are
+    // free text — a '|' join could alias across fields ("a|b" + "c" vs
+    // "a" + "b|c") and merge two different sessions into one row.
+    const k = [c.user, c.key, c.model, c.endpoint, c.session ?? '', c.ip ?? ''].join('\u0000');
     const g = map.get(k);
     if (g) g.push(c);
     else map.set(k, [c]);
@@ -82,8 +85,13 @@ export default function DashboardPage() {
 
   useEffect(() => {
     let stopped = false;
+    // One request at a time: a slow /api/live (large catalog, cold cache)
+    // must not let ticks pile up — overlapping responses can land out of
+    // order and flash stale data.
+    let inflight = false;
     const tick = () => {
-      if (document.hidden) return;
+      if (document.hidden || inflight) return;
+      inflight = true;
       api
         .live(Boolean(admin), WINDOW_MIN)
         .then((d) => {
@@ -94,6 +102,9 @@ export default function DashboardPage() {
         })
         .catch((e: unknown) => {
           if (!stopped) setError(errMsg(e));
+        })
+        .finally(() => {
+          inflight = false;
         });
     };
     tick();
