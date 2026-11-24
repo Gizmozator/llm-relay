@@ -43,11 +43,18 @@ export default function UsagePage({ admin }: { admin: boolean }) {
     [admin],
   );
 
+  // Viewer's minutes east of UTC (JS getTimezoneOffset is west-positive).
+  // Sent on every request the page makes so all of them share one window:
+  // day buckets split at the viewer's local midnight and the from/to bounds
+  // are their local dates, so cards, chart, breakdown and detail agree.
+  const tzOffset = -new Date().getTimezoneOffset();
+
   const baseQuery = {
     from,
     to,
     user_id: userId === '' ? undefined : userId,
     model: modelFilter || undefined,
+    tz_offset: tzOffset,
   };
 
   // Dropdown options: exactly the models used in range. Always fetched WITHOUT
@@ -61,10 +68,11 @@ export default function UsagePage({ admin }: { admin: boolean }) {
               from,
               to,
               user_id: userId === '' ? undefined : userId,
+              tz_offset: tzOffset,
               group_by: 'model',
             })
             .then((r) => r.groups.map((g) => g.key)),
-    [admin, from, to, userId, rangeInvalid],
+    [admin, from, to, userId, tzOffset, rangeInvalid],
   );
 
   const modelChoices = useMemo(() => {
@@ -73,17 +81,12 @@ export default function UsagePage({ admin }: { admin: boolean }) {
     return keys;
   }, [modelOptions.data, modelFilter]);
 
-  // Viewer's minutes east of UTC (JS getTimezoneOffset is west-positive).
-  // Sent on the by-day summary so day buckets split at the viewer's local
-  // midnight; the day keys come back as plain local-date strings.
-  const tzOffset = -new Date().getTimezoneOffset();
-
   // Day series drives the totals cards + the by-day chart.
   const daySummary = useLoad(
     () =>
       rangeInvalid
         ? Promise.resolve(null as UsageSummary | null)
-        : api.usageSummary(admin, { ...baseQuery, group_by: 'day', tz_offset: tzOffset }),
+        : api.usageSummary(admin, { ...baseQuery, group_by: 'day' }),
     [admin, from, to, userId, modelFilter, rangeInvalid, tzOffset],
   );
 
