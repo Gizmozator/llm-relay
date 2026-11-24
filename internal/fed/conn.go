@@ -63,6 +63,11 @@ type Options struct {
 	Log *log.Logger
 }
 
+// WithDefaults returns a copy with zero fields filled with the production
+// defaults (exported for the remote-backend registry, which reuses this
+// Options struct for its channels).
+func (o *Options) WithDefaults() Options { return o.withDefaults() }
+
 func (o *Options) withDefaults() Options {
 	d := *o
 	if d.PingInterval == 0 {

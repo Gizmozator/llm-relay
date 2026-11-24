@@ -44,6 +44,12 @@ func (s *Server) healthStatus() *proxy.HealthCache {
 		if s.Fed != nil {
 			s.health.Synthetic = s.Fed.SyntheticOnline
 		}
+		// Remote backends likewise: the live connector channel IS the
+		// health, so the Backends/live pages read the registry instead of
+		// dialing a URL that does not exist (which would read online).
+		if s.Remote != nil {
+			s.health.Remote = s.Remote.BackendOnline
+		}
 	})
 	return s.health
 }

@@ -3,13 +3,15 @@ import { api } from '../api';
 import { useAuth } from '../auth';
 import { useLoad } from '../useLoad';
 import { Banner, CodeBlock, CopyField, Loading } from '../components/ui';
-// Canonical spoke templates: the dashboard shows (and lets you copy) the very
-// files that ship in deploy/headless-spoke/, imported at build time so the
-// page can never drift from them — edit the file, rebuild the web, it updates.
-import composeRaw from '../../../deploy/headless-spoke/docker-compose.yml?raw';
-import spokeEnvRaw from '../../../deploy/headless-spoke/.env.example?raw';
+// Canonical connector templates: the dashboard shows (and lets you copy) the
+// very files that ship in deploy/remote-backend/, imported at build time so
+// the page can never drift from them — edit the file, rebuild the web, it
+// updates.
+import composeRaw from '../../../deploy/remote-backend/docker-compose.yml?raw';
+import connectorEnvRaw from '../../../deploy/remote-backend/.env.example?raw';
 // The full-server pair (dashboard + admin), same build-time import, for a
-// machine that has no relay yet and wants the whole thing rather than headless.
+// machine that has no relay yet and wants the whole thing rather than a
+// bare connector.
 import fullComposeRaw from '../../../deploy/full-server/docker-compose.yml?raw';
 import fullEnvRaw from '../../../deploy/full-server/.env.example?raw';
 
@@ -25,12 +27,13 @@ export default function SetupGuidePage() {
   // The spoke dials {hub_url}/federation/v1/connect, so what goes into its
   // config is this relay's base URL — no path.
   const hubUrl = (info.data?.relay_url ?? '').replace(/\/+$/, '');
-  // The shipped .env.example carries a placeholder hub; when this hub advertises
-  // its own URL (PUBLIC_RELAY_URL), fill it into the copyable env so the file
-  // works as-is. Everything else is copied verbatim from the repo file.
-  const spokeEnv = hubUrl
-    ? spokeEnvRaw.replace(/^HUB_URL=.*$/m, () => `HUB_URL=${hubUrl}`)
-    : spokeEnvRaw;
+  // The shipped .env.example carries a placeholder relay; when this hub
+  // advertises its own URL (PUBLIC_RELAY_URL), fill it into the copyable env
+  // so the file works as-is. Everything else is copied verbatim from the repo
+  // file.
+  const connectorEnv = hubUrl
+    ? connectorEnvRaw.replace(/^RELAY_URL=.*$/m, () => `RELAY_URL=${hubUrl}`)
+    : connectorEnvRaw;
 
   if (role.loading && !role.data) return <Loading />;
   if (role.error) return <Banner>Could not load federation role: {role.error}</Banner>;
@@ -138,23 +141,24 @@ export default function SetupGuidePage() {
       </section>
 
       <section className="panel">
-        <h3>Or: run a headless spoke (one model, no dashboard)</h3>
+        <h3>Or: connect a bare engine box (no relay, no dashboard)</h3>
         <p className="dim">
-          If that machine does not run a relay yet and you only want to share a
-          single model, skip the dashboard entirely. Put these two files next to
-          each other, fill in your engine and the <code className="mono">fed-…</code>{' '}
-          token from step 1, then <code className="mono">docker compose up -d</code>.
-          The box boots already pointed at this hub and shares its one model
-          automatically; the admin dashboard stays closed and only the relay
-          port is exposed.
+          If that machine does not run a relay yet and you only want to expose a
+          single engine to <b>this</b> relay: have an admin create a{' '}
+          <b>remote backend</b> on the <Link to="/admin/backends">Backends</Link>{' '}
+          page — the <code className="mono">rb-…</code> connect token is shown
+          once. Put these two files next to each other, fill in the engine and
+          that token, then <code className="mono">docker compose up -d</code>.
+          The box dials in over one outbound channel (no inbound ports), shows up
+          as a backend here, and its models arrive via <b>Sync models</b>.
         </p>
         <CodeBlock title="docker-compose.yml" text={composeRaw} />
-        <CodeBlock title=".env" text={spokeEnv} />
+        <CodeBlock title=".env" text={connectorEnv} />
         {!hubUrl && (
           <p className="dim">
             The hub admin has not set <code className="mono">PUBLIC_RELAY_URL</code>,
-            so <code className="mono">HUB_URL</code> above is still the example
-            host — replace it with this hub’s relay URL before starting.
+            so <code className="mono">RELAY_URL</code> above is still the example
+            host — replace it with this relay’s URL before starting.
           </p>
         )}
       </section>

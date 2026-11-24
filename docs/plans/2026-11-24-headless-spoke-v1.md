@@ -4,7 +4,8 @@
 - **Owner:** maintainer
 - **Started:** 2026-11-24
 - **Issue:** #11
-- **Supersedes / superseded by:** —
+- **Supersedes / superseded by:** superseded by `2026-11-24-remote-backend-v1.md`
+  (its env-bootstrap headless mode was removed by that plan)
 
 ## Goal
 

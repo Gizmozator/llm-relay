@@ -370,16 +370,6 @@ func BackendByID(db *sql.DB, id int64) (*Backend, error) {
 	return b, err
 }
 
-// BackendByName resolves a backend by its unique name (the headless
-// bootstrap's idempotent upsert key). ErrNotFound when absent.
-func BackendByName(db *sql.DB, name string) (*Backend, error) {
-	b, err := scanBackend(db.QueryRow(`SELECT `+backendCols+` FROM backends WHERE name=?`, name))
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotFound
-	}
-	return b, err
-}
-
 func ListBackends(db *sql.DB) ([]Backend, error) {
 	rows, err := db.Query(`SELECT ` + backendCols + `,
 		(SELECT COUNT(*) FROM models m WHERE m.backend_id = backends.id)

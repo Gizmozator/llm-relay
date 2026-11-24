@@ -28,11 +28,20 @@ type Server struct {
 	Flight FlightSource
 	// Fed drives the federation channel (nil = federation endpoints 404).
 	Fed FedController
+	// Remote drives remote-backend connections (nil = connect 404s and
+	// remote probes report not wired).
+	Remote RemoteController
 
 	loginLimit *loginLimiter
 	limitOnce  sync.Once
-	health     *proxy.HealthCache
-	healthOnce sync.Once
+	// connectLimit guards the remote-backend connect endpoint (token
+	// guessing costs a DB query per attempt). Separate bucket space from
+	// login: a connector flapping on the relay port must not lock out
+	// dashboard logins from the same address.
+	connectLimit *loginLimiter
+	connectOnce  sync.Once
+	health       *proxy.HealthCache
+	healthOnce   sync.Once
 }
 
 // limiter returns the lazily created login limiter (Server is built as a
@@ -40,6 +49,12 @@ type Server struct {
 func (s *Server) limiter() *loginLimiter {
 	s.limitOnce.Do(func() { s.loginLimit = newLoginLimiter() })
 	return s.loginLimit
+}
+
+// connectLimiter returns the lazily created connect-endpoint limiter.
+func (s *Server) connectLimiter() *loginLimiter {
+	s.connectOnce.Do(func() { s.connectLimit = newLoginLimiter() })
+	return s.connectLimit
 }
 
 // ---------------------------------------------------------------- plumbing

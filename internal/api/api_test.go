@@ -18,6 +18,7 @@ import (
 	"llm-relay/internal/auth"
 	"llm-relay/internal/db"
 	"llm-relay/internal/fed"
+	"llm-relay/internal/remote"
 	"llm-relay/internal/store"
 )
 
@@ -96,6 +97,15 @@ func newTestEnv(t *testing.T, upstream http.Handler) *testEnv {
 	t.Cleanup(fedMgr.Close)
 	s.Fed = fedMgr
 	mux.Handle("GET /federation/v1/connect", s.PeerAuth(s.FederationConnect))
+	// Remote backends (plan 2026-11-24-remote-backend-v1): the real registry
+	// behind the same RemoteAuth + route wiring main.go uses. Tests that do
+	// not dial a connector simply see every remote backend offline.
+	remoteReg := remote.NewRegistry(d, nil, "test-relay", "test")
+	t.Cleanup(func() { remoteReg.CloseAll("test teardown") })
+	s.Remote = remoteReg
+	mux.Handle("GET /remote/v1/connect", s.RemoteAuth(s.RemoteConnect))
+	mux.Handle("POST /api/admin/backends/remote", s.Admin(s.AdminCreateRemoteBackend))
+	mux.Handle("POST /api/admin/backends/{id}/remote/rotate", s.Admin(s.AdminRotateRemoteToken))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return &testEnv{db: d, srv: srv}

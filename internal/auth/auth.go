@@ -52,6 +52,20 @@ func GenerateServerToken() (plain, hash string, err error) {
 	return plain, HashKey(plain), nil
 }
 
+// GenerateRemoteToken returns a fresh remote-backend connect token
+// ("rb-" + 40 hex chars) and its SHA-256 hex digest. Only the hash is ever
+// stored; the raw token is shown once at create/rotate. The prefix keeps the
+// surfaces self-describing: sk- → /v1/*, fed- → /federation/*, rb- →
+// /remote/v1/*.
+func GenerateRemoteToken() (plain, hash string, err error) {
+	buf := make([]byte, 20)
+	if _, err = rand.Read(buf); err != nil {
+		return "", "", fmt.Errorf("token rand: %w", err)
+	}
+	plain = "rb-" + hex.EncodeToString(buf)
+	return plain, HashKey(plain), nil
+}
+
 // HashKey returns the SHA-256 hex digest of an API key.
 func HashKey(key string) string {
 	sum := sha256.Sum256([]byte(key))

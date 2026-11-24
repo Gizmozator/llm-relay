@@ -187,40 +187,39 @@ shown once, rotatable, and disabling a peer drops its live channel at once.
 Spoke-local usernames never leave the spoke — the hub stamps its own identity
 onto forwarded traffic and is the attribution authority for the ledger.
 
-## Headless spoke
+## Remote backends
 
-**Headless spoke** = "I have one local model on one machine and want to add
-it to a federation": pure env config, no dashboard interaction, exactly one
-model, restart to change anything. **Full relay server** = everything beyond
-that: several models/machines, pricing per model, users/keys, the dashboard.
-If you want to add a single local model, run headless; for more models or
-options, run the full server and use the dashboard.
+A **remote backend** is an engine on another machine — typically behind NAT —
+that dials **into** this relay over a WebSocket and then behaves like any
+other backend on the Backends page: probeable, group-eligible, routable.
+No inbound ports on the remote box, and it works on any relay role
+(standalone, hub or spoke).
 
-With `HEADLESS=true` the relay boots fully configured by env: it creates (or
-re-applies) one backend, one shared model and the spoke federation settings,
-then the ordinary federation machinery dials the hub and shares the model.
-The dashboard + admin API listener stays **closed** — there is no operator to
-log in, so the admin port is never bound (the relay port still serves `/v1/*`
-and the federation tunnel). Every boot re-applies the env over the stored
-rows, so changing anything means editing the env and restarting.
+Flow: an admin clicks **+ Remote backend** on the Backends page and gets a
+one-time connect token (`rb-…`). The remote box runs the same `llm-relay`
+binary in connector mode (`HEADLESS=true`) and dials
+`<RELAY_URL>/remote/v1/connect`. From then on every request the relay routes
+to that backend — including **Probe / Sync models** — travels over the
+connection. Health = the live connection: when it drops the backend reads
+offline and traffic fails over like a refused socket; the connector redials
+on its own.
 
 | var | default | meaning |
 |---|---|---|
-| `HEADLESS` | `false` | enable the env bootstrap; when true the four vars below are **required** (missing = boot error) |
-| `BACKEND_URL` | — **required** | server root of the upstream OpenAI-compatible server |
-| `MODEL_NAME` | — **required** | the upstream model id this backend serves — the relay's entire catalog |
-| `HUB_URL` | — **required** | the hub's relay URL (the spoke dials out to it) |
-| `HUB_TOKEN` | — **required** | the `fed-…` server token minted on the hub |
-| `BACKEND_TOKEN` | — | bearer token for the backend (optional) |
-| `PRICE_IN` / `PRICE_OUT` / `PRICE_CACHE_READ` / `PRICE_CACHE_WRITE` | `0` | price in integer micro-units per 1M tokens (0 = free) |
+| `HEADLESS` | `false` | connector mode: binds nothing, owns no state; when true the three vars below are **required** (missing = boot error) |
+| `RELAY_URL` | — **required** | the relay to dial in to (server root) |
+| `RELAY_TOKEN` | — **required** | the `rb-…` connect token minted on the Backends page |
+| `ENGINE_URL` | — **required** | the local OpenAI-compatible engine to expose |
+| `ENGINE_TOKEN` | — | bearer token for the engine (optional) |
 
-Ready-made copies live in `deploy/headless-spoke/` (`docker-compose.yml` +
-`.env.example`), and a hub shows both on its **Connect your server** page ready
-to copy with `HUB_URL` pre-filled. A headless box needs no `JWT_SECRET` — it
-never serves the dashboard — and only exposes the relay port.
+One connector = one engine; run one connector per engine. The connector
+serves only `/v1/*` and `/health` to the relay — the tunnel never becomes a
+proxy into the box's network. A connector box needs no `JWT_SECRET` (it
+serves no dashboard) and binds no ports. Rotating the token on the Backends
+page drops the live connection immediately; so do disable and delete.
 
-Bring-up steps, how to verify on the hub and common failures:
-`docs/workflows/headless-spoke.md`.
+Ready-made copies live in `deploy/remote-backend/`. Bring-up steps, how to
+verify on the relay and common failures: `docs/workflows/remote-backend.md`.
 
 ## Supported upstream dialects
 
@@ -284,11 +283,11 @@ Environment (or `.env`, see `.env.example`):
 | `PORT` / `LISTEN_ADDR` | `8080` | relay API port (host mapping) |
 | `ADMIN_PORT` / `ADMIN_ADDR` | `8081` | dashboard + `/api/*` port |
 | `DB_PATH` | `/data/llm-relay.db` | SQLite file (parent dir auto-created) |
-| `JWT_SECRET` | — **required** | dashboard JWT signing key (≥32 chars, HS256 floor; `openssl rand -hex 32`); **not needed when `HEADLESS=true`** — no dashboard to sign into |
+| `JWT_SECRET` | — **required** | dashboard JWT signing key (≥32 chars, HS256 floor; `openssl rand -hex 32`); **not needed when `HEADLESS=true`** — a connector has no dashboard to sign into |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | — | bootstrap admin, first run on empty DB only |
 | `TRUST_PROXY_HEADERS` | `false` | trust `X-Forwarded-For` on the relay port (set behind a reverse proxy); the login rate limiter always keys on the peer address |
 | `PUBLIC_RELAY_URL` / `PUBLIC_DASHBOARD_URL` | — | URLs shown in the dashboard copy buttons and interpolated into the agent guide; **include the scheme**, and a hostname or a plain IP:port both work (LAN hosting: `http://192.0.2.10:8080`); relay is the **root** (no `/v1` — the dashboard appends `/v1` for the OpenAI base) |
-| `HEADLESS` (+ `BACKEND_URL`/`MODEL_NAME`/`HUB_URL`/`HUB_TOKEN`/`BACKEND_TOKEN`/`PRICE_*`) | `false` | env-only bootstrap of a single-model spoke — see **Headless spoke** |
+| `HEADLESS` (+ `RELAY_URL`/`RELAY_TOKEN`/`ENGINE_URL`/`ENGINE_TOKEN`) | `false` | remote-backend connector: dial in to a relay and expose a local engine — see **Remote backends** |
 | `TZ` | `Europe/Helsinki` | timezone |
 
 ## Deployment
@@ -323,11 +322,11 @@ llm-relay
 ├── internal/pricing       cost snapshots (integer micro-units)
 ├── internal/usage         buffered usage recorder
 ├── internal/proxy         dialect forwarder, SSE scanning, backend discovery
-├── internal/headless      headless-spoke bootstrap: env → backend+model+fed settings
+├── internal/remote        remote backends: server registry + headless connector
 ├── internal/api           dashboard JSON API (user + admin)
 ├── web/                   Vite + React + Chart.js dashboard (embedded via go:embed)
 ├── scripts/               manual tools: federation e2e (two relays + mock engines)
-├── deploy/                sample container-compose stacks (incl. headless-spoke/)
+├── deploy/                sample container-compose stacks (incl. remote-backend/)
 ├── docs/
 │   ├── api-contract.md    authoritative HTTP API contract
 │   ├── screenshots/       dashboard screenshots (shown in README)

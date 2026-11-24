@@ -40,6 +40,10 @@ type HealthCache struct {
 	// healthy). nil = treat synthetic backends as online (materialization
 	// already disables the backend when its channel dies).
 	Synthetic func(b store.Backend) bool
+	// Remote answers the same question for remote:// backends (a NATted
+	// box behind a WebSocket channel): the remote.Registry wires it, and
+	// online = live channel. nil = treat them as online.
+	Remote func(b store.Backend) bool
 }
 
 func NewHealthCache() *HealthCache {
@@ -74,6 +78,17 @@ func (hc *HealthCache) Status(ctx context.Context, backends []store.Backend) map
 			e = HealthEntry{Online: online, At: time.Now()}
 			if !online {
 				e.Err = "federation channel offline"
+			}
+		case isRemoteURL(b.BaseURL):
+			// A remote backend has no dialable endpoint either (it dials
+			// US): the live WebSocket channel is the health.
+			online := true
+			if hc.Remote != nil {
+				online = hc.Remote(b)
+			}
+			e = HealthEntry{Online: online, At: time.Now()}
+			if !online {
+				e.Err = "remote backend not connected"
 			}
 		case fresh:
 			// cached result stands

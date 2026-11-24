@@ -128,7 +128,7 @@ func (w *servedWriter) Header() http.Header {
 func (w *servedWriter) WriteHeader(code int) {
 	w.once.Do(func() {
 		if err := w.send(&Res{T: TRes, ID: w.id, Status: code,
-			Headers: responseHeaders(w.header)}); err != nil {
+			Headers: ResponseHeaders(w.header)}); err != nil {
 			w.bad = true
 		}
 	})
@@ -262,10 +262,10 @@ func (m *Manager) serveFrame(c *Conn, peer *store.Peer, origin int64, req *Req) 
 		return
 	}
 	// Peer-supplied headers go through the receiver-side filter (see
-	// wireRequestHeader): they are applied verbatim otherwise, and a
+	// WireRequestHeader): they are applied verbatim otherwise, and a
 	// malicious peer could smuggle framing or inject credentials into the
 	// local pipeline with them.
-	httpReq.Header = wireRequestHeader(req.Headers)
+	httpReq.Header = WireRequestHeader(req.Headers)
 	if httpReq.Header.Get("Content-Type") == "" && len(req.Body) > 0 {
 		httpReq.Header.Set("Content-Type", "application/json")
 	}

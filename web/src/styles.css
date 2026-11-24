@@ -172,6 +172,11 @@ a {
   margin: 0;
 }
 
+.page-head-actions {
+  display: flex;
+  gap: 8px;
+}
+
 /* ---------- panels & cards ---------- */
 
 .panel {
@@ -603,6 +608,15 @@ tr.sub-row > td {
   margin-left: 6px;
 }
 
+/* Remote backend marker: a NATted box that dials in over the remote
+   channel. Teal — distinct from the federation violet. */
+.badge.remote {
+  color: #2dd4bf;
+  border-color: rgba(45, 212, 191, 0.45);
+  background: rgba(45, 212, 191, 0.1);
+  margin-left: 6px;
+}
+
 /* Peer allowlist picker in the model metrics row: compact, sits where an
    inline editor would. */
 .fed-peer-select {
@@ -690,6 +704,16 @@ tr.sub-row > td {
 }
 
 /* ---------- banners, loading, empty ---------- */
+
+.token-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.token-row .input {
+  flex: 1;
+}
 
 .banner {
   border-radius: 6px;

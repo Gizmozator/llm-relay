@@ -45,6 +45,10 @@ type Handler struct {
 	// Fed tunnels peer:// and hub:// backends through a federation channel
 	// (nil = standalone: synthetic schemes fail as unroutable).
 	Fed FedTransport
+	// Remote tunnels remote:// backends through the remote-backend
+	// registry's WebSocket channels (nil = no remote surface: the scheme
+	// fails as unroutable).
+	Remote RemoteTransport
 	// RelayURL is the public relay ROOT (PUBLIC_RELAY_URL, no /v1),
 	// used to render the agent guide. Empty renders the placeholder as-is.
 	RelayURL string

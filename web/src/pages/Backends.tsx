@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { FormEvent } from 'react';
-import { api, errMsg, isSyntheticBackendUrl } from '../api';
+import { api, errMsg, isRemoteBackendUrl, isSyntheticBackendUrl } from '../api';
 import type { Backend, CatalogModel, ProbeResult } from '../api';
 import { fmtDateTime } from '../format';
 import { useLoad } from '../useLoad';
@@ -22,7 +22,9 @@ export default function BackendsPage() {
   }, [backends.reload]);
 
   const [showAdd, setShowAdd] = useState(false);
+  const [showAddRemote, setShowAddRemote] = useState(false);
   const [editTarget, setEditTarget] = useState<Backend | null>(null);
+  const [remoteEditTarget, setRemoteEditTarget] = useState<Backend | null>(null);
   const [syncTarget, setSyncTarget] = useState<Backend | null>(null);
 
   const patch = async (id: number, p: { enabled?: boolean; draining?: boolean }) => {
@@ -52,9 +54,14 @@ export default function BackendsPage() {
     <div className="page">
       <div className="page-head">
         <h2>Backends</h2>
-        <button className="btn primary" onClick={() => setShowAdd(true)}>
-          + Add backend
-        </button>
+        <div className="page-head-actions">
+          <button className="btn" onClick={() => setShowAddRemote(true)}>
+            + Remote backend
+          </button>
+          <button className="btn primary" onClick={() => setShowAdd(true)}>
+            + Add backend
+          </button>
+        </div>
       </div>
 
       {backends.loading && !backends.data ? (
@@ -87,6 +94,10 @@ export default function BackendsPage() {
                     // health IS the channel (no HTTP to probe), and their
                     // rows are owned by the catalog sync, not by sync/edit.
                     const fed = isSyntheticBackendUrl(b.base_url);
+                    // Remote backends: health is the live WS channel, the
+                    // probe rides the tunnel, and Edit means rename + token
+                    // rotate (there is no base_url to point anywhere).
+                    const remote = isRemoteBackendUrl(b.base_url);
                     return (
                     <tr key={b.id}>
                       <td>
@@ -94,6 +105,11 @@ export default function BackendsPage() {
                         {fed && (
                           <span className="badge fed" title="Materialized by federation — health is the peer channel">
                             federation
+                          </span>
+                        )}
+                        {remote && (
+                          <span className="badge remote" title="Remote backend — dials in over the remote channel; health is the live connection">
+                            remote
                           </span>
                         )}
                       </td>
@@ -135,7 +151,7 @@ export default function BackendsPage() {
                             <button className="btn small" onClick={() => setSyncTarget(b)}>
                               Sync models
                             </button>
-                            <button className="btn small" onClick={() => setEditTarget(b)}>
+                            <button className="btn small" onClick={() => (remote ? setRemoteEditTarget(b) : setEditTarget(b))}>
                               Edit
                             </button>
                             <ConfirmButton label="Delete" onConfirm={() => remove(b.id)} />
@@ -160,6 +176,27 @@ export default function BackendsPage() {
             await api.createBackend(name, base_url, api_key || undefined);
             toast.push('success', 'Backend added.');
             setShowAdd(false);
+            backends.reload();
+          }}
+        />
+      )}
+
+      {showAddRemote && (
+        <RemoteCreateModal
+          onClose={() => setShowAddRemote(false)}
+          onCreated={() => {
+            setShowAddRemote(false);
+            backends.reload();
+          }}
+        />
+      )}
+
+      {remoteEditTarget && (
+        <RemoteEditModal
+          backend={remoteEditTarget}
+          onClose={() => setRemoteEditTarget(null)}
+          onRenamed={() => {
+            setRemoteEditTarget(null);
             backends.reload();
           }}
         />
@@ -284,6 +321,180 @@ function BackendFormModal({
           </button>
           <button type="submit" className="btn primary" disabled={busy || !name.trim() || !baseUrl.trim()}>
             {busy ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+// ---------- remote backends ----------
+
+// TokenReveal shows a connect token exactly once: the server stores only the
+// hash, so whatever is not copied here is gone. Copy button + explicit
+// warning; the modal cannot be dismissed by an outside click (the default
+// Modal has none — closing is the button).
+function TokenReveal({ token, label }: { token: string; label: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(token);
+      setCopied(true);
+    } catch {
+      /* clipboard unavailable (http origin): the field is selectable anyway */
+    }
+  };
+  return (
+    <>
+      <Banner kind="info">
+        {label} — it is shown once and cannot be recovered; rotating replaces it.
+      </Banner>
+      <div className="token-row">
+        <input className="input mono" readOnly value={token} onFocus={(e) => e.currentTarget.select()} />
+        <button className="btn" onClick={copy}>
+          {copied ? 'Copied' : 'Copy'}
+        </button>
+      </div>
+    </>
+  );
+}
+
+function RemoteCreateModal({
+  onClose,
+  onCreated,
+}: {
+  onClose: () => void;
+  onCreated: () => void;
+}) {
+  const [name, setName] = useState('');
+  const [token, setToken] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await api.createRemoteBackend(name.trim());
+      setToken(res.token);
+    } catch (err: unknown) {
+      setError(errMsg(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (token) {
+    return (
+      <Modal title={`Remote backend created — ${name}`} onClose={onCreated}>
+        <div className="form-stack">
+          <TokenReveal token={token} label="Connect token" />
+          <p className="dim">
+            Put it in the remote box’s env as <code>RELAY_TOKEN</code>, together with{' '}
+            <code>HEADLESS=true</code>, <code>RELAY_URL</code> (this relay’s public URL) and{' '}
+            <code>ENGINE_URL</code> (the engine it should expose). The box dials in and shows
+            online here.
+          </p>
+          <div className="modal-actions">
+            <button className="btn primary" onClick={onCreated}>
+              Done
+            </button>
+          </div>
+        </div>
+      </Modal>
+    );
+  }
+
+  return (
+    <Modal title="Add remote backend" onClose={onClose}>
+      <form onSubmit={submit} className="form-stack">
+        {error && <Banner>{error}</Banner>}
+        <p className="dim">
+          A remote backend lives on another machine (behind NAT is fine): that box dials in
+          over the remote channel and exposes its local engine here. No inbound ports, no
+          URL to fill in — just a connect token.
+        </p>
+        <Field label="Name">
+          <input className="input" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
+        </Field>
+        <div className="modal-actions">
+          <button type="button" className="btn" onClick={onClose}>
+            Cancel
+          </button>
+          <button type="submit" className="btn primary" disabled={busy || !name.trim()}>
+            {busy ? 'Creating…' : 'Create & show token'}
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+function RemoteEditModal({
+  backend,
+  onClose,
+  onRenamed,
+}: {
+  backend: Backend;
+  onClose: () => void;
+  onRenamed: () => void;
+}) {
+  const [name, setName] = useState(backend.name);
+  const [token, setToken] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const rename = async (e: FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      await api.patchBackend(backend.id, { name: name.trim() });
+      onRenamed();
+    } catch (err: unknown) {
+      setError(errMsg(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const rotate = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await api.rotateRemoteToken(backend.id);
+      setToken(res.token);
+    } catch (err: unknown) {
+      setError(errMsg(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal title={`Edit remote backend — ${backend.name}`} onClose={onClose}>
+      <form onSubmit={rename} className="form-stack">
+        {error && <Banner>{error}</Banner>}
+        {token && <TokenReveal token={token} label="New connect token (the old one is dead)" />}
+        <Field label="Name">
+          <input className="input" value={name} onChange={(e) => setName(e.target.value)} />
+        </Field>
+        <div className="modal-actions">
+          <button
+            type="button"
+            className="btn"
+            disabled={busy}
+            onClick={rotate}
+            title="Replaces the connect token and drops the live connection"
+          >
+            Rotate token
+          </button>
+          <button type="button" className="btn" onClick={onClose}>
+            Close
+          </button>
+          <button type="submit" className="btn primary" disabled={busy || !name.trim()}>
+            {busy ? 'Saving…' : 'Save name'}
           </button>
         </div>
       </form>

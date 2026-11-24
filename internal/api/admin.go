@@ -220,6 +220,32 @@ func (s *Server) AdminUpdateBackend(w http.ResponseWriter, r *http.Request, c *a
 		writeErr(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
+	if in.BaseURL != nil {
+		// A remote backend's base_url (remote://<id>) is the registry key —
+		// *changing* it would detach the live channel from its row. But
+		// round-tripping the whole backend object (echoing base_url
+		// unchanged while editing name/enabled) is a common admin-client
+		// pattern and must keep working: only a real change is refused, an
+		// identical echo is dropped so the urlRe check below — which would
+		// reject remote:// — never sees it.
+		cur, err := store.BackendByID(s.DB, id)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			writeErr(w, http.StatusNotFound, "backend not found")
+			return
+		case err != nil:
+			writeErr(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		if _, ok := store.RemoteBackendID(cur.BaseURL); ok {
+			if *in.BaseURL != cur.BaseURL {
+				writeErr(w, http.StatusBadRequest,
+					"remote backends are addressed by their connect token, not a base_url")
+				return
+			}
+			in.BaseURL = nil
+		}
+	}
 	if in.BaseURL != nil && !urlRe.MatchString(*in.BaseURL) {
 		writeErr(w, http.StatusBadRequest, "base_url must start with http:// or https://")
 		return
@@ -246,6 +272,14 @@ func (s *Server) AdminUpdateBackend(w http.ResponseWriter, r *http.Request, c *a
 	}
 	// Enabled state gates what the catalog shares (both roles push).
 	s.catalogChanged()
+	// Disabling a remote backend drops its live channel now: the token is
+	// dead the moment the row says so, and a connector generating on a
+	// disabled backend would only be refused downstream.
+	if s.Remote != nil && in.Enabled != nil && !*in.Enabled {
+		if _, ok := store.RemoteBackendID(b.BaseURL); ok {
+			s.Remote.Kick(id, "backend disabled")
+		}
+	}
 	writeJSON(w, http.StatusOK, b)
 }
 
@@ -264,6 +298,9 @@ func (s *Server) AdminDeleteBackend(w http.ResponseWriter, r *http.Request, c *a
 	case err != nil:
 		writeErr(w, http.StatusInternalServerError, "backend delete failed")
 	default:
+		if s.Remote != nil {
+			s.Remote.Kick(id, "backend deleted")
+		}
 		s.catalogChanged()
 		w.WriteHeader(http.StatusNoContent)
 	}
@@ -293,7 +330,15 @@ func (s *Server) AdminProbeBackend(w http.ResponseWriter, r *http.Request, c *au
 		writeErr(w, http.StatusBadRequest, "federation backends are served over the peer channel, not HTTP")
 		return
 	}
-	res := proxy.Probe(r.Context(), b.BaseURL, b.APIKey)
+	var res proxy.ProbeResult
+	if _, ok := store.RemoteBackendID(b.BaseURL); ok {
+		// remote:// backends have no dialable endpoint either — the probe
+		// rides the connector's live channel (GET /health + /v1/models
+		// frames answered by the box against its engine).
+		res = s.probeRemote(r, b)
+	} else {
+		res = proxy.Probe(r.Context(), b.BaseURL, b.APIKey)
+	}
 
 	var probeErr, version *string
 	if !res.OK {

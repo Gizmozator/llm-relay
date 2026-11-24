@@ -1,0 +1,15 @@
+# llm-relay — remote-backend connector: expose one local engine to a relay
+# over an outbound WebSocket. No published ports, no volumes, no state.
+# Copy this file and .env.example (as .env) onto the machine that runs your
+# engine, fill in .env, then:  docker compose up -d
+# Docs: docs/workflows/remote-backend.md
+services:
+  llm-relay:
+    image: gitea.rantaeskola.fi/gizmoz/llm-relay:latest
+    restart: unless-stopped
+    env_file: .env
+    # The connector dials out only — it binds no ports. Host networking lets
+    # ENGINE_URL=http://localhost:PORT reach the engine on this machine; if
+    # your engine runs on a shared docker network, drop this and use the
+    # service name in ENGINE_URL instead.
+    network_mode: host

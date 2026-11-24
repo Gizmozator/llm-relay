@@ -376,6 +376,13 @@ export function isSyntheticBackendUrl(baseUrl: string): boolean {
   return /^peer:\/\/\d+$/.test(baseUrl) || baseUrl === 'hub://federation' || baseUrl === 'hub://';
 }
 
+/** Remote backends (plan 2026-11-24-remote-backend-v1): base_url remote://<id>,
+ *  a NATted box that dials IN over /remote/v1/connect. Mirrors
+ *  store.RemoteBackendID. */
+export function isRemoteBackendUrl(baseUrl: string): boolean {
+  return /^remote:\/\/\d+$/.test(baseUrl);
+}
+
 /** One minute of the live dashboard window (GET /api/live). */
 export interface LiveBucket {
   minute: string;
@@ -654,6 +661,12 @@ export const api = {
     request<Backend>('POST', '/api/admin/backends', {
       body: api_key ? { name, base_url, api_key } : { name, base_url },
     }),
+  createRemoteBackend: (name: string) =>
+    request<{ backend: Backend; token: string }>('POST', '/api/admin/backends/remote', {
+      body: { name },
+    }),
+  rotateRemoteToken: (id: number) =>
+    request<{ token: string }>('POST', `/api/admin/backends/${id}/remote/rotate`),
   patchBackend: (
     id: number,
     patch: { name?: string; base_url?: string; api_key?: string; enabled?: boolean; draining?: boolean },

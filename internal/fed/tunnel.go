@@ -61,12 +61,12 @@ func hopByHopOrSecret(name string) bool {
 	return false
 }
 
-// stripRequestHeaders drops what must never cross a federation hop: the
+// StripRequestHeaders drops what must never cross a federation hop: the
 // caller's relay credentials (the serving side applies its own backend keys
 // locally), hop-by-hop framing, and Host. Everything else — Content-Type,
 // X-Session-Id (affinity must survive the hop), anthropic-version — rides
 // through untouched.
-func stripRequestHeaders(h http.Header) Headers {
+func StripRequestHeaders(h http.Header) Headers {
 	var out Headers
 	for k, vs := range h {
 		if hopByHopOrSecret(k) {
@@ -79,12 +79,12 @@ func stripRequestHeaders(h http.Header) Headers {
 	return out
 }
 
-// wireRequestHeader rebuilds a peer-supplied request header set for the
+// WireRequestHeader rebuilds a peer-supplied request header set for the
 // local pipeline, dropping everything hopByHopOrSecret names: an honest
-// sender already stripped these (stripRequestHeaders), so anything
+// sender already stripped these (StripRequestHeaders), so anything
 // arriving is a peer trying to smuggle framing or inject credentials the
 // receiver must never accept from the wire. Honest traffic is unaffected.
-func wireRequestHeader(h Headers) http.Header {
+func WireRequestHeader(h Headers) http.Header {
 	out := http.Header{}
 	for _, kv := range h {
 		if hopByHopOrSecret(kv[0]) {
@@ -108,10 +108,10 @@ func hopByHopResponse(name string) bool {
 	return false
 }
 
-// responseHeaders filters a served response's headers for the return trip:
+// ResponseHeaders filters a served response's headers for the return trip:
 // hop-by-hop framing goes, Content-Length goes (the pipe-delivered body is
 // authoritative), Content-Type and every API-relevant header stays.
-func responseHeaders(h http.Header) Headers {
+func ResponseHeaders(h http.Header) Headers {
 	var out Headers
 	for k, vs := range h {
 		if hopByHopResponse(k) {
@@ -124,11 +124,11 @@ func responseHeaders(h http.Header) Headers {
 	return out
 }
 
-// wireResponseHeader rebuilds a peer-supplied response header set for the
+// WireResponseHeader rebuilds a peer-supplied response header set for the
 // local client, dropping what an honest sender already stripped
 // (hopByHopResponse): framing a malicious peer must not smuggle into the
 // relay's own downstream response.
-func wireResponseHeader(h Headers) http.Header {
+func WireResponseHeader(h Headers) http.Header {
 	out := http.Header{}
 	for _, kv := range h {
 		if hopByHopResponse(kv[0]) {
@@ -214,7 +214,7 @@ func (m *Manager) RoundTripFed(req *http.Request) (*http.Response, error) {
 		return nil, fmt.Errorf("federation tunnel: request body %d bytes over the %d cap", len(body), MaxBody)
 	}
 	frame := &Req{T: TReq, ID: id, TargetPeer: tun.target, Method: req.Method,
-		Path: req.URL.Path, Headers: stripRequestHeaders(req.Header), Body: body,
+		Path: req.URL.Path, Headers: StripRequestHeaders(req.Header), Body: body,
 		FedUser: m.attributionFor(req.Context())}
 	if err := tun.send(frame); err != nil {
 		release()
@@ -235,7 +235,7 @@ func (m *Manager) RoundTripFed(req *http.Request) (*http.Response, error) {
 					StatusCode: t.Status,
 					Proto:      "HTTP/1.1",
 					ProtoMajor: 1, ProtoMinor: 1,
-					Header:        wireResponseHeader(t.Headers),
+					Header:        WireResponseHeader(t.Headers),
 					Body:          pr,
 					ContentLength: -1,
 					Request:       req,

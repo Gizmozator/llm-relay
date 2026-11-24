@@ -29,24 +29,18 @@ type Config struct {
 	PublicRelayURL     string `env:"PUBLIC_RELAY_URL"`
 	PublicDashboardURL string `env:"PUBLIC_DASHBOARD_URL"`
 
-	// Headless spoke (plan 2026-11-24-headless-spoke): boot fully configured
-	// by env — one backend, exactly one model, one hub, zero dashboard
-	// interaction. When HEADLESS=true, BACKEND_URL, MODEL_NAME, HUB_URL and
-	// HUB_TOKEN are required (fail-fast at config.Load); when false (the
-	// default) every var in this block is ignored and behavior is unchanged.
-	// A headless box needs no JWT_SECRET — it never serves the admin surface.
-	Headless     bool   `env:"HEADLESS" envDefault:"false"`
-	BackendURL   string `env:"BACKEND_URL"`
-	BackendToken string `env:"BACKEND_TOKEN"`
-	ModelName    string `env:"MODEL_NAME"`
-	HubURL       string `env:"HUB_URL"`
-	HubToken     string `env:"HUB_TOKEN"`
-	// Prices for the single model row, integer micro-units per 1M tokens
-	// (same unit as the dashboard price fields); 0 = free.
-	PriceIn         int64 `env:"PRICE_IN" envDefault:"0"`
-	PriceOut        int64 `env:"PRICE_OUT" envDefault:"0"`
-	PriceCacheRead  int64 `env:"PRICE_CACHE_READ" envDefault:"0"`
-	PriceCacheWrite int64 `env:"PRICE_CACHE_WRITE" envDefault:"0"`
+	// Headless connector mode (plan 2026-11-24-remote-backend-v1): the box
+	// binds nothing and runs one job — dial a relay's /remote/v1/connect
+	// and expose ENGINE_URL through it as a remote backend. When
+	// HEADLESS=true, RELAY_URL, RELAY_TOKEN and ENGINE_URL are required
+	// (fail-fast at config.Load); when false (the default) every var in
+	// this block is ignored and behavior is unchanged. A headless box
+	// needs no JWT_SECRET — it never serves the admin surface.
+	Headless    bool   `env:"HEADLESS" envDefault:"false"`
+	RelayURL    string `env:"RELAY_URL"`
+	RelayToken  string `env:"RELAY_TOKEN"`
+	EngineURL   string `env:"ENGINE_URL"`
+	EngineToken string `env:"ENGINE_TOKEN"`
 }
 
 // Load parses the environment and resolves the effective listen addresses.
@@ -73,19 +67,19 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("config: JWT_SECRET is required (openssl rand -hex 32)")
 	}
 	// A headless box has no dashboard to fix a typo in: every var the
-	// bootstrap needs must be present and non-empty at parse time, or the
-	// relay would boot into a half-configured state it can never escape.
+	// connector needs must be present and non-empty at parse time, or it
+	// would boot into a half-configured state it can never escape.
 	if c.Headless {
-		// Trim in place: a padded value passes the non-empty check but would
-		// otherwise be stored verbatim (only hub_url is trimmed downstream),
-		// surfacing later as a confusing probe/dial failure. A headless box
-		// has no dashboard to fix the typo, so normalize here.
+		// Trim in place: a padded value passes the non-empty check but
+		// would otherwise be used verbatim, surfacing later as a confusing
+		// dial/probe failure. A headless box has no dashboard to fix the
+		// typo, so normalize here.
 		for _, req := range []struct {
 			key string
 			val *string
 		}{
-			{"BACKEND_URL", &c.BackendURL}, {"MODEL_NAME", &c.ModelName},
-			{"HUB_URL", &c.HubURL}, {"HUB_TOKEN", &c.HubToken},
+			{"RELAY_URL", &c.RelayURL}, {"RELAY_TOKEN", &c.RelayToken},
+			{"ENGINE_URL", &c.EngineURL},
 		} {
 			v := strings.TrimSpace(*req.val)
 			*req.val = v
@@ -93,23 +87,26 @@ func Load() (*Config, error) {
 				return nil, fmt.Errorf("config: %s is required when HEADLESS=true", req.key)
 			}
 		}
-		// The admin API refuses negative prices; headless writes the row
-		// through the store directly, so enforce the same floor here — a
-		// negative price would ride the catalog frame to the hub and bill
-		// negative.
-		for _, p := range []struct {
+		// Shape, not just presence: a scheme-less URL ("localhost:8080")
+		// would pass the empty check and then fail per request inside the
+		// connector — the exact confusing late failure this block exists
+		// to prevent.
+		for _, u := range []struct {
 			key string
-			val int64
+			val string
 		}{
-			{"PRICE_IN", c.PriceIn}, {"PRICE_OUT", c.PriceOut},
-			{"PRICE_CACHE_READ", c.PriceCacheRead}, {"PRICE_CACHE_WRITE", c.PriceCacheWrite},
+			{"RELAY_URL", c.RelayURL}, {"ENGINE_URL", c.EngineURL},
 		} {
-			if p.val < 0 {
-				return nil, fmt.Errorf("config: %s must not be negative (got %d)", p.key, p.val)
+			if !strings.HasPrefix(u.val, "http://") && !strings.HasPrefix(u.val, "https://") {
+				return nil, fmt.Errorf("config: %s must start with http:// or https:// (got %q)", u.key, u.val)
 			}
 		}
+		c.EngineToken = strings.TrimSpace(c.EngineToken)
 	}
-	if c.ListenAddr == c.AdminListenAddr {
+	// A connector binds no listeners at all, so the clash rule is moot
+	// there — refusing boot over a stale server env file's identical
+	// addresses would be refusing for an irrelevant reason.
+	if !c.Headless && c.ListenAddr == c.AdminListenAddr {
 		return nil, fmt.Errorf("config: relay and admin listeners must not share an address (%s)", c.ListenAddr)
 	}
 	return c, nil

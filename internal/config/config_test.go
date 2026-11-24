@@ -66,14 +66,13 @@ func TestLoadRejectsSharedAddr(t *testing.T) {
 func headlessEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("HEADLESS", "true")
-	t.Setenv("BACKEND_URL", "http://backend.example.fi:8080")
-	t.Setenv("MODEL_NAME", "qwen3-coder")
-	t.Setenv("HUB_URL", "https://relay.example.fi")
-	t.Setenv("HUB_TOKEN", "fed-secret-token")
+	t.Setenv("RELAY_URL", "https://relay.example.fi")
+	t.Setenv("RELAY_TOKEN", "rb-secret-token")
+	t.Setenv("ENGINE_URL", "http://localhost:8080")
 }
 
 func TestLoadHeadlessRequiresVars(t *testing.T) {
-	for _, key := range []string{"BACKEND_URL", "MODEL_NAME", "HUB_URL", "HUB_TOKEN"} {
+	for _, key := range []string{"RELAY_URL", "RELAY_TOKEN", "ENGINE_URL"} {
 		t.Run(key+"_empty", func(t *testing.T) {
 			headlessEnv(t)
 			t.Setenv(key, "")
@@ -97,54 +96,39 @@ func TestLoadHeadlessValid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("valid headless config rejected: %v", err)
 	}
-	if !c.Headless || c.ModelName != "qwen3-coder" {
+	if !c.Headless || c.RelayURL != "https://relay.example.fi" ||
+		c.RelayToken != "rb-secret-token" || c.EngineURL != "http://localhost:8080" {
 		t.Fatalf("parsed config wrong: %+v", c)
 	}
-	// Price defaults: 0 (free) unless set.
-	if c.PriceIn != 0 || c.PriceOut != 0 || c.PriceCacheRead != 0 || c.PriceCacheWrite != 0 {
-		t.Errorf("price defaults = %d/%d/%d/%d, want 0/0/0/0",
-			c.PriceIn, c.PriceOut, c.PriceCacheRead, c.PriceCacheWrite)
+	// ENGINE_TOKEN is the only optional var in the block.
+	if c.EngineToken != "" {
+		t.Errorf("EngineToken = %q, want empty", c.EngineToken)
 	}
-	t.Setenv("PRICE_IN", "1000")
-	t.Setenv("PRICE_CACHE_WRITE", "7")
+	t.Setenv("ENGINE_TOKEN", "eng-key")
 	c, err = Load()
 	if err != nil {
 		t.Fatalf("valid headless config rejected: %v", err)
 	}
-	if c.PriceIn != 1000 || c.PriceCacheWrite != 7 {
-		t.Errorf("prices = %d/%d, want 1000/7", c.PriceIn, c.PriceCacheWrite)
-	}
-}
-
-// A negative price would ride the catalog frame to the hub and bill negative;
-// the admin API refuses it, so the headless env path must too.
-func TestLoadHeadlessRejectsNegativePrice(t *testing.T) {
-	for _, key := range []string{"PRICE_IN", "PRICE_OUT", "PRICE_CACHE_READ", "PRICE_CACHE_WRITE"} {
-		t.Run(key, func(t *testing.T) {
-			headlessEnv(t)
-			t.Setenv(key, "-100")
-			if _, err := Load(); err == nil {
-				t.Fatalf("%s=-100 must be rejected when HEADLESS=true", key)
-			}
-		})
+	if c.EngineToken != "eng-key" {
+		t.Errorf("EngineToken = %q, want eng-key", c.EngineToken)
 	}
 }
 
 // Padded required values are trimmed in place (not just for the empty check),
-// so a stray space in the env does not surface later as a probe/dial failure.
+// so a stray space in the env does not surface later as a dial failure.
 func TestLoadHeadlessTrimsRequired(t *testing.T) {
 	headlessEnv(t)
-	t.Setenv("BACKEND_URL", "  http://backend.example.fi:8080  ")
-	t.Setenv("MODEL_NAME", " qwen3-coder ")
-	t.Setenv("HUB_URL", "\thttps://relay.example.fi ")
+	t.Setenv("RELAY_URL", "  https://relay.example.fi  ")
+	t.Setenv("RELAY_TOKEN", " rb-secret-token ")
+	t.Setenv("ENGINE_URL", "\thttp://localhost:8080 ")
 	c, err := Load()
 	if err != nil {
 		t.Fatalf("padded headless config rejected: %v", err)
 	}
-	if c.BackendURL != "http://backend.example.fi:8080" ||
-		c.ModelName != "qwen3-coder" ||
-		c.HubURL != "https://relay.example.fi" {
-		t.Errorf("values not trimmed: %q %q %q", c.BackendURL, c.ModelName, c.HubURL)
+	if c.RelayURL != "https://relay.example.fi" ||
+		c.RelayToken != "rb-secret-token" ||
+		c.EngineURL != "http://localhost:8080" {
+		t.Errorf("values not trimmed: %q %q %q", c.RelayURL, c.RelayToken, c.EngineURL)
 	}
 }
 
@@ -158,5 +142,37 @@ func TestLoadHeadlessOffIgnoresBlock(t *testing.T) {
 	}
 	if c.Headless {
 		t.Error("HEADLESS must default to false")
+	}
+}
+
+// A scheme-less URL passes the non-empty check but then fails per request
+// inside the connector (unsupported protocol scheme) — Load must reject the
+// shape, not just the absence, because a headless box has no dashboard to
+// fix the typo in.
+func TestLoadHeadlessRejectsBadURLShape(t *testing.T) {
+	for _, tc := range []struct{ key, val string }{
+		{"RELAY_URL", "relay.example.fi"},
+		{"RELAY_URL", "ws://relay.example.fi"},
+		{"ENGINE_URL", "localhost:8080"},
+		{"ENGINE_URL", "https:/relay.example.fi"},
+	} {
+		t.Run(tc.key+"="+tc.val, func(t *testing.T) {
+			headlessEnv(t)
+			t.Setenv(tc.key, tc.val)
+			if _, err := Load(); err == nil {
+				t.Fatalf("%s=%q must be rejected", tc.key, tc.val)
+			}
+		})
+	}
+}
+
+// A connector binds no listeners at all: a server env file whose relay and
+// admin addresses collide must not refuse the connector boot.
+func TestLoadHeadlessIgnoresAddressClash(t *testing.T) {
+	headlessEnv(t)
+	t.Setenv("LISTEN_ADDR", ":8080")
+	t.Setenv("ADMIN_ADDR", ":8080")
+	if _, err := Load(); err != nil {
+		t.Fatalf("headless with colliding addresses rejected: %v", err)
 	}
 }

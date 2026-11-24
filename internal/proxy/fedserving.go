@@ -46,6 +46,9 @@ type schemeDispatch struct {
 }
 
 func (d *schemeDispatch) RoundTrip(req *http.Request) (*http.Response, error) {
+	if d.h.Remote != nil && req.URL.Scheme == store.RemoteScheme {
+		return d.h.Remote.RoundTrip(req)
+	}
 	if d.h.Fed != nil && isFedScheme(req.URL.Scheme) {
 		return d.h.Fed.RoundTripFed(req)
 	}
@@ -56,6 +59,13 @@ func isFedScheme(scheme string) bool {
 	return scheme == "peer" || scheme == "hub"
 }
 
+// RemoteTransport is the remote.Registry's tunnel seam (implemented by
+// *remote.Registry): one tunneled request per RoundTrip, dial-class errors
+// so the group retry loop fails over exactly like a refused socket.
+type RemoteTransport interface {
+	RoundTrip(req *http.Request) (*http.Response, error)
+}
+
 // isSyntheticURL reports whether a backend base_url names a federation
 // location (peer://<id> / hub://…) instead of a network address: the health
 // prober must never dial these, the tunnel owns them.
@@ -64,11 +74,22 @@ func isSyntheticURL(baseURL string) bool {
 	return ok
 }
 
+// isRemoteURL reports whether a backend base_url names a remote-backend
+// channel (remote://<id>): no HTTP endpoint to dial, the WebSocket channel
+// owns it (health = live channel).
+func isRemoteURL(baseURL string) bool {
+	_, ok := store.RemoteBackendID(baseURL)
+	return ok
+}
+
 // joinBackendURL builds the upstream URL for one request path. The plain
 // TrimRight would eat the slashes of a synthetic base_url ("hub://" →
-// "hub:"), so synthetic bases are appended verbatim.
+// "hub:"), so synthetic and remote bases are appended verbatim.
 func joinBackendURL(baseURL, path string) string {
 	if _, _, ok := store.SyntheticBaseURL(baseURL); ok {
+		return baseURL + path
+	}
+	if _, ok := store.RemoteBackendID(baseURL); ok {
 		return baseURL + path
 	}
 	return strings.TrimRight(baseURL, "/") + path

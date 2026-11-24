@@ -55,9 +55,11 @@ Proxy requests may carry `X-Session-Id: <string>`; without it the relay derives 
 ### Admin — backends
 - `GET /api/admin/backends` → `{"backends":[{"id":1,"name":"halogen","base_url":"http://llm-host:8731","has_key":false,"enabled":true,"draining":false,"online":true,"health_error":"","last_probe_at":"...|null","last_probe_error":"...|null","server_version":"...|null","created_at":"...","model_count":2}]}` — `online` is the **live** reachability verdict (shared health cache, re-probed at most once per minute per backend; disabled backends are offline without a probe) and `health_error` explains a live `false`; `last_probe_*` are the stored result of the last manual Probe only
 - `POST /api/admin/backends` — `{"name","base_url","api_key"?}` → `201` backend object
-- `PATCH /api/admin/backends/{id}` — any of `{"name","base_url","api_key","enabled","draining"}` (`api_key:""` clears) → backend object
-- `DELETE /api/admin/backends/{id}` → `204` · `409` if catalog models still reference it
-- `POST /api/admin/backends/{id}/probe` → `{"ok":true,"server_version":"0.18.22|","error":"","models":[{"id":"halogen-qwen3.8-flash-next","in_catalog":true,"model_id":3|null}]}`
+- `POST /api/admin/backends/remote` — `{"name"}` → `201 {"backend":{...},"token":"rb-..."}`: creates a **remote backend** (plan 2026-11-24-remote-backend-v1) — a backend row with `base_url = remote://<id>` and a fresh connect token shown **once** (only its SHA-256 hash is stored). `400` missing name · `409` name taken (one namespace with plain backends)
+- `POST /api/admin/backends/{id}/remote/rotate` — replaces a remote backend's connect token (the old one dies with the call, and the live connector channel is dropped) → `200 {"token":"rb-..."}`. `404` unknown id · `400` not a remote backend
+- `PATCH /api/admin/backends/{id}` — any of `{"name","base_url","api_key","enabled","draining"}` (`api_key:""` clears) → backend object. On a **remote** row `base_url` edits are refused (`400` — the URL is the registry key), and disabling drops the live channel at once
+- `DELETE /api/admin/backends/{id}` → `204` · `409` if catalog models still reference it · a live remote connector channel is dropped
+- `POST /api/admin/backends/{id}/probe` → `{"ok":true,"server_version":"0.18.22|","error":"","models":[{"id":"halogen-qwen3.8-flash-next","in_catalog":true,"model_id":3|null}]}` — for a **remote** backend the probe rides the connector's live channel (`GET /health` + `/v1/models` frames answered by the box against its engine); an offline backend fails fast with `ok:false` instead of hanging
 - `POST /api/admin/backends/{id}/models` — `{"model_ids":["halogen-qwen3.8-flash-next"]}` → `201 {"created":[{"id":3,"name":"halogen-qwen3.8-flash-next","upstream_model":"halogen-qwen3.8-flash-next"}]}` (skips already-present ids)
 
 ### Admin — models (public catalog)
@@ -163,6 +165,23 @@ Federation channel (relay port, `fed-` tokens):
   `catalog`, `status`, `req`, `res`, `res_body`, `res_end`, `cancel`
   (unknown types are ignored for forward-compat). Binary payloads
   (`req.body`, `res_body.data`) ride base64 inside the JSON.
+
+Remote-backend channel (relay port, `rb-` tokens, plan
+2026-11-24-remote-backend-v1):
+
+- `GET /remote/v1/connect` — the WebSocket channel a **remote backend**
+  (connector box) dials in on. **Not role-gated**: any relay role accepts
+  remote backends. The upgrade request carries the `rb-` connect token as
+  `Authorization: Bearer`: `401` missing/unknown token · `403` backend
+  disabled. After the upgrade the connector sends
+  `hello {proto:1,name,version}` within **5 s** (same close codes as the
+  federation channel); the relay answers `hello_ack` and registers the
+  channel under the backend id. A second connect with the same token
+  **replaces** the live channel. Frames: the same fed envelope and types as
+  above minus `catalog`/`status` — the relay sends `req` (paths restricted
+  to `/v1/*` and `/health`), the connector answers `res`/`res_body`/
+  `res_end` from its local engine and honors `cancel`. Backend health =
+  the live channel; token rotate / disable / delete drop it immediately.
 - Liveness (both sides): `ping` every **20 s**; the channel must show any
   inbound frame within **10 s** of it or it closes (`1008 "pong
   timeout"`). The hub refreshes the peer's `last_seen` at most once per

@@ -22,8 +22,8 @@ import (
 	"llm-relay/internal/config"
 	"llm-relay/internal/db"
 	"llm-relay/internal/fed"
-	"llm-relay/internal/headless"
 	"llm-relay/internal/proxy"
+	"llm-relay/internal/remote"
 	"llm-relay/internal/store"
 	"llm-relay/internal/usage"
 )
@@ -33,6 +33,15 @@ func main() {
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("startup: %v", err)
+	}
+
+	// Headless connector mode (plan 2026-11-24-remote-backend-v1): the box
+	// binds nothing and owns no state — its one job is the outbound channel
+	// that exposes ENGINE_URL to a relay as a remote backend. No DB, no
+	// listeners, no federation manager.
+	if cfg.Headless {
+		runHeadless(cfg)
+		return
 	}
 
 	d, err := db.Open(cfg.DBPath)
@@ -56,9 +65,18 @@ func main() {
 	fedMgr := fed.NewManager(d, nil)
 	defer fedMgr.Close()
 
+	// Remote-backend registry (plan 2026-11-24-remote-backend-v1): live
+	// WebSocket channels for remote:// backends, accepted on any role.
+	// The proxy tunnels remote:// traffic through it, the health cache
+	// answers "online = live channel" from it, and the admin API mints
+	// its connect tokens.
+	remoteReg := remote.NewRegistry(d, nil, "", "")
+	defer remoteReg.CloseAll("shutdown")
+
 	apiSrv := &api.Server{DB: d, JWTSecret: cfg.JWTSecret, JWTTTL: 12 * time.Hour,
 		RelayURL: cfg.PublicRelayURL, DashboardURL: cfg.PublicDashboardURL}
 	apiSrv.Fed = fedMgr
+	apiSrv.Remote = remoteReg
 	ph := proxy.New(d, rec, cfg.TrustProxyHeaders)
 	apiSrv.Flight = ph.Flight
 	ph.RelayURL = cfg.PublicRelayURL
@@ -70,6 +88,8 @@ func main() {
 	// any path outside /v1/).
 	ph.Fed = fedMgr
 	ph.Health.Synthetic = fedMgr.SyntheticOnline
+	ph.Remote = remoteReg
+	ph.Health.Remote = remoteReg.BackendOnline
 
 	healthz := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -96,6 +116,10 @@ func main() {
 	// hub) and runs the handshake. ping stays as the token-path probe.
 	relayMux.Handle("GET /federation/v1/ping", apiSrv.PeerAuth(apiSrv.FederationPing))
 	relayMux.Handle("GET /federation/v1/connect", apiSrv.PeerAuth(apiSrv.FederationConnect))
+	// Remote backends (plan 2026-11-24-remote-backend-v1): the connect
+	// channel a headless box dials in on (rb- token). Not role-gated — a
+	// remote backend is a backend, any relay can host one.
+	relayMux.Handle("GET /remote/v1/connect", apiSrv.RemoteAuth(apiSrv.RemoteConnect))
 	relayMux.HandleFunc("POST /mcp", ph.MCP)
 	// Tunneled (federation) requests are served from this same mux; the
 	// fed frame server restricts them to /v1/* paths (see serve.go).
@@ -105,20 +129,6 @@ func main() {
 	// materialized rows) with every route in place. A failed reconcile
 	// (settings read or purge) is logged, not fatal: the relay serves
 	// local traffic regardless, and the next settings PUT retries.
-	// Headless spoke (plan 2026-11-24-headless-spoke): the env is the source
-	// of truth — backend, model and federation settings land in the DB here,
-	// BEFORE the manager reads them below, so the dialer starts with
-	// everything in place. Fatal on error: a half-configured headless box
-	// cannot serve its one model, and there is no dashboard to fix it in.
-	if cfg.Headless {
-		if err := headless.Bootstrap(d, headless.FromConfig(cfg), log.Printf); err != nil {
-			log.Fatalf("startup: %v", err)
-		}
-		// Mirror the admin API's hook: the shareable catalog just changed.
-		// (The dialer's post-connect push carries the first frame anyway;
-		// this covers a hub that comes up later without a reconnect.)
-		fedMgr.CatalogChanged()
-	}
 	if err := fedMgr.Reload(); err != nil {
 		log.Printf("federation startup: %v", err)
 	}
@@ -145,6 +155,8 @@ func main() {
 	adminMux.Handle("PATCH /api/admin/users/{id}", apiSrv.Admin(apiSrv.AdminUpdateUser))
 	adminMux.Handle("GET /api/admin/backends", apiSrv.Admin(apiSrv.AdminListBackends))
 	adminMux.Handle("POST /api/admin/backends", apiSrv.Admin(apiSrv.AdminCreateBackend))
+	adminMux.Handle("POST /api/admin/backends/remote", apiSrv.Admin(apiSrv.AdminCreateRemoteBackend))
+	adminMux.Handle("POST /api/admin/backends/{id}/remote/rotate", apiSrv.Admin(apiSrv.AdminRotateRemoteToken))
 	adminMux.Handle("PATCH /api/admin/backends/{id}", apiSrv.Admin(apiSrv.AdminUpdateBackend))
 	adminMux.Handle("DELETE /api/admin/backends/{id}", apiSrv.Admin(apiSrv.AdminDeleteBackend))
 	adminMux.Handle("POST /api/admin/backends/{id}/probe", apiSrv.Admin(apiSrv.AdminProbeBackend))
@@ -209,22 +221,13 @@ func main() {
 			srvErr <- fmt.Errorf("relay listen: %w", err)
 		}
 	}()
-	// A headless box has no operator to log in: the dashboard + admin API
-	// listener stays closed entirely (plan 2026-11-24-headless-spoke). The
-	// relay port still serves /v1/* and the federation tunnel, and the spoke
-	// dialer runs in the manager goroutines, so joining the federation needs
-	// none of the admin surface.
-	if cfg.Headless {
-		log.Printf("headless: dashboard + admin API disabled (%s not bound)", cfg.AdminListenAddr)
-	} else {
-		servers = append(servers, adminSrv)
-		go func() {
-			log.Printf("dashboard + admin API listening on %s", cfg.AdminListenAddr)
-			if err := adminSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				srvErr <- fmt.Errorf("admin listen: %w", err)
-			}
-		}()
-	}
+	servers = append(servers, adminSrv)
+	go func() {
+		log.Printf("dashboard + admin API listening on %s", cfg.AdminListenAddr)
+		if err := adminSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			srvErr <- fmt.Errorf("admin listen: %w", err)
+		}
+	}()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -249,6 +252,21 @@ func main() {
 	if fatal != nil {
 		os.Exit(1)
 	}
+}
+
+// runHeadless is the whole headless box: dial the relay, expose the engine,
+// redial forever. It returns only when SIGINT/SIGTERM arrives.
+func runHeadless(cfg *config.Config) {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	log.Printf("headless: %s → %s (engine %s)", cfg.RelayURL, "/remote/v1/connect", cfg.EngineURL)
+	_ = remote.RunClient(ctx, remote.ClientConfig{
+		ServerURL:   cfg.RelayURL,
+		Token:       cfg.RelayToken,
+		EngineURL:   cfg.EngineURL,
+		EngineToken: cfg.EngineToken,
+	}, log.Printf)
+	log.Println("bye")
 }
 
 // spaHandler serves static files and falls back to index.html for any path

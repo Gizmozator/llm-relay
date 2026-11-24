@@ -33,6 +33,13 @@ func Probe(ctx context.Context, baseURL, apiKey string) ProbeResult {
 			return http.ErrUseLastResponse
 		},
 	}
+	return ProbeWith(ctx, client, baseURL, apiKey)
+}
+
+// ProbeWith runs the same discovery over a caller-supplied client — the
+// remote-backend probe passes one whose Transport tunnels frames to the
+// connector instead of dialing HTTP.
+func ProbeWith(ctx context.Context, client *http.Client, baseURL, apiKey string) ProbeResult {
 	res := ProbeResult{Models: []string{}}
 
 	base := strings.TrimRight(baseURL, "/")
