@@ -1,19 +1,50 @@
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import type { FormEvent } from 'react';
-import { Link } from 'react-router-dom';
-import { api, errMsg, FED_ROLES } from '../api';
-import type { FedCounts, FedRole, FedSettings } from '../api';
-import { fmtInt, fmtMoney, inNewTokens } from '../format';
+import { api, errMsg, isSyntheticBackendUrl, FED_ROLES } from '../api';
+import type {
+  Backend,
+  CatalogModel,
+  FedAdminStats,
+  FedCounts,
+  FedPeer,
+  FedRole,
+  FedSettings,
+} from '../api';
+import { fmtAgo, fmtDateTime, fmtInt, fmtMoney, inNewTokens } from '../format';
 import { useFedRole } from '../fedrole';
 import { useLoad } from '../useLoad';
+import type { LoadState } from '../useLoad';
 import { useToast } from '../components/Toast';
-import { Banner, Card, Empty, Field, Loading, StatsWindowSelect } from '../components/ui';
+import {
+  Banner,
+  Card,
+  ConfirmButton,
+  CopyField,
+  Empty,
+  Field,
+  Loading,
+  Modal,
+  StatsWindowSelect,
+  Toggle,
+} from '../components/ui';
 
 /**
- * Federation control (admin): the instance role switch, the spoke's dial-in
- * config with a live connection status, and — per role — the follow-up panel:
- * hub points at the Servers registry, spoke shows what this box shares and
- * what it has served/consumed.
+ * Federation (admin) — the one page for the whole feature. It used to be two
+ * routes (Federation + Servers) that each loaded the same settings and ledger
+ * and bounced a hub admin between them to do one job; they are merged here into
+ * three role-aware sections:
+ *
+ *   1. Role & connection — the instance role switch, and for a spoke its
+ *      dial-in config with a live channel status plus what it shares.
+ *   2. Servers — the peer registry (tokens, online state, shared models,
+ *      enable/rotate/delete). Hub only: peer channels only live at a hub.
+ *   3. Ledger — the served/consumed rollup (per-user fairness + per-server on
+ *      a hub; served-to-hub + consumed-locally on a spoke).
+ *
+ * Visibility follows the role: a hub sees all three, a spoke sees role +
+ * connection + its ledger panels (no peer registry), a standalone sees the role
+ * switch only. The role is read from the shared {@link useFedRole} context (the
+ * same state the sidebar keys on) so a saved change re-shapes the page at once.
  */
 export default function AdminFederationPage() {
   const toast = useToast();
@@ -26,11 +57,22 @@ export default function AdminFederationPage() {
   const [reveal, setReveal] = useState(false);
   const [busy, setBusy] = useState(false);
   const [days, setDays] = useState(30);
+  // Peer-registry UI state (moved from the old Servers page).
+  const [rotateToken, setRotateToken] = useState<{ name: string; token: string } | null>(null);
+  const [expanded, setExpanded] = useState<number | null>(null);
 
   const cur = settings.data;
-  const curRole = role ?? cur?.role ?? 'standalone';
+  // The persisted role drives which sections show. Read it from the shared
+  // context (the sidebar's source of truth, updated the instant a save lands);
+  // the settings payload carries the same value and covers the first paint
+  // before the context load resolves. The draft select overrides both so the
+  // panels preview as you switch role before saving.
+  const persistedRole = fedRole.role ?? cur?.role ?? 'standalone';
+  const curRole = role ?? persistedRole;
   const curUrl = hubUrl ?? cur?.hub_url ?? '';
   const curToken = hubToken ?? cur?.hub_token ?? '';
+  // "Dirty" is always measured against what the SERVER has (the settings
+  // payload), never the context echo, so Save offers exactly the pending edit.
   const dirty =
     curRole !== cur?.role || curUrl !== cur?.hub_url || curToken !== cur?.hub_token;
 
@@ -47,13 +89,29 @@ export default function AdminFederationPage() {
     return () => clearInterval(t);
   }, [cur?.role, settings.reload]);
 
-  // Spoke panels need the share list and the served/consumed ledger.
-  const models = useLoad(
-    () => (curRole === 'spoke' ? api.models().then((r) => r.models) : Promise.resolve([])),
+  // Peer registry (hub only): the registry itself, plus the catalog + backends
+  // that drive the expandable shared-model list (the wire carries only the
+  // count; names derive from fed_visibility + allowlists, filtered by the same
+  // servability rule the server counts with). Standalone/spoke never render the
+  // registry, so these loads stay idle off a hub.
+  const peers = useLoad(
+    () => (curRole === 'hub' ? api.adminPeers().then((r) => r.peers) : Promise.resolve([])),
     [curRole],
   );
+  const backends = useLoad(
+    () => (curRole === 'hub' ? api.backends().then((r) => r.backends) : Promise.resolve([])),
+    [curRole],
+  );
+  // The model catalog serves two sections: the spoke's shared list and the
+  // hub's expandable per-peer list. Standalone needs neither.
+  const models = useLoad(
+    () => (curRole === 'standalone' ? Promise.resolve([]) : api.models().then((r) => r.models)),
+    [curRole],
+  );
+  // The ledger: hub fairness + per-peer rollup, spoke served/consumed. One
+  // load feeds both (the old pages each carried their own fedAdminStats call).
   const stats = useLoad(
-    () => (curRole === 'spoke' ? api.fedAdminStats(days) : Promise.resolve(null)),
+    () => (curRole === 'standalone' ? Promise.resolve(null) : api.fedAdminStats(days)),
     [curRole, days],
   );
 
@@ -62,10 +120,10 @@ export default function AdminFederationPage() {
     setBusy(true);
     try {
       const res = await api.putFedSettings(curRole, curUrl.trim(), curToken.trim());
-      // Publish the role the server says it persisted: the sidebar menu is
-      // keyed on the shared role, so it follows the save at once — no reload,
-      // and no stale "Connect server" entry left pointing at a page that no
-      // longer applies.
+      // Publish the role the server says it persisted: the sidebar menu and this
+      // page's own sections are keyed on the shared role, so they follow the
+      // save at once — no reload, and no stale entry left pointing at a section
+      // that no longer applies.
       fedRole.saved(res.role);
       toast.push('success', 'Federation settings saved.');
       setRole(null);
@@ -79,6 +137,58 @@ export default function AdminFederationPage() {
     }
   };
 
+  const patch = async (id: number, enabled: boolean) => {
+    try {
+      await api.adminPatchPeer(id, enabled);
+      peers.reload();
+    } catch (e: unknown) {
+      toast.push('error', errMsg(e));
+      peers.reload();
+    }
+  };
+
+  const rotate = async (p: FedPeer) => {
+    try {
+      const r = await api.adminRotatePeer(p.id);
+      setRotateToken({ name: p.name, token: r.token });
+      peers.reload();
+    } catch (e: unknown) {
+      toast.push('error', errMsg(e));
+    }
+  };
+
+  const remove = async (p: FedPeer) => {
+    try {
+      await api.adminDeletePeer(p.id);
+      toast.push('success', `Server “${p.name}” removed.`);
+      peers.reload();
+      stats.reload();
+    } catch (e: unknown) {
+      toast.push('error', errMsg(e));
+    }
+  };
+
+  const backendById = useMemo(
+    () => new Map<number, Backend>((backends.data ?? []).map((b) => [b.id, b])),
+    [backends.data],
+  );
+
+  // Mirror the server's SharedModels SQL (store.sharedModelsExpr): servable
+  // (model AND backend enabled) and never a synthetic backend — the hub does
+  // not re-share materialized peer rows. Keeps the expanded list honest
+  // against the Shared count.
+  const sharedNames = (p: FedPeer, list: CatalogModel[]) =>
+    list.filter((m) => {
+      const b = backendById.get(m.backend_id);
+      return (
+        m.enabled &&
+        !!b?.enabled &&
+        !isSyntheticBackendUrl(b.base_url) &&
+        (m.fed_visibility === 'all' ||
+          (m.fed_visibility === 'allowlist' && m.fed_peer_ids.includes(p.id)))
+      );
+    });
+
   const spokeStatus = cur?.spoke;
   // A spoke without a usable dial-in target cannot connect: the URL must
   // be http(s) and the token non-empty (the server validates too, but the
@@ -91,12 +201,12 @@ export default function AdminFederationPage() {
   // a disabled backend can linger in this list (residual over-count, the
   // hub-side share filter is the authority).
   const shared = (models.data ?? []).filter((m) => m.fed_visibility === 'all' && m.enabled);
-  const spokeStats = stats.data && stats.data.role === 'spoke' ? stats.data : null;
 
   return (
     <div className="page">
       <div className="page-head">
         <h2>Federation</h2>
+        {curRole !== 'standalone' && <StatsWindowSelect value={days} onChange={setDays} />}
       </div>
 
       {settings.loading && !settings.data ? (
@@ -111,6 +221,7 @@ export default function AdminFederationPage() {
             </Banner>
           )}
 
+          {/* ---- Section 1: Role & connection ---- */}
           <form className="panel form-stack settings-form" onSubmit={save}>
             <h3>Instance role</h3>
             <Field label="This relay acts as">
@@ -128,9 +239,9 @@ export default function AdminFederationPage() {
             </Field>
             <p className="dim">
               <b>standalone</b> — no federation. <b>hub</b> — accepts other relays
-              (servers) connecting here; manage them on the{' '}
-              <Link to="/admin/servers">Servers</Link> page. <b>spoke</b> — this
-              box dials a hub and shares its opted-in models there.
+              (servers) connecting here; manage them in the <b>Servers</b> section
+              below. <b>spoke</b> — this box dials a hub and shares its opted-in
+              models there.
             </p>
 
             {curRole === 'spoke' && (
@@ -174,10 +285,7 @@ export default function AdminFederationPage() {
 
           {curRole === 'spoke' && (
             <section className="panel">
-              <div className="panel-head">
-                <h3>Connection</h3>
-                <StatsWindowSelect value={days} onChange={setDays} />
-              </div>
+              <h3>Connection</h3>
               <SpokeConnection status={spokeStatus} />
             </section>
           )}
@@ -209,61 +317,125 @@ export default function AdminFederationPage() {
             </section>
           )}
 
-          {curRole === 'spoke' && (
-            <section className="panel">
-              <h3>Served to hub users (last {days} days)</h3>
-              {stats.loading && !stats.data ? (
-                <Loading />
-              ) : stats.error && !stats.data ? (
-                <Banner>Could not load the federation ledger: {stats.error}</Banner>
-              ) : !spokeStats || spokeStats.served_by_source.length === 0 ? (
-                <Empty label="Nothing served to the hub in this window." />
-              ) : (
-                <CountsTable
-                  head="Hub user"
-                  rows={spokeStats.served_by_source}
-                  keyOf={(s) => s.fed_user}
-                  labelOf={(s) => s.fed_user}
-                  currency={currency}
-                />
-              )}
-            </section>
-          )}
-
-          {curRole === 'spoke' && (
-            <section className="panel">
-              <h3>Consumed by local users on federated models (last {days} days)</h3>
-              {stats.loading && !stats.data ? (
-                <Loading />
-              ) : stats.error && !stats.data ? (
-                <Banner>Could not load the federation ledger: {stats.error}</Banner>
-              ) : !spokeStats || spokeStats.consumed.length === 0 ? (
-                <Empty label="No local user spent on federated models in this window." />
-              ) : (
-                <CountsTable
-                  head="User"
-                  rows={spokeStats.consumed}
-                  keyOf={(c) => c.user_id}
-                  labelOf={(c) => c.user}
-                  currency={currency}
-                />
-              )}
-            </section>
-          )}
-
+          {/* ---- Section 2: Servers (peer registry) — hub only ---- */}
           {curRole === 'hub' && (
             <section className="panel">
-              <h3>Hub</h3>
-              <p className="dim">
-                This relay accepts federation channels from other relays. Manage
-                their server tokens, online state and the served/consumed ledger
-                on the <Link to="/admin/servers">Servers</Link> page; users get
-                their own token on <Link to="/keys">My keys</Link> and follow the{' '}
-                <Link to="/setup">setup guide</Link> on their side.
-              </p>
+              <h3>Servers</h3>
+              {peers.loading && !peers.data ? (
+                <Loading />
+              ) : peers.error ? (
+                <Banner>{peers.error}</Banner>
+              ) : !peers.data || peers.data.length === 0 ? (
+                <Empty label="No servers enrolled yet. Users create server tokens on their My keys page." />
+              ) : (
+                <div className="table-scroll">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Name</th>
+                        <th>Owner</th>
+                        <th>Status</th>
+                        <th>Last seen</th>
+                        <th>Version</th>
+                        <th className="num">Shared</th>
+                        <th>Enabled</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {peers.data.map((p) => {
+                        const names = sharedNames(p, models.data ?? []);
+                        return (
+                          <Fragment key={p.id}>
+                            <tr>
+                              <td>
+                                <button
+                                  className="btn small"
+                                  title="Show which models this peer may see"
+                                  onClick={() => setExpanded(expanded === p.id ? null : p.id)}
+                                >
+                                  {expanded === p.id ? '▾' : '▸'}
+                                </button>{' '}
+                                {p.name}
+                              </td>
+                              <td>{p.owner_name}</td>
+                              <td>
+                                {p.online ? (
+                                  <span className="badge ok">online</span>
+                                ) : (
+                                  <span className="badge err">offline</span>
+                                )}
+                              </td>
+                              <td className="nowrap" title={p.last_seen ? fmtDateTime(p.last_seen) : undefined}>
+                                {p.last_seen ? fmtAgo(p.last_seen) : 'never'}
+                              </td>
+                              <td className="mono">{p.version || '—'}</td>
+                              <td className="num">{p.shared_models}</td>
+                              <td>
+                                <Toggle
+                                  checked={p.enabled}
+                                  ariaLabel={`Enable server ${p.name}`}
+                                  onChange={(v) => patch(p.id, v)}
+                                />
+                              </td>
+                              <td className="actions">
+                                <button className="btn small" onClick={() => rotate(p)}>
+                                  Rotate token
+                                </button>
+                                <ConfirmButton label="Delete" onConfirm={() => remove(p)} />
+                              </td>
+                            </tr>
+                            {expanded === p.id && (
+                              <tr className="sub-row">
+                                <td colSpan={8}>
+                                  {/* A failed catalog/backend load must never read
+                                      as “nothing shared” — the list needs both. */}
+                                  {!models.data || !backends.data ? (
+                                    models.error || backends.error ? (
+                                      <Banner>Could not load the model catalog — shared list unavailable.</Banner>
+                                    ) : (
+                                      <Loading label="Loading catalog…" />
+                                    )
+                                  ) : names.length === 0 ? (
+                                    <span className="dim">No models shared with this peer.</span>
+                                  ) : (
+                                    names.map((m) => (
+                                      <span className="tag" key={m.id} title={`federation: ${m.fed_visibility}`}>
+                                        {m.name}
+                                      </span>
+                                    ))
+                                  )}
+                                </td>
+                              </tr>
+                            )}
+                          </Fragment>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </section>
           )}
+
+          {/* ---- Section 3: Ledger — hub and spoke (standalone has none) ---- */}
+          {curRole !== 'standalone' && <Ledger stats={stats} days={days} currency={currency} />}
         </>
+      )}
+
+      {rotateToken && (
+        <Modal title={`Token rotated — ${rotateToken.name}`} onClose={() => setRotateToken(null)}>
+          <Banner kind="info">
+            The old token died with this rotation. The spoke must be updated with the
+            new one before it can reconnect; this is the only time it is shown.
+          </Banner>
+          <CopyField value={rotateToken.token} hint="" label="New server token" />
+          <div className="modal-actions">
+            <button className="btn primary" onClick={() => setRotateToken(null)}>
+              Done
+            </button>
+          </div>
+        </Modal>
       )}
     </div>
   );
@@ -298,7 +470,145 @@ function SpokeConnection({ status }: { status: FedSettings['spoke'] }) {
   );
 }
 
-/** One served/consumed rollup table, shared by the spoke panels (both
+/**
+ * The served/consumed ledger (section 3). The payload is role-shaped, so the
+ * tables follow the server's role, not the draft select: a hub gets the
+ * per-user fairness table and the per-server rollup; a spoke gets what it served
+ * to the hub and what its own users consumed on federated models. A refresh
+ * failure keeps the last good payload on screen (useLoad retains data on error).
+ */
+function Ledger({
+  stats,
+  days,
+  currency,
+}: {
+  stats: LoadState<FedAdminStats | null>;
+  days: number;
+  currency: string;
+}) {
+  if (stats.loading && !stats.data) return <Loading />;
+  if (!stats.data) {
+    return <Banner>{stats.error ?? 'Could not load the federation ledger.'}</Banner>;
+  }
+  if (stats.data.role === 'hub') {
+    return (
+      <>
+        <section className="panel">
+          <h3>Fairness — served vs consumed per user (last {days} days)</h3>
+          {stats.data.users.length === 0 ? (
+            <Empty label="No federation traffic in this window." />
+          ) : (
+            <div className="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>User</th>
+                    <th className="num">Served req</th>
+                    <th className="num">Served cost</th>
+                    <th className="num">Consumed req</th>
+                    <th className="num">Consumed cost</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {stats.data.users.map((u) => (
+                    <tr key={u.user_id}>
+                      <td>{u.user}</td>
+                      <td className="num">{fmtInt(u.served.requests)}</td>
+                      <td className="num money">{fmtMoney(u.served.cost_micro, currency)}</td>
+                      <td className="num">{fmtInt(u.consumed.requests)}</td>
+                      <td className="num money">{fmtMoney(u.consumed.cost_micro, currency)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+
+        <section className="panel">
+          <h3>Per server (last {days} days)</h3>
+          {stats.data.peers.length === 0 ? (
+            <Empty label="No federation traffic in this window." />
+          ) : (
+            <>
+              <div className="table-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Server</th>
+                      <th className="num">Served req</th>
+                      <th className="num">Served cost</th>
+                      <th className="num">Consumed req *</th>
+                      <th className="num">Consumed cost *</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {stats.data.peers.map((p) => (
+                      <tr key={p.peer_id}>
+                        <td>{p.peer}</td>
+                        <td className="num">{fmtInt(p.served.requests)}</td>
+                        <td className="num money">{fmtMoney(p.served.cost_micro, currency)}</td>
+                        <td className="num">{fmtInt(p.consumed.requests)}</td>
+                        <td className="num money">{fmtMoney(p.consumed.cost_micro, currency)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <p className="dim footnote">
+                * owner-level: a server’s consumed figures are every consumed row of its{' '}
+                <b>owner</b> — an owner with several servers carries the same total
+                under each, so these columns must not be summed.
+              </p>
+            </>
+          )}
+        </section>
+      </>
+    );
+  }
+  if (stats.data.role === 'spoke') {
+    return (
+      <>
+        <section className="panel">
+          <h3>Served to hub users (last {days} days)</h3>
+          {stats.data.served_by_source.length === 0 ? (
+            <Empty label="Nothing served to the hub in this window." />
+          ) : (
+            <CountsTable
+              head="Hub user"
+              rows={stats.data.served_by_source}
+              keyOf={(s) => s.fed_user}
+              labelOf={(s) => s.fed_user}
+              currency={currency}
+            />
+          )}
+        </section>
+
+        <section className="panel">
+          <h3>Consumed by local users on federated models (last {days} days)</h3>
+          {stats.data.consumed.length === 0 ? (
+            <Empty label="No local user spent on federated models in this window." />
+          ) : (
+            <CountsTable
+              head="User"
+              rows={stats.data.consumed}
+              keyOf={(c) => c.user_id}
+              labelOf={(c) => c.user}
+              currency={currency}
+            />
+          )}
+        </section>
+      </>
+    );
+  }
+  return (
+    <section className="panel">
+      <Empty label="This instance is standalone — no federation ledger." />
+    </section>
+  );
+}
+
+/** One served/consumed rollup table, shared by the spoke ledger panels (both
  *  payloads carry {label, counts} rows): requests / in-new / out / cost. */
 function CountsTable<T extends { counts: FedCounts }>({
   head,

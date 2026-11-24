@@ -173,9 +173,10 @@ spoke + hub URL + token* → spoke *Models* → set the models to share to `all`
 
 **Users see models, admins see the cluster**: a federated model behaves like
 any other row (its health *is* the channel; groups may pool several peers'
-copies), while the admin **Servers** page lists every peer with its online
-state, version, shared models and the fairness ledger — served vs consumed
-per user and per server. Usage through a federated model is metered to the
+copies), while the admin **Federation** page — role switch, the **Servers**
+peer registry and the fairness ledger in one place — lists every peer with its
+online state, version, shared models and the served-vs-consumed ledger, per
+user and per server. Usage through a federated model is metered to the
 consuming user and credited to the serving account: fairness bookkeeping,
 not billing.
 
