@@ -84,6 +84,38 @@ func TestLoadHeadlessValid(t *testing.T) {
 	}
 }
 
+// A negative price would ride the catalog frame to the hub and bill negative;
+// the admin API refuses it, so the headless env path must too.
+func TestLoadHeadlessRejectsNegativePrice(t *testing.T) {
+	for _, key := range []string{"PRICE_IN", "PRICE_OUT", "PRICE_CACHE_READ", "PRICE_CACHE_WRITE"} {
+		t.Run(key, func(t *testing.T) {
+			headlessEnv(t)
+			t.Setenv(key, "-100")
+			if _, err := Load(); err == nil {
+				t.Fatalf("%s=-100 must be rejected when HEADLESS=true", key)
+			}
+		})
+	}
+}
+
+// Padded required values are trimmed in place (not just for the empty check),
+// so a stray space in the env does not surface later as a probe/dial failure.
+func TestLoadHeadlessTrimsRequired(t *testing.T) {
+	headlessEnv(t)
+	t.Setenv("BACKEND_URL", "  http://backend.example.fi:8080  ")
+	t.Setenv("MODEL_NAME", " qwen3-coder ")
+	t.Setenv("HUB_URL", "\thttps://relay.example.fi ")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("padded headless config rejected: %v", err)
+	}
+	if c.BackendURL != "http://backend.example.fi:8080" ||
+		c.ModelName != "qwen3-coder" ||
+		c.HubURL != "https://relay.example.fi" {
+		t.Errorf("values not trimmed: %q %q %q", c.BackendURL, c.ModelName, c.HubURL)
+	}
+}
+
 // HEADLESS=false (the default) must ignore the whole headless block: an env
 // without any of the new vars parses exactly as before.
 func TestLoadHeadlessOffIgnoresBlock(t *testing.T) {

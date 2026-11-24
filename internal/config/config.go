@@ -70,12 +70,36 @@ func Load() (*Config, error) {
 	// bootstrap needs must be present and non-empty at parse time, or the
 	// relay would boot into a half-configured state it can never escape.
 	if c.Headless {
-		for _, req := range []struct{ key, val string }{
-			{"BACKEND_URL", c.BackendURL}, {"MODEL_NAME", c.ModelName},
-			{"HUB_URL", c.HubURL}, {"HUB_TOKEN", c.HubToken},
+		// Trim in place: a padded value passes the non-empty check but would
+		// otherwise be stored verbatim (only hub_url is trimmed downstream),
+		// surfacing later as a confusing probe/dial failure. A headless box
+		// has no dashboard to fix the typo, so normalize here.
+		for _, req := range []struct {
+			key string
+			val *string
+		}{
+			{"BACKEND_URL", &c.BackendURL}, {"MODEL_NAME", &c.ModelName},
+			{"HUB_URL", &c.HubURL}, {"HUB_TOKEN", &c.HubToken},
 		} {
-			if strings.TrimSpace(req.val) == "" {
+			v := strings.TrimSpace(*req.val)
+			*req.val = v
+			if v == "" {
 				return nil, fmt.Errorf("config: %s is required when HEADLESS=true", req.key)
+			}
+		}
+		// The admin API refuses negative prices; headless writes the row
+		// through the store directly, so enforce the same floor here — a
+		// negative price would ride the catalog frame to the hub and bill
+		// negative.
+		for _, p := range []struct {
+			key string
+			val int64
+		}{
+			{"PRICE_IN", c.PriceIn}, {"PRICE_OUT", c.PriceOut},
+			{"PRICE_CACHE_READ", c.PriceCacheRead}, {"PRICE_CACHE_WRITE", c.PriceCacheWrite},
+		} {
+			if p.val < 0 {
+				return nil, fmt.Errorf("config: %s must not be negative (got %d)", p.key, p.val)
 			}
 		}
 	}
