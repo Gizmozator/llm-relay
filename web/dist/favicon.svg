@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="llm-relay">
+  <rect width="64" height="64" rx="14" fill="#0b0f19"/>
+  <g fill="none" stroke="#38bdf8" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M22 20 L10 32 L22 44"/>
+    <path d="M42 20 L54 32 L42 44"/>
+    <path d="M37 14 L27 50"/>
+  </g>
+</svg>
