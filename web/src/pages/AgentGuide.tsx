@@ -53,12 +53,37 @@ export default function AgentGuidePage() {
   const curl = relay
     ? `curl -s ${relay}/v1/utilization \\\n  -H "Authorization: Bearer sk-YOUR_KEY"`
     : '';
+  const modelsCurl = relay
+    ? `curl -s ${relay}/v1/models \\\n  -H "Authorization: Bearer sk-YOUR_KEY"`
+    : '';
+  const modelsJson = `{
+  "object": "list",
+  "data": [
+    { "id": "halogen-flash", "object": "model", "owned_by": "llm-relay" }
+  ]
+}`;
+  const chatCurl = relay
+    ? `curl -s ${relay}/v1/chat/completions \\\n  -H "Authorization: Bearer sk-YOUR_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d '{\n    "model": "halogen-flash",\n    "messages": [{ "role": "user", "content": "Hello!" }],\n    "max_tokens": 100\n  }'`
+    : '';
+  const chatJson = `{
+  "id": "chatcmpl-...",
+  "object": "chat.completion",
+  "model": "halogen-flash",
+  "choices": [
+    {
+      "index": 0,
+      "message": { "role": "assistant", "content": "Hi!" },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": { "prompt_tokens": 9, "completion_tokens": 5, "total_tokens": 14 }
+}`;
 
   return (
     <div className="page">
       <div className="page-head">
         <h2>AI agent integration</h2>
-        <span className="dim">let agents check if this server is free</span>
+        <span className="dim">let agents check if this server is free — then use it</span>
       </div>
 
       {!info.loading && !info.data && (
@@ -113,6 +138,35 @@ export default function AgentGuidePage() {
           Works with any HTTP client; same payload as the MCP tool.
         </p>
         {curl && <CodeBlock text={curl} />}
+      </section>
+
+      <section className="panel">
+        <h3>4. Use it for inference</h3>
+        <p className="dim">
+          Once a model is <code className="mono">free</code>, the relay is a
+          plain OpenAI-compatible endpoint: point any OpenAI client (or{' '}
+          <code className="mono">curl</code>) at it with the same{' '}
+          <code className="mono">sk-…</code> key. Base URL{' '}
+          <code className="mono">{relay ? `${relay}/v1` : '{relay}/v1'}</code>,
+          header <code className="mono">Authorization: Bearer sk-YOUR_KEY</code>.
+        </p>
+        <p className="dim">
+          <strong>List models</strong> — each <code className="mono">id</code>{' '}
+          is a name you can request; a model group shows as one name and the
+          relay picks a member.
+        </p>
+        {modelsCurl && <CodeBlock text={modelsCurl} />}
+        <CodeBlock text={modelsJson} />
+        <p className="dim">
+          <strong>Generate</strong> — <code className="mono">POST /v1/chat/completions</code>{' '}
+          (and <code className="mono">POST /v1/completions</code>) take the
+          usual OpenAI body; <code className="mono">model</code> is required
+          (unknown name → <code className="mono">404</code>), and{' '}
+          <code className="mono">"stream": true</code> switches to SSE. The
+          body is the backend’s reply, passed through untouched.
+        </p>
+        {chatCurl && <CodeBlock text={chatCurl} />}
+        <CodeBlock text={chatJson} />
       </section>
 
       <section className="panel">

@@ -2,8 +2,9 @@
 
 You are an AI agent reading a guide for an **llm-relay** server: a shared
 local LLM relay. This page tells you how to check whether a model here is
-free before your agent takes on delegated work, and how your human gives you
-an access token.
+free before your agent takes on delegated work, how your human gives you an
+access token, and how to use the relay as an OpenAI-compatible endpoint for
+inference.
 
 The server you are reading this on is reachable at: `{{RELAY_URL}}`
 
@@ -17,7 +18,7 @@ Your human creates one for you: open the relay **dashboard**{{DASHBOARD_URL}}
 key is shown **once** — store it and give it to you via your config or
 environment. The same key also works for inference
 (`POST {{RELAY_URL}}/v1/chat/completions` and friends), so one token covers
-both.
+both — see section 4 for how to use it.
 
 ## 2. Check utilization before delegating
 
@@ -102,3 +103,81 @@ optional `model` argument filters to one model name).
 
 The check is advisory: there is no reservation, so another client can take
 the last slot between your check and your request. Re-check on 429/503.
+
+## 4. Use the relay for inference
+
+Once a model is `free`, the relay is a plain **OpenAI-compatible endpoint**:
+point any OpenAI client (or `curl`) at it with the same `sk-` key you used to
+check utilization.
+
+### Gateway config
+
+- **Base URL:** `{{RELAY_URL}}/v1`
+- **Auth header:** `Authorization: Bearer sk-YOUR_KEY` (the same key as the
+  utilization check above)
+
+Everything below uses those two.
+
+### List models
+
+```
+curl -s {{RELAY_URL}}/v1/models \
+  -H "Authorization: Bearer sk-YOUR_KEY"
+```
+
+Response (OpenAI model list):
+
+```json
+{
+  "object": "list",
+  "data": [
+    { "id": "halogen-flash", "object": "model", "owned_by": "llm-relay" }
+  ]
+}
+```
+
+Each `id` is a name you can request. A **model group** shows up as one name
+here; requesting it lets the relay pick a member for you (see section 2).
+
+### Generate
+
+`POST /v1/chat/completions` (chat) and `POST /v1/completions` (text) take the
+usual OpenAI request body. Minimal chat call:
+
+```
+curl -s {{RELAY_URL}}/v1/chat/completions \
+  -H "Authorization: Bearer sk-YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "halogen-flash",
+    "messages": [{ "role": "user", "content": "Hello!" }],
+    "max_tokens": 100
+  }'
+```
+
+Response (the backend's OpenAI `chat.completion`, passed through):
+
+```json
+{
+  "id": "chatcmpl-...",
+  "object": "chat.completion",
+  "model": "halogen-flash",
+  "choices": [
+    {
+      "index": 0,
+      "message": { "role": "assistant", "content": "Hi!" },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": { "prompt_tokens": 9, "completion_tokens": 5, "total_tokens": 14 }
+}
+```
+
+`POST /v1/completions` is the same shape with `prompt` instead of `messages`
+and `choices[].text` instead of `message` (`object: text_completion`).
+
+- `model` is required; a name the relay does not know returns `404`.
+- `"stream": true` switches to SSE (`text/event-stream`) with the same fields;
+  the relay turns on usage reporting for streaming chat automatically.
+- The body is the backend's own reply, passed through untouched; the relay
+  meters `usage.prompt_tokens` and `usage.completion_tokens` from it.
