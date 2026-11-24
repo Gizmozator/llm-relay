@@ -73,13 +73,18 @@ export default function UsagePage({ admin }: { admin: boolean }) {
     return keys;
   }, [modelOptions.data, modelFilter]);
 
+  // Viewer's minutes east of UTC (JS getTimezoneOffset is west-positive).
+  // Sent on the by-day summary so day buckets split at the viewer's local
+  // midnight; the day keys come back as plain local-date strings.
+  const tzOffset = -new Date().getTimezoneOffset();
+
   // Day series drives the totals cards + the by-day chart.
   const daySummary = useLoad(
     () =>
       rangeInvalid
         ? Promise.resolve(null as UsageSummary | null)
-        : api.usageSummary(admin, { ...baseQuery, group_by: 'day' }),
-    [admin, from, to, userId, modelFilter, rangeInvalid],
+        : api.usageSummary(admin, { ...baseQuery, group_by: 'day', tz_offset: tzOffset }),
+    [admin, from, to, userId, modelFilter, rangeInvalid, tzOffset],
   );
 
   // Selected grouping drives the breakdown table (skipped when it is "day").

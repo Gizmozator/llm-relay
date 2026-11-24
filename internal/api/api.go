@@ -385,14 +385,26 @@ func usageFilter(r *http.Request, scopeUserID int64) (*store.UsageFilter, error)
 	// scopeUserID == 0 is the admin all-users view (see usageScope): say so
 	// explicitly, the store refuses a silent zero scope.
 	f := &store.UsageFilter{UserID: scopeUserID, AllUsers: scopeUserID == 0}
-	// Contract default: last 30 days when a bound is omitted.
+	// tz_offset: the viewer's UTC offset in minutes, east-positive (the
+	// dashboard sends it so day buckets and the default range follow the
+	// viewer's clock). Absent = 0 = UTC, the historical behaviour.
+	if v := r.URL.Query().Get("tz_offset"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < -1440 || n > 1440 {
+			return nil, errors.New("tz_offset must be integer minutes east of UTC (-1440..1440)")
+		}
+		f.TZOffset = n
+	}
+	// Contract default: last 30 days when a bound is omitted. With an
+	// offset the anchor is the viewer's local now, so "today" is theirs.
+	now := time.Now().UTC().Add(time.Duration(f.TZOffset) * time.Minute)
 	if v := r.URL.Query().Get("from"); v != "" {
 		if _, err := time.Parse("2006-01-02", v); err != nil {
 			return nil, errors.New("from must be YYYY-MM-DD")
 		}
 		f.From = v
 	} else {
-		f.From = time.Now().UTC().AddDate(0, 0, -29).Format("2006-01-02")
+		f.From = now.AddDate(0, 0, -29).Format("2006-01-02")
 	}
 	if v := r.URL.Query().Get("to"); v != "" {
 		if _, err := time.Parse("2006-01-02", v); err != nil {
@@ -400,7 +412,7 @@ func usageFilter(r *http.Request, scopeUserID int64) (*store.UsageFilter, error)
 		}
 		f.To = v
 	} else {
-		f.To = time.Now().UTC().Format("2006-01-02")
+		f.To = now.Format("2006-01-02")
 	}
 	if f.From > f.To {
 		return nil, errors.New("from must not be after to")

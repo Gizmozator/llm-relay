@@ -81,6 +81,12 @@ type UsageFilter struct {
 	From     string // YYYY-MM-DD inclusive, "" = open
 	To       string // YYYY-MM-DD inclusive, "" = open
 	Since    string // RFC3339 UTC inclusive, "" = open (live-window queries)
+	// TZOffset shifts day bucketing and the From/To bounds to a viewer's
+	// clock: minutes east of UTC (120 = UTC+2, -60 = UTC-1). 0 — the
+	// default — keeps every query byte-identical to plain UTC, so callers
+	// that do not set it are unaffected. A fixed offset for the whole
+	// range: no DST history (callers pass the viewer's offset of *now*).
+	TZOffset int
 }
 
 // scopedErr refuses a zero-value user scope: UserID == 0 without AllUsers
@@ -115,16 +121,40 @@ func (f *UsageFilter) where() (string, []any) {
 	}
 	if f.From != "" {
 		conds = append(conds, `u.ts >= ?`)
-		args = append(args, f.From+"T00:00:00Z")
+		args = append(args, f.dayBound(f.From, 0))
 	}
 	if f.To != "" {
-		conds = append(conds, `u.ts < datetime(?, '+1 day')`)
-		args = append(args, f.To+"T00:00:00Z")
+		if f.TZOffset == 0 {
+			conds = append(conds, `u.ts < datetime(?, '+1 day')`)
+			args = append(args, f.To+"T00:00:00Z")
+		} else {
+			// The To-day's local end (= To+1 local midnight) as a UTC
+			// instant, computed in Go; the bound stays exclusive.
+			conds = append(conds, `u.ts < ?`)
+			args = append(args, f.dayBound(f.To, 1))
+		}
 	}
 	if len(conds) == 0 {
 		return "", args
 	}
 	return " WHERE " + join(conds, " AND "), args
+}
+
+// dayBound returns the UTC RFC3339 instant of local midnight on the given
+// YYYY-MM-DD date (plus `days` days) at the filter's TZOffset: local
+// midnight = UTC midnight minus the offset. With TZOffset == 0 it is the
+// plain UTC bound, byte-identical to the pre-offset form. A malformed date
+// falls back to that plain bound (the API validates the format before the
+// store sees it; this keeps where() total and the fallback conservative).
+func (f *UsageFilter) dayBound(date string, days int) string {
+	if f.TZOffset == 0 {
+		return date + "T00:00:00Z"
+	}
+	t, err := time.Parse("2006-01-02", date)
+	if err != nil {
+		return date + "T00:00:00Z"
+	}
+	return t.UTC().AddDate(0, 0, days).Add(-time.Duration(f.TZOffset) * time.Minute).Format(time.RFC3339)
 }
 
 func join(parts []string, sep string) string {
@@ -178,6 +208,17 @@ func SummarizeUsage(db *sql.DB, f *UsageFilter, groupBy string) (UsageGroup, []U
 	}
 	where, args := f.where()
 
+	// Day buckets split at the viewer's local midnight when an offset is
+	// set: shift each ts by the offset before taking the date, with the
+	// modifier as a bound parameter (never interpolated into the SQL). The
+	// SELECT-expr arg is prepended before the where() args to match the
+	// placeholder order.
+	exprArgs := []any{}
+	if groupBy == "day" && f.TZOffset != 0 {
+		expr = `strftime('%Y-%m-%d', u.ts, ?)`
+		exprArgs = append(exprArgs, fmt.Sprintf("%+d minutes", f.TZOffset))
+	}
+
 	totals := UsageGroup{}
 	err := db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0),
 			COALESCE(SUM(cached_tokens),0), COALESCE(SUM(cache_write_tokens),0), COALESCE(SUM(cost_total),0)
@@ -193,7 +234,7 @@ func SummarizeUsage(db *sql.DB, f *UsageFilter, groupBy string) (UsageGroup, []U
 		FROM usage_log u
 		LEFT JOIN api_keys k ON k.id = u.api_key_id
 		LEFT JOIN users us ON us.id = u.user_id`+where+
-		` GROUP BY gk ORDER BY gk`, args...)
+		` GROUP BY gk ORDER BY gk`, append(exprArgs, args...)...)
 	if err != nil {
 		return totals, nil, err
 	}

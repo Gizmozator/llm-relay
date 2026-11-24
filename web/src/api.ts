@@ -588,6 +588,9 @@ export type UsageQuery = {
   user_id?: number;
   key_id?: number;
   model?: string;
+  /** Viewer's minutes east of UTC (east-positive). Day buckets split at
+   *  the viewer's local midnight with it; absent = 0 = UTC. */
+  tz_offset?: number;
 };
 
 export const api = {
