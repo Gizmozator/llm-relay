@@ -302,6 +302,15 @@ the Go binary is a static cross-compile, so no emulation is needed. The first
 run auto-creates a `docker-container` buildx builder (`BUILDER=…` to name it).
 `make docker-build` remains the fast single-arch local build for development.
 
+Every non-200 request is mirrored to stdout: a one-line summary (`relay: 499
+…` with user, key, model, IP, duration and token counts) and, for streams, a
+diagnostic of what the relay saw before the connection died — time to the
+upstream's first line, lines/bytes forwarded, keepalives sent, context error.
+That distinguishes "the client gave up during a long prefill" from "the
+upstream broke mid-generation", and is the line to cross-reference against a
+reverse proxy's access log when a 499 appears (the relay cannot see *which*
+hop upstream hung up — an app, a tunnel and a proxy all look the same).
+
 ## Layout
 
 ```

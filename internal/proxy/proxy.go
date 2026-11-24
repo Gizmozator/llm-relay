@@ -547,11 +547,36 @@ type streamLine struct {
 // "line" is a broken or hostile upstream). During upstream silence a keepalive
 // comment is written so edge proxies keep the connection. Returns 499 on
 // client hang-up, 500 if the upstream stream broke, 200 on clean EOF.
-func (h *Handler) copyStream(w http.ResponseWriter, body io.Reader, acc *sseAccum, r *http.Request) int {
+//
+// Every non-200 exit logs a diagnostic line. The relay cannot tell WHO hung
+// up — an app, a Cloudflare tunnel and an nginx proxy all look identical from
+// here — so the log records what the relay did see: time to the upstream's
+// first line, how much was forwarded, keepalives sent, and the context error.
+// Cross-reference that with the proxy access logs to find the hop that quit.
+func (h *Handler) copyStream(w http.ResponseWriter, body io.Reader, acc *sseAccum, r *http.Request) (status int) {
 	fl, _ := w.(http.Flusher)
 	lines := make(chan streamLine, 1)
 	done := make(chan struct{})
 	defer close(done)
+	start := time.Now()
+	var (
+		firstLine          time.Duration // when the upstream's first line arrived
+		gotFirst           bool
+		fwdLines, fwdBytes int
+		keeps              int
+	)
+	defer func() {
+		if status == http.StatusOK {
+			return
+		}
+		first := "never"
+		if gotFirst {
+			first = firstLine.Round(time.Millisecond).String()
+		}
+		log.Printf("relay: stream %d after %v (client %s): upstream first line %s, forwarded %d lines/%d B, %d keepalives, ctx=%v",
+			status, time.Since(start).Round(time.Millisecond), h.clientIP(r), first,
+			fwdLines, fwdBytes, keeps, r.Context().Err())
+	}()
 	go func() {
 		defer close(lines)
 		sc := bufio.NewScanner(body)
@@ -592,9 +617,15 @@ func (h *Handler) copyStream(w http.ResponseWriter, body io.Reader, acc *sseAccu
 					return http.StatusInternalServerError
 				}
 			}
+			if !gotFirst {
+				gotFirst = true
+				firstLine = time.Since(start)
+			}
 			if _, werr := w.Write(sl.line); werr != nil {
 				return statusClientClosed
 			}
+			fwdLines++
+			fwdBytes += len(sl.line)
 			if fl != nil {
 				fl.Flush()
 			}
@@ -606,6 +637,7 @@ func (h *Handler) copyStream(w http.ResponseWriter, body io.Reader, acc *sseAccu
 			if _, werr := w.Write(keepaliveLine); werr != nil {
 				return statusClientClosed
 			}
+			keeps++
 			if fl != nil {
 				fl.Flush()
 			}
@@ -703,6 +735,15 @@ func (h *Handler) record(record bool, start time.Time, u *store.User, k *store.A
 		ev.FedDirection = fed.direction
 		ev.FedUser = fed.user
 		ev.FedPeerID = fed.peerID
+	}
+	// Console mirror of every error row: the usage table shows these, but a
+	// `docker logs` tail should catch them too — with the fields that tell a
+	// client hang-up from an upstream break at a glance (a 499 with out>0
+	// died mid-generation; out=0 with a big prompt died during prefill).
+	if status >= 400 {
+		log.Printf("relay: %d %s model=%s user=%s key=%q ip=%s %dms stream=%v in=%d cached=%d out=%d est=%v err=%q",
+			status, endpoint, requested, u.Username, k.Name, ev.ClientIP, ev.LatencyMS,
+			stream, tok.Prompt, tok.Cached, tok.Completion, estimated, errMsg)
 	}
 	h.Rec.Submit(ev)
 	if fed != nil && fed.mirror != nil {

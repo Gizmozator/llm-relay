@@ -1,10 +1,12 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -159,6 +161,38 @@ func TestCopyStreamKeepaliveDuringSilence(t *testing.T) {
 	}
 	if tok, ok := acc.result(); !ok || tok.Prompt != 5 || tok.Completion != 2 {
 		t.Errorf("accumulator missed usage after keepalives: %+v ok=%v", tok, ok)
+	}
+}
+
+// A client hang-up mid-stream must log the diagnostic line the operator
+// needs to tell "who quit" apart: upstream TTFB, forwarded volume, ctx error.
+func TestCopyStreamHangupLogsDiagnostic(t *testing.T) {
+	var buf bytes.Buffer
+	old := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(old)
+
+	rp, wp := io.Pipe()
+	defer wp.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	r := httptest.NewRequest(http.MethodPost, "/", nil).WithContext(ctx)
+	go func() {
+		time.Sleep(30 * time.Millisecond) // upstream stays silent, then client quits
+		cancel()
+	}()
+	acc := newSSEAccum(EpChat)
+	if got := (&Handler{}).copyStream(httptest.NewRecorder(), rp, acc, r); got != statusClientClosed {
+		t.Fatalf("status = %d, want %d", got, statusClientClosed)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "stream 499") {
+		t.Fatalf("no 499 diagnostic logged: %q", out)
+	}
+	if !strings.Contains(out, "upstream first line never") {
+		t.Fatalf("diagnostic must record that the upstream never answered: %q", out)
+	}
+	if !strings.Contains(out, "context canceled") {
+		t.Fatalf("diagnostic must carry the context error: %q", out)
 	}
 }
 

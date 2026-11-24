@@ -141,3 +141,9 @@ None open. (Hub-side price overrides: out of scope, Decision 2.)
   headless box never binds the admin listener, so it never signs or parses a
   JWT. It stays required for a full server, and if set in any mode must still
   clear the 32-char HS256 floor. Dropped from the headless `.env.example`.
+- 2026-11-24 — error console logging (owner request, chasing intermittent
+  499s behind Cloudflare tunnel + nginx): every non-200 usage row now prints
+  a one-line summary in `record`, and `copyStream` logs a stream diagnostic
+  (upstream TTFB, lines/bytes forwarded, keepalives sent, context error) on
+  every non-200 exit. The relay cannot tell which upstream hop hung up — the
+  log gives what to cross-reference against proxy access logs instead.
