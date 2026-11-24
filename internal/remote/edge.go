@@ -227,10 +227,12 @@ func (e *Edge) forward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hdr := edgeRequestHeaders(r.Header)
-	// Stamp the direct client's address: the relay's metering (and its
-	// TRUST_PROXY_HEADERS rule) then sees the LAN client as the rightmost
-	// X-Forwarded-For entry — appended by the operator's own box, which
-	// is exactly what "trust your own proxy" means.
+	// Stamp the direct client's address. edgeRequestHeaders already dropped
+	// any client-supplied X-Forwarded-For / X-Real-IP (the connector cannot
+	// vouch for what a LAN client claims), so this append is the ONLY
+	// X-Forwarded-For on the frame: the relay (with TRUST_PROXY_HEADERS on)
+	// sees exactly the socket peer this operator-owned box accepted — the
+	// honest meaning of "trust your own proxy."
 	if ip, _, perr := net.SplitHostPort(r.RemoteAddr); perr == nil {
 		hdr = append(hdr, [2]string{"X-Forwarded-For", ip})
 	}

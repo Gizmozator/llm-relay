@@ -153,11 +153,11 @@ func (r *Registry) serveEdgeReq(c *fed.Conn, handler http.Handler, backendID int
 		httpReq.Header.Set("Content-Type", "application/json")
 	}
 	// Metering's client address: the connector box's socket (the honest
-	// direct peer). The edge listener appended the LAN client to
-	// X-Forwarded-For, so with TRUST_PROXY_HEADERS on the proxy rule
-	// picks the real client (rightmost entry = appended by the
-	// operator's own box); with it off the box's address is recorded —
-	// exactly what the trust model promises either way.
+	// direct peer). The edge listener emits exactly one X-Forwarded-For —
+	// the LAN client it accepted, with any client-supplied XFF dropped — so
+	// with TRUST_PROXY_HEADERS on the proxy rule records that real client;
+	// with it off the box's address is recorded — exactly what the trust
+	// model promises either way.
 	if remoteAddr != "" {
 		httpReq.RemoteAddr = remoteAddr
 	} else {
@@ -273,12 +273,22 @@ func edgeDropHeader(name string) bool {
 }
 
 // edgeRequestHeaders serializes the listener's request headers onto the
-// Req frame verbatim except for edgeDropHeader.
+// Req frame verbatim except for edgeDropHeader and the client-IP
+// attribution headers (X-Forwarded-For / X-Real-IP). Those two are dropped
+// here on purpose: the connector can attest only to its OWN direct peer, so
+// a LAN client's self-reported XFF must not cross the tunnel — otherwise the
+// relay (with TRUST_PROXY_HEADERS on) would read the client's forged value
+// (proxy.clientIP takes the first XFF line) and record a spoofed client_ip.
+// forward() re-adds exactly one XFF: the socket peer the connector saw.
 func edgeRequestHeaders(h http.Header) fed.Headers {
 	var out fed.Headers
 	for k, vs := range h {
 		if edgeDropHeader(k) {
 			continue
+		}
+		switch strings.ToLower(k) {
+		case "x-forwarded-for", "x-real-ip":
+			continue // client-claimed IP: the edge replaces it with its peer
 		}
 		for _, v := range vs {
 			out = append(out, [2]string{k, v})
