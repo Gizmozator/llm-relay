@@ -61,9 +61,9 @@ Proxy requests may carry `X-Session-Id: <string>`; without it the relay derives 
 
 ### Admin — models (public catalog)
 - `GET /api/admin/models` → `{"models":[{"id":1,"name":"halogen","backend_id":1,"backend_name":"halogen","upstream_model":"halogen-qwen3.8-flash-next","visibility":"public","enabled":true,"price_in":100,"price_out":200,"price_cache_read":10,"price_cache_write":0,"context_length":262144,"concurrency_limit":4,"busy_threshold_pct":80,"bench_tok_per_s":41.2,"bench_pp_tok_per_s":1850.4,"bench_at":"...|","fed_visibility":"off","fed_peer_ids":[]}]}`
-- `PATCH /api/admin/models/{id}` — any of `{"name","enabled","visibility","price_in","price_out","price_cache_read","price_cache_write","context_length","concurrency_limit","busy_threshold_pct","bench_tok_per_s","bench_pp_tok_per_s","fed_visibility","fed_peer_ids"}` → model object. `visibility` is `"public"` (listed on `/v1/models`) or `"internal"` (hidden from the catalog but still directly requestable); group members are forced `internal` by the store on every membership edit. `bench_tok_per_s`/`bench_pp_tok_per_s` (float ≥0) set the generation/prompt-processing speed manually and clear `bench_at` (configured value, not a measured benchmark). `busy_threshold_pct` (0–10000, else `400`) is the mean-busy % at which the agent surfaces report `busy`; `0` = default 80, values over 100 require that many parallel streams (300 = busy from 3 concurrent). New models are created with `80`.
+- `PATCH /api/admin/models/{id}` — any of `{"name","enabled","visibility","price_in","price_out","price_cache_read","price_cache_write","context_length","concurrency_limit","busy_threshold_pct","bench_tok_per_s","bench_pp_tok_per_s","fed_visibility","fed_peer_ids"}` → model object. `visibility` is `"public"` (listed on `/v1/models`) or `"internal"` (hidden from the catalog but still directly requestable); group members are forced `internal` by the store on every membership edit. `bench_tok_per_s`/`bench_pp_tok_per_s` (float ≥0) set the generation/prompt-processing speed manually and clear `bench_at` (configured value, not a measured benchmark). `busy_threshold_pct` (0–10000, else `400`) is the mean-busy % at which the agent surfaces report `busy`; `0` = default 80, values over 100 require that many parallel streams (300 = busy from 3 concurrent). New models are created with `80`. **Federated (materialized) rows** — models on a synthetic `peer://`/`hub://` backend, mirroring a peer's catalog — take only `enabled`: a patch that mentions any other field is refused whole with `400 "cannot edit a federated model's settings - managed by the peer"` and nothing is written (such an edit would be overwritten by the next catalog push anyway); `{"enabled":…}` alone, or a patch that mentions no field, is a `200`.
 - `POST /api/admin/models/{id}/benchmark` — runs two timed **streaming** calls against the upstream. Decode pass (TG): natural-prose prompt; speed = completion tokens over first→last token, so speculative/MTP decoding is measured at realistic acceptance rates. Prefill pass (PP): ~10k-token randomized filler prompt (shrunk to ¾ of `context_length` when that is smaller), `max_tokens=1`; speed = `prompt_tokens` over request→first token (prefill completes before the first token is emitted). May take minutes; `409` while another benchmark runs; `400` for a federated (materialized) model — its "upstream" is a peer relay, not an engine. → `{"bench_tok_per_s":41.2,"completion_tokens":700,"seconds":17.0,"bench_pp_tok_per_s":1850.4,"prompt_tokens":9876,"pp_seconds":5.3,"bench_at":"..."}`. A failed prefill pass never voids the decode result: TG is stored, the previous PP value is kept, and the response carries `"pp_error":"..."` instead of the `bench_pp_tok_per_s`/`prompt_tokens`/`pp_seconds` fields.
-- `DELETE /api/admin/models/{id}` → `204`
+- `DELETE /api/admin/models/{id}` → `204`; a federated (materialized) row is refused with `400 "cannot delete a federated model - remove the peer that shares it"` — the row is the peer's mirror, so removal means dropping the peer (Servers page), not deleting the row here.
 
 ### Admin — model groups
 A group pools several catalog model rows (typically the same model on different backends) under one public name; the proxy resolves the name to one member per session (sessions stay pinned to their member). The group owns its name: it may not collide with a public model name or another group. Members are forced `internal` while they belong to the group and become `public` again when they leave; a member row stays directly requestable either way.
@@ -133,7 +133,9 @@ Per-model sharing switch (rides the model object everywhere the admin API
 returns models): `PATCH /api/admin/models/{id}` gains `fed_visibility`
 (`"off"` default | `"all"` | `"allowlist"`, else `400`) and `fed_peer_ids`
 (replaces the peer allowlist wholesale; only accepted together with
-`fed_visibility:"allowlist"`, unknown peer id → `400`). PATCH semantics:
+`fed_visibility:"allowlist"`, unknown peer id → `400`); on a federated
+(materialized) row the pair is peer-owned, so mentioning it is a `400` (see the
+`PATCH /api/admin/models/{id}` line). PATCH semantics:
 switching to `"allowlist"` without `fed_peer_ids` keeps the stored list;
 switching to `"off"`/`"all"` clears it (those modes share with
 nobody/everybody). The model row surfaces both as `fed_visibility` +
@@ -224,7 +226,9 @@ it (the upsert update sets `enabled=1`, since the peer still advertises
 the model) — the durable kill switches are the peer disable and the
 synthetic-backend disable. Synthetic backends are
 never HTTP-probed — their health **is** the channel — and the admin probe
-and benchmark endpoints refuse them (`400`).
+and benchmark endpoints refuse them (`400`); the model edit and delete
+endpoints refuse the materialized **rows** the same way (only `enabled` is
+the hub admin's, and removal is per-peer).
 Collision policy: a shared name owned by a local group or a local
 (non-synthetic) public model is **skipped with a logged warning** (the
 admin renames on their side); two peers advertising the same name is fine
