@@ -10,7 +10,10 @@
 // whom (fed_user, hub-stamped), and what local users spent on federated
 // (synthetic-backend) models — that slice is identified by the backend
 // scheme, not by fed columns (spoke-local consumption rows are
-// deliberately unstamped).
+// deliberately unstamped). Hub-local usage never appears in any of these
+// rollups; FedLocalOnlyUsers names the accounts that are usage-present but
+// ledger-absent, so the UI can explain the gap instead of showing a blank
+// (ticket #13).
 //
 // All queries take a `since` UTC RFC3339 bound (the same convention as
 // UsageFilter.Since: ts is stored as UTC RFC3339 text, so lexicographic
@@ -169,6 +172,60 @@ func foldFedUser(byUser map[int64]*FedUserTotal, id int64, user, dir string, c F
 	} else {
 		addFedCounts(&e.Consumed, c)
 	}
+}
+
+// FedLocalOnlyEntry is one account whose window usage is entirely
+// hub-local: unstamped rows and no federation rows, so the fairness ledger
+// (FedUserTotals) cannot show it. The stats endpoints carry this list so
+// the UI can say "no federation activity — this account's usage is local"
+// instead of leaving a blank that reads as missing data (ticket #13).
+// UserID distinguishes entries whose label collapsed to '(deleted user)'.
+type FedLocalOnlyEntry struct {
+	UserID int64     `json:"user_id"`
+	User   string    `json:"user"`
+	Counts FedCounts `json:"counts"`
+}
+
+// FedLocalOnlyUsers lists the accounts with unstamped (hub-local) usage in
+// the window and NO federation rows in it — exactly the set that is present
+// on the Usage page but absent from the ledger. A user with BOTH local and
+// fed rows is not listed (they are already in the ledger; the hint would be
+// wrong), and neither is a user with no usage at all — the caller tells
+// "no federation activity" apart from "no data at all" by whether this list
+// or the ledger has entries. userID 0 = every user; otherwise only that
+// user's entry (empty whenever they have any federation row).
+func FedLocalOnlyUsers(db *sql.DB, since string, userID int64) ([]FedLocalOnlyEntry, error) {
+	// `f.user_id IS u.user_id` is the NULL-safe comparison (SQLite IS):
+	// usage_log.user_id is nullable, and = would silently match nothing
+	// against NULL and leak a fed-less orphan into the list while a fed
+	// row for the same unknown user exists.
+	where := `u.fed_direction = '' AND u.ts >= ? AND NOT EXISTS (
+			SELECT 1 FROM usage_log f
+			WHERE f.user_id IS u.user_id AND f.fed_direction != '' AND f.ts >= ?)`
+	args := []any{since, since}
+	if userID != 0 {
+		where += ` AND u.user_id = ?`
+		args = append(args, userID)
+	}
+	rows, err := db.Query(`SELECT COALESCE(u.user_id,0), COALESCE(us.username,'(deleted user)'), `+fedCountAggs+`
+		FROM usage_log u LEFT JOIN users us ON us.id = u.user_id
+		WHERE `+where+`
+		GROUP BY COALESCE(u.user_id,0), us.username ORDER BY 2, 1`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []FedLocalOnlyEntry{}
+	for rows.Next() {
+		var e FedLocalOnlyEntry
+		if err := rows.Scan(&e.UserID, &e.User, &e.Counts.Requests, &e.Counts.Prompt,
+			&e.Counts.Completion, &e.Counts.Cached, &e.Counts.CacheWrite,
+			&e.Counts.CostMicro); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
 }
 
 // FedPeerTotals is one peer's served/consumed rollup (hub Servers page).

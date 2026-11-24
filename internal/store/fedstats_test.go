@@ -389,3 +389,120 @@ func TestFedUserTotalsOwnerNotDoubleCounted(t *testing.T) {
 		t.Fatalf("entries = %+v, want owner served 4p/1req exactly once", all)
 	}
 }
+
+// Ticket #13: the ledger carries TOKEN usage, not just request counts and
+// cost — every FedCounts field (prompt/completion/cached/cache_write) must
+// roll up per user on BOTH the served and the consumed side.
+func TestFedUserTotalsTokenTotals(t *testing.T) {
+	d := migratedDB(t)
+	alice := fedUser(t, d, "alice")
+	peerID := int64(1)
+	// Two consumed rows and two served rows, each token kind distinct so a
+	// dropped or crossed aggregation cannot pass by coincidence.
+	insertFed(t, d, &store.UsageEvent{UserID: alice, FedDirection: "consumed", FedPeerID: &peerID,
+		Prompt: 100, Completion: 20, Cached: 40, CacheWrite: 5, CostTotal: 300})
+	insertFed(t, d, &store.UsageEvent{UserID: alice, FedDirection: "consumed", FedPeerID: &peerID,
+		Prompt: 50, Completion: 10, Cached: 20, CacheWrite: 5, CostTotal: 200})
+	insertFed(t, d, &store.UsageEvent{UserID: alice, FedDirection: "served", FedPeerID: &peerID,
+		Prompt: 30, Completion: 7, Cached: 10, CacheWrite: 2, CostTotal: 90})
+	insertFed(t, d, &store.UsageEvent{UserID: alice, FedDirection: "served", FedPeerID: &peerID,
+		Prompt: 20, Completion: 3, Cached: 5, CacheWrite: 1, CostTotal: 60})
+
+	all, err := store.FedUserTotals(d, ago(30*24*time.Hour), alice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("entries = %d, want 1: %+v", len(all), all)
+	}
+	got := all[0]
+	want := store.FedCounts{Requests: 2, Prompt: 150, Completion: 30, Cached: 60, CacheWrite: 10, CostMicro: 500}
+	if got.Consumed != want {
+		t.Errorf("consumed = %+v, want %+v", got.Consumed, want)
+	}
+	want = store.FedCounts{Requests: 2, Prompt: 50, Completion: 10, Cached: 15, CacheWrite: 3, CostMicro: 150}
+	if got.Served != want {
+		t.Errorf("served = %+v, want %+v", got.Served, want)
+	}
+}
+
+// Ticket #13: the "no federation activity" state. An account whose window
+// usage is entirely hub-local has no ledger row (by design) — the local-only
+// rollup names it, so the UI can explain the gap instead of showing a blank.
+// A user with any fed row is NOT listed (they are in the ledger already),
+// and a user with no usage at all is absent either way (that is "no data").
+func TestFedLocalOnlyUsers(t *testing.T) {
+	d := migratedDB(t)
+	local := fedUser(t, d, "local-only")
+	mixed := fedUser(t, d, "mixed")
+	peerID := int64(1)
+	// local-only: two hub-local rows (15p/5c) and nothing federated.
+	insertFed(t, d, &store.UsageEvent{UserID: local, Prompt: 10, Completion: 3, CostTotal: 50})
+	insertFed(t, d, &store.UsageEvent{UserID: local, Prompt: 5, Completion: 2, CostTotal: 25})
+	// mixed: local usage AND a fed row — already visible in the ledger.
+	insertFed(t, d, &store.UsageEvent{UserID: mixed, Prompt: 8})
+	insertFed(t, d, &store.UsageEvent{UserID: mixed, FedDirection: "consumed",
+		FedPeerID: &peerID, Prompt: 4})
+	// "quiet" is created but gets no rows at all: no data, not no-activity.
+	fedUser(t, d, "quiet")
+	// An old local row (outside the window) must not resurrect an entry.
+	insertFed(t, d, &store.UsageEvent{UserID: fedUser(t, d, "stale"),
+		TS: ago(40 * 24 * time.Hour), Prompt: 9})
+
+	since := ago(30 * 24 * time.Hour)
+	got, err := store.FedLocalOnlyUsers(d, since, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("entries = %d, want 1 (only local-only; mixed has a fed row, quiet has no usage, stale is out of window): %+v", len(got), got)
+	}
+	byName := map[string]store.FedLocalOnlyEntry{}
+	for _, e := range got {
+		byName[e.User] = e
+	}
+	lo := byName["local-only"]
+	if lo.UserID != local || lo.Counts.Requests != 2 || lo.Counts.Prompt != 15 ||
+		lo.Counts.Completion != 5 || lo.Counts.CostMicro != 75 {
+		t.Errorf("local-only = %+v, want 2req/15p/5c/75micro", lo)
+	}
+	if _, ok := byName["mixed"]; ok {
+		t.Errorf("mixed user with a fed row must not be listed: %+v", got)
+	}
+	if _, ok := byName["quiet"]; ok {
+		t.Errorf("user with no usage at all must not be listed: %+v", got)
+	}
+	if _, ok := byName["stale"]; ok {
+		t.Errorf("out-of-window local row must not count: %+v", got)
+	}
+
+	// Scoped: the local-only user's own query finds them; the mixed user's
+	// finds nobody (their local row does not make them ledger-invisible).
+	one, err := store.FedLocalOnlyUsers(d, since, local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(one) != 1 || one[0].User != "local-only" {
+		t.Errorf("scoped local-only = %+v, want the one entry", one)
+	}
+	one, err = store.FedLocalOnlyUsers(d, since, mixed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(one) != 0 {
+		t.Errorf("scoped mixed = %+v, want empty", one)
+	}
+
+	// The ledger itself stays honest: the local-only user has NO phantom
+	// zero row in FedUserTotals — the no-federation state is absence from
+	// the ledger plus presence in this list, never a fake entry.
+	totals, err := store.FedUserTotals(d, since, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range totals {
+		if e.UserID == local {
+			t.Errorf("local-only user leaked a ledger row: %+v", e)
+		}
+	}
+}
