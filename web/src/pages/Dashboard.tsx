@@ -3,6 +3,8 @@ import { api, errMsg } from '../api';
 import type { LiveConnection, LiveModel, LiveResponse } from '../api';
 import { useAuth } from '../auth';
 import { fmtAgo, fmtDateTime, fmtDurationSec, fmtInt } from '../format';
+import { formatMetricValue, LIVE_METRICS } from '../metrics';
+import type { Metric } from '../metrics';
 import { Banner, Card, Empty, Loading } from '../components/ui';
 import LineChart from '../components/LineChart';
 
@@ -46,13 +48,6 @@ function poolStatus() {
   );
 }
 
-type Metric = 'requests' | 'tokens';
-
-const METRIC_OPTIONS: { value: Metric; label: string }[] = [
-  { value: 'requests', label: 'Requests / min' },
-  { value: 'tokens', label: 'Tokens / min' },
-];
-
 /** Group connection rows per session (user+key+model+endpoint+session+IP).
  *  One busy agent session is many short requests, but the panel answers
  *  "who is on which model" — that is one row per group. Rows arrive sorted
@@ -81,7 +76,7 @@ export default function DashboardPage() {
   const admin = user?.role === 'admin';
   const [data, setData] = useState<LiveResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [metric, setMetric] = useState<Metric>('requests');
+  const [metric, setMetric] = useState<Metric>(LIVE_METRICS[0]);
 
   useEffect(() => {
     let stopped = false;
@@ -156,13 +151,13 @@ export default function DashboardPage() {
   const chart = useMemo(() => {
     return {
       labels: buckets.map((b) => b.minute.slice(11, 16)),
-      values: buckets.map((b) =>
-        metric === 'requests' ? b.requests : b.prompt_tokens + b.completion_tokens,
-      ),
+      values: buckets.map((b) => metric.value(b)),
     };
   }, [buckets, metric]);
 
-  const fmtValue = (v: number) => fmtInt(v);
+  // Live buckets carry no cost, so every live metric is a plain count; the
+  // empty currency is never rendered (no money metric reaches this page).
+  const fmtValue = (v: number) => formatMetricValue(metric, v, '');
 
   // Utilization graph: one line per model with traffic in the window. The
   // axis tops out at the widest concurrency_limit × 100 % (4 slots → 400 %),
@@ -225,12 +220,15 @@ export default function DashboardPage() {
           <label className="field">
             <select
               className="input"
-              value={metric}
-              onChange={(e) => setMetric(e.target.value as Metric)}
+              value={metric.id}
+              onChange={(e) => {
+                const next = LIVE_METRICS.find((m) => m.id === e.target.value);
+                if (next) setMetric(next);
+              }}
             >
-              {METRIC_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
+              {LIVE_METRICS.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label}
                 </option>
               ))}
             </select>
@@ -242,7 +240,7 @@ export default function DashboardPage() {
           <LineChart
             labels={chart.labels}
             values={chart.values}
-            label={METRIC_OPTIONS.find((o) => o.value === metric)?.label ?? ''}
+            label={metric.label}
             format={fmtValue}
           />
         )}

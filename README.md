@@ -15,7 +15,8 @@ Several relays can also **federate** — a hub and its spokes pool model capacit
 ## Dashboard
 
 After login every user lands on the **Dashboard**: a live server-wide view of
-the last hour — a per-minute traffic graph (requests / tokens), a per-model
+the last hour — a per-minute traffic graph with a metric dropdown (requests,
+total / in new / cached / cache-write / out tokens), a per-model
 **utilization graph** (busy time per minute; the axis scales to the model's
 concurrency limit, so 4 parallel slots read as 0–400 %), how many streams are
 decoding right now per model, and which catalog models are online (backend
