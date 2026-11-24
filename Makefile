@@ -9,6 +9,12 @@ BIN      ?= llm-relay
 REGISTRY ?= gitea.rantaeskola.fi/gizmoz/llm-relay
 VERSION  ?= latest
 
+# Build stamp for the binary (main.version, shown to federation peers on the
+# Federation page): git describe when this is a git checkout, "dev" otherwise
+# (tarball builds without history). The Dockerfile cannot derive it — .git is
+# not in the build context — so the docker targets pass it as a build-arg.
+GIT_DESC := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+
 # Export so child processes see these. Make variables are NOT exported by
 # default, and `docker compose` is a child process rather than a sub-make:
 # without this, `make docker-up PORT=9100` is silently ignored and the compose
@@ -25,7 +31,7 @@ help: ## list all targets
 	@awk 'BEGIN{FS=":.*?## "} /^[a-zA-Z0-9_.-]+:.*## /{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 build: ## build the static binary -> $(BIN)
-	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BIN) ./cmd/$(BIN)
+	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=$(GIT_DESC)" -o $(BIN) ./cmd/$(BIN)
 
 # Shared design system (base-styles repo). web/src/base.css is vendored and
 # committed; refresh with `make css`. The Docker web stage copies it from the
@@ -80,7 +86,7 @@ clean: ## remove build artifacts
 # ------------------------------------------------------------------ docker
 
 docker-build: ## build the container image locally for the host arch ($(IMAGE))
-	docker build -t $(IMAGE) .
+	docker build -t $(IMAGE) --build-arg VERSION=$(GIT_DESC) .
 
 # Multi-arch release needs a container-driver builder (the default `docker`
 # driver cannot emit a multi-platform manifest). PLATFORMS is the common
@@ -93,7 +99,7 @@ dockerx-setup: ## create the multi-arch buildx builder once (docker-container dr
 	  || docker buildx create --name $(BUILDER) --driver docker-container --bootstrap
 
 docker-release: dockerx-setup ## cross-build $(PLATFORMS) + push multi-arch manifest to the registry (VERSION=x.y.z)
-	docker buildx build --builder $(BUILDER) --platform $(PLATFORMS) -t $(REGISTRY):$(VERSION) --push .
+	docker buildx build --builder $(BUILDER) --platform $(PLATFORMS) -t $(REGISTRY):$(VERSION) --build-arg VERSION=$(VERSION) --push .
 
 docker-up: ## start the stack detached
 	docker compose up -d --build

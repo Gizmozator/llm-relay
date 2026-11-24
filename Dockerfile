@@ -44,9 +44,16 @@ COPY --from=web /web/dist ./web/dist
 # CGO off => fully static binary => tiny final image. GOOS/GOARCH follow the
 # requested target so one `buildx --platform=linux/amd64,linux/arm64` run
 # emits both from a single host.
+#
+# VERSION is the build stamp the relay reports to federation peers
+# (main.version). The .git dir is not in the build context (.dockerignore),
+# so it cannot be derived here: `make docker-build` passes git describe and
+# `make docker-release` passes the release VERSION. Unstamped builds report
+# "dev".
+ARG VERSION=dev
 ENV CGO_ENABLED=0
 RUN GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
-    go build -trimpath -ldflags="-s -w" -o /out/llm-relay ./cmd/llm-relay
+    go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/llm-relay ./cmd/llm-relay
 
 # ---------- runtime ----------
 FROM scratch

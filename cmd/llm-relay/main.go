@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -28,6 +29,33 @@ import (
 	"llm-relay/internal/store"
 	"llm-relay/internal/usage"
 )
+
+// version is the build stamp, injected at link time with
+// -ldflags "-X main.version=…" (make build, and the Dockerfile build stage
+// via --build-arg VERSION=…). Empty in unstamped builds.
+var version = ""
+
+// buildVersion reports this build's version: the ldflags stamp if present,
+// else the module version from the Go build info (set for
+// `go install module@version` builds), else "dev". It is what the
+// federation hello/hello_ack carries, so peers show what this relay runs.
+func buildVersion() string {
+	if version != "" {
+		return version
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		if v := bi.Main.Version; v != "" && v != "(devel)" {
+			return v
+		}
+	}
+	return "dev"
+}
+
+// fedOptions builds the federation manager options. The version is the
+// only field main sets; everything else takes the production defaults.
+func fedOptions() *fed.Options {
+	return &fed.Options{Version: buildVersion()}
+}
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.LUTC)
@@ -62,8 +90,9 @@ func main() {
 	// owns the hub registry + spoke dialer; Reload applies the stored
 	// role. Deferred below, AFTER AttachServe: a dialer started here could
 	// receive catalog frames whose tunnel would hit a mux with no frame
-	// server mounted yet.
-	fedMgr := fed.NewManager(d, nil)
+	// server mounted yet. fedOptions() stamps the build version into the
+	// hello/hello_ack exchange so peers report real versions (#16).
+	fedMgr := fed.NewManager(d, fedOptions())
 	defer fedMgr.Close()
 
 	// Remote-backend registry (plan 2026-11-24-remote-backend-v1): live

@@ -211,6 +211,38 @@ func TestConnectRoleAndAuthMatrix(t *testing.T) {
 	}
 }
 
+// The version injected into fed.Options is what the hub answers in
+// hello_ack — the spoke's "Hub version" card reads exactly that value,
+// so a stamped build must show its stamp, not the "dev" default.
+func TestHubHelloAckCarriesInjectedVersion(t *testing.T) {
+	e := newHubEnv(t, &fed.Options{Version: "v9.8.7"})
+	e.setRole(t, store.FedRoleHub)
+	c, err := wsDial(t, wsURL(e.srv), e.token, e.srv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.CloseNow()
+	ack := clientHello(t, c, fed.Protocol)
+	if ack.Version != "v9.8.7" {
+		t.Errorf("hello_ack version = %q, want the injected v9.8.7", ack.Version)
+	}
+}
+
+// Without an injected version the hub still reports the honest default.
+func TestHubHelloAckDefaultsToDev(t *testing.T) {
+	e := newHubEnv(t, nil)
+	e.setRole(t, store.FedRoleHub)
+	c, err := wsDial(t, wsURL(e.srv), e.token, e.srv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.CloseNow()
+	ack := clientHello(t, c, fed.Protocol)
+	if ack.Version != "dev" {
+		t.Errorf("hello_ack version = %q, want dev", ack.Version)
+	}
+}
+
 func TestProtoMismatch(t *testing.T) {
 	e := newHubEnv(t, nil)
 	e.setRole(t, store.FedRoleHub)

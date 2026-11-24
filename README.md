@@ -346,6 +346,17 @@ the Go binary is a static cross-compile, so no emulation is needed. The first
 run auto-creates a `docker-container` buildx builder (`BUILDER=…` to name it).
 `make docker-build` remains the fast single-arch local build for development.
 
+Every binary carries its build version: `make build` stamps it with
+`git describe --tags --always --dirty` (`-ldflags "-X main.version=…"`), and
+`make docker-build` / `make docker-release` pass the same stamp (or the
+release `VERSION=…`) into the image build via `--build-arg VERSION=…` — the
+`.git` dir is not in the Docker build context, so the version cannot be
+derived inside the image. An unstamped build falls back to the Go build-info
+module version, then to `dev`. The relay reports this version in the
+federation handshake (hello/hello_ack), so the admin Federation page's peer
+**Version** column and the spoke's **Hub version** card show the version each
+side actually runs.
+
 Every non-200 request is mirrored to stdout: a one-line summary (`relay: 499
 …` with user, key, model, IP, duration and token counts) and, for streams, a
 diagnostic of what the relay saw before the connection died — time to the
