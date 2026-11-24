@@ -41,9 +41,15 @@ class Handler(BaseHTTPRequestHandler):
         if raw is None:
             return 0
         try:
-            return int(raw)
+            n = int(raw)
         except ValueError:
             return None
+        if n < 0:
+            # A negative length parses as an int but poisons the read:
+            # read(-1) blocks until EOF and any other negative misframes the
+            # stream. Treat it exactly like garbage — 400 and close.
+            return None
+        return n
 
     def _drain(self, n):
         # HTTP/1.1 keep-alive hygiene: a request body left unread is parsed

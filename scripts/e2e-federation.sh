@@ -34,10 +34,25 @@ bad() { FAIL=$((FAIL+1)); FAILED+=("$1"); say "FAIL  $1${2:+ — $2}"; }
 # stderr so they never pollute a captured function's stdout.
 die() { FATAL=1; say "FATAL: $*" >&2; exit 1; }
 
+CLEANED=0
 cleanup() {
-  local pids=("${PIDS[@]:-}")
-  for p in "${pids[@]}"; do kill "$p" 2>/dev/null; done
-  for p in "${pids[@]}"; do wait "$p" 2>/dev/null; done
+  [ "$CLEANED" -eq 1 ] && return
+  CLEANED=1
+  local p
+  # First SIGTERM: relays flush logs and close the WS channel cleanly.
+  for p in "${PIDS[@]:-}"; do [ -n "$p" ] && kill "$p" 2>/dev/null; done
+  # Bounded wait, then escalate: a wedged child must not hang the script
+  # forever (an unwaited `wait` would).
+  local deadline=$((SECONDS + 5))
+  for p in "${PIDS[@]:-}"; do
+    [ -n "$p" ] || continue
+    while kill -0 "$p" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do sleep 0.2; done
+    if kill -0 "$p" 2>/dev/null; then
+      say "note: pid $p ignored SIGTERM — sending SIGKILL"
+      kill -9 "$p" 2>/dev/null
+    fi
+    wait "$p" 2>/dev/null
+  done
   # Keep the evidence when anything went wrong; the printed pointers must
   # not point into a deleted directory.
   if [ "$FAIL" -gt 0 ] || [ "$FATAL" -gt 0 ]; then
@@ -46,7 +61,10 @@ cleanup() {
     rm -rf "$WORK"
   fi
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+# Ctrl-C / kill must END the run after cleanup, not resume it mid-flight.
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
 
 # req METHOD URL [BODY] [TOKEN] → "<body>\n<status>" (status on the last
 # line); curl's exit status is preserved for the caller. curl's stderr goes
@@ -79,14 +97,24 @@ api() {
   printf -v "$out" '%s' "$(body_of "$r")"
 }
 
-# extract OUT JQ_EXPR BODY — jq -er extraction into $OUT; FATAL when the
-# result is empty/null/error, so a failed API call never rides on as an
-# empty id inside a later URL or JSON body.
+# extract OUT JQ_EXPR BODY [SECRET] — jq -er extraction into $OUT; FATAL when
+# the result is empty/null/error, so a failed API call never rides on as an
+# empty id inside a later URL or JSON body. Pass SECRET (any non-empty word)
+# for credential responses (keys, tokens): on failure the body is WITHHELD
+# from the log — only the jq error is printed — so a partial secret can never
+# leak into the tee'd transcript.
 extract() {
-  local out=$1 expr=$2 body=$3 val
-  val=$(printf '%s' "$body" | jq -er "$expr" 2>/dev/null) || val=""
-  [ -n "$val" ] || die "extract [$expr] found nothing; body: $(printf '%s' "$body" | head -c 300)"
-  printf -v "$out" '%s' "$val"
+  local out=$1 expr=$2 body=$3 secret=${4:-} val err
+  if val=$(printf '%s' "$body" | jq -er "$expr" 2>/dev/null) && [ -n "$val" ]; then
+    printf -v "$out" '%s' "$val"
+    return 0
+  fi
+  err=$(printf '%s' "$body" | jq -er "$expr" 2>&1 >/dev/null)
+  [ -n "$err" ] || err='empty or null result'
+  if [ -n "$secret" ]; then
+    die "extract [$expr] found nothing (body withheld — credential response); jq: $err"
+  fi
+  die "extract [$expr] found nothing; body: $(printf '%s' "$body" | head -c 300); jq: $err"
 }
 
 # check NAME JQ_EXPR BODY — PASS when jq -e holds, else FAIL with the body tail
@@ -96,6 +124,18 @@ check() {
     ok "$name"
   else
     bad "$name" "jq [$expr] failed; body: $(printf '%s' "$body" | head -c 300)"
+  fi
+}
+
+# expect NAME WANT — assert $REPLY_CODE of the last api call. A mutating call
+# (POST/PATCH/PUT) must answer the code it promises: a 4xx/5xx whose error
+# body happens to survive a later extract/check must not sail through.
+expect() {
+  local name=$1 want=$2
+  if [ "$REPLY_CODE" = "$want" ]; then
+    ok "$name"
+  else
+    bad "$name" "HTTP $REPLY_CODE, want $want; body: $(printf '%s' "${b:-}" | head -c 200)"
   fi
 }
 
@@ -133,7 +173,7 @@ login() { # login ADMIN_URL → token on stdout; stdout stays EMPTY on failure
 start_relay() {
   local name=$1 rp=$2 ap=$3 db=$4
   LISTEN_ADDR="127.0.0.1:$rp" ADMIN_ADDR="127.0.0.1:$ap" DB_PATH="$db" \
-  JWT_SECRET="e2e-secret-not-for-production" \
+  JWT_SECRET="e2e-secret-not-for-production-xx" \
   ADMIN_USERNAME=admin ADMIN_PASSWORD="$ADMIN_PW" \
     "./llm-relay" >"$WORK/$name.log" 2>&1 &
   RELAY_PID=$!
@@ -156,6 +196,15 @@ hub_has()   { local c; hub_catalog c && printf '%s' "$c" | jq -e --arg m "$1" 'a
 hub_lacks() { local c; hub_catalog c && printf '%s' "$c" | jq -e --arg m "$1" '(any(.data[]; .id == $m) | not)' >/dev/null; }
 
 say "== federation e2e — workdir $WORK =="
+
+# ---- preflight: every port must be free ------------------------------------
+# A foreign listener on 18xxx would make relays fail to bind (or worse, let
+# checks talk to the wrong instance). Fail loudly up front, naming the port.
+for p in "$HUB_RELAY" "$HUB_ADMIN" "$SPOKE_RELAY" "$SPOKE_ADMIN" "$ENG_HUB" "$ENG_SPOKE"; do
+  if (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; then
+    die "preflight: 127.0.0.1:$p is already in use — free it before running the e2e"
+  fi
+done
 
 # ---- build + boot ---------------------------------------------------------
 say '-- building the real binary (make build)'
@@ -196,38 +245,47 @@ say '-- both relays up, admins logged in'
 
 # ---- wiring: hub role, backends, sharing, enrollment ----------------------
 api PUT "http://127.0.0.1:$HUB_ADMIN/api/admin/federation" b '{"role":"hub"}' "$HUB"
+expect 'setup: hub role PUT accepted' 200
 check 'setup: hub role accepted' '.role == "hub"' "$b"
 
 api POST "http://127.0.0.1:$HUB_ADMIN/api/admin/backends" b \
   "{\"name\":\"hub-engine\",\"base_url\":\"http://127.0.0.1:$ENG_HUB\"}" "$HUB"
+expect 'setup: hub backend created' 201
 extract HUB_BE '.id' "$b"
 api POST "http://127.0.0.1:$HUB_ADMIN/api/admin/backends/$HUB_BE/models" b \
   '{"model_ids":["mock-hub"]}' "$HUB"
+expect 'setup: hub models imported' 201
 
 api POST "http://127.0.0.1:$SPOKE_ADMIN/api/admin/backends" b \
   "{\"name\":\"spoke-engine\",\"base_url\":\"http://127.0.0.1:$ENG_SPOKE\"}" "$SPOKE"
+expect 'setup: spoke backend created' 201
 extract SPOKE_BE '.id' "$b"
 api POST "http://127.0.0.1:$SPOKE_ADMIN/api/admin/backends/$SPOKE_BE/models" b \
   '{"model_ids":["mock-a","mock-b"]}' "$SPOKE"
+expect 'setup: spoke models imported' 201
 api GET "http://127.0.0.1:$SPOKE_ADMIN/api/admin/models" b '' "$SPOKE"
 SPOKE_MODELS=$b   # keep: the PATCH responses overwrite $b each round
 for m in mock-a mock-b; do
   extract MID ".models[] | select(.name==\"$m\") | .id" "$SPOKE_MODELS"
   api PATCH "http://127.0.0.1:$SPOKE_ADMIN/api/admin/models/$MID" b \
     '{"fed_visibility":"all"}' "$SPOKE"
+  expect "setup: model PATCH shares $m" 200
 done
 api GET "http://127.0.0.1:$SPOKE_ADMIN/api/admin/models" b '' "$SPOKE"
 check 'setup: spoke shares mock-a and mock-b' \
   '[.models[] | select(.fed_visibility=="all") | .name] | sort == ["mock-a","mock-b"]' "$b"
 
 api POST "http://127.0.0.1:$HUB_ADMIN/api/keys" b '{"name":"e2e-client"}' "$HUB"
-extract HUB_KEY '.key' "$b"
+expect 'setup: hub client key created' 201
+extract HUB_KEY '.key' "$b" secret
 api POST "http://127.0.0.1:$HUB_ADMIN/api/peers" b '{"name":"e2e-spoke"}' "$HUB"
-extract FED_TOKEN '.token' "$b"
-extract PEER_ID '.peer.id' "$b"
+expect 'setup: peer enrolled' 201
+extract FED_TOKEN '.token' "$b" secret
+extract PEER_ID '.peer.id' "$b" secret
 
 api PUT "http://127.0.0.1:$SPOKE_ADMIN/api/admin/federation" b \
   "{\"role\":\"spoke\",\"hub_url\":\"$HUB_URL\",\"hub_token\":\"$FED_TOKEN\"}" "$SPOKE"
+expect 'setup: spoke role PUT accepted' 200
 wait_for 'enroll: spoke channel connects to the hub' 30 \
   bash -c "curl -s -H 'Authorization: Bearer $SPOKE' \
     http://127.0.0.1:$SPOKE_ADMIN/api/admin/federation | jq -e '.spoke.connected == true'"
@@ -254,10 +312,14 @@ if printf '%s' "$STREAM" | grep -q 'data:' && printf '%s' "$STREAM" | grep -q '\
 else
   bad 'b: SSE stream chunks arrive through the tunnel' "stream body: $(printf '%s' "$STREAM" | head -c 300)"
 fi
-sleep 1
-api GET "http://127.0.0.1:$HUB_ADMIN/api/admin/usage/detail?page_size=20" b '' "$HUB"
-check 'b: both spoke calls metered on the hub (usage counted)' \
-  '[.rows[] | select(.model_requested=="mock-a") | select(.prompt_tokens==10)] | length >= 2' "$b"
+# Metering lands asynchronously (the recorder batches); wait on the counter
+# itself instead of a fixed sleep — fast on a good run, honest on a slow one.
+metered_on_hub() {
+  api GET "http://127.0.0.1:$HUB_ADMIN/api/admin/usage/detail?page_size=20" b '' "$HUB"
+  printf '%s' "$b" | jq -e \
+    '[.rows[] | select(.model_requested=="mock-a") | select(.prompt_tokens==10)] | length >= 2' >/dev/null
+}
+wait_for 'b: both spoke calls metered on the hub (usage counted)' 15 metered_on_hub
 
 # ---- d: spoke process dies → models vanish from the hub --------------------
 # hub_lacks proves the catalog request itself succeeded (200 + .data array)
@@ -273,8 +335,10 @@ SPOKE=$(login "http://127.0.0.1:$SPOKE_ADMIN")
 [ -n "$SPOKE" ] || die "spoke login after restart failed"
 wait_for 'e: spoke restart → mock-a returns to the hub catalog' 60 hub_has mock-a
 api PATCH "http://127.0.0.1:$HUB_ADMIN/api/admin/peers/$PEER_ID" b '{"enabled":false}' "$HUB"
+expect 'setup: peer disable accepted' 200
 wait_for 'e: peer disabled via admin API → channel drops (models disabled)' 30 hub_lacks mock-a
 api PATCH "http://127.0.0.1:$HUB_ADMIN/api/admin/peers/$PEER_ID" b '{"enabled":true}' "$HUB"
+expect 'setup: peer re-enable accepted' 200
 wait_for 'e: peer re-enabled → spoke reconnects' 60 hub_has mock-a
 
 # ---- c: HRW stability — one session pins one member of the fed group ------
@@ -282,9 +346,11 @@ api GET "http://127.0.0.1:$HUB_ADMIN/api/admin/models" b '' "$HUB"
 extract MA '.models[] | select(.name=="mock-a") | .id' "$b"
 extract MB '.models[] | select(.name=="mock-b") | .id' "$b"
 api POST "http://127.0.0.1:$HUB_ADMIN/api/admin/groups" b '{"name":"fedpool"}' "$HUB"
+expect 'setup: fed group created' 201
 extract GROUP_ID '.id' "$b"
 api PATCH "http://127.0.0.1:$HUB_ADMIN/api/admin/groups/$GROUP_ID" b \
   "{\"members\":[{\"model_id\":$MA,\"weight\":1},{\"model_id\":$MB,\"weight\":1}],\"enabled\":true}" "$HUB"
+expect 'setup: fed group members PATCH' 200
 check 'c: fed group with two synthetic members enabled' '.enabled == true' "$b"
 for i in 1 2 3 4 5; do
   api POST "http://127.0.0.1:$HUB_RELAY/v1/chat/completions" b \
@@ -294,17 +360,21 @@ for i in 1 2 3 4 5; do
     || bad "c: group call $i failed" "HTTP $REPLY_CODE; body: $(printf '%s' "$b" | head -c 200)"
   sleep 0.3
 done
-sleep 1
-api GET "http://127.0.0.1:$HUB_ADMIN/api/admin/usage/detail?page_size=30" b '' "$HUB"
-# the non-null guard matters: five null upstreams would otherwise be
+# Same as b: wait on the metered rows instead of a fixed sleep. The
+# non-null guard matters: five null upstreams would otherwise be
 # "exactly one unique member" and pass vacuously.
-check 'c: same session → same member across 5 group calls' \
-  '[.rows[] | select(.model_requested=="fedpool") | .model_upstream]
-   | (length >= 5) and (all(. != null)) and ((unique | length) == 1)' "$b"
+hrw_pinned() {
+  api GET "http://127.0.0.1:$HUB_ADMIN/api/admin/usage/detail?page_size=30" b '' "$HUB"
+  printf '%s' "$b" | jq -e \
+    '[.rows[] | select(.model_requested=="fedpool") | .model_upstream]
+     | (length >= 5) and (all(. != null)) and ((unique | length) == 1)' >/dev/null
+}
+wait_for 'c: same session → same member across 5 group calls' 15 hrw_pinned
 
 # ---- f: loop guard — spoke-origin traffic never bounces back ----------------
 api POST "http://127.0.0.1:$SPOKE_ADMIN/api/keys" b '{"name":"e2e-spoke-client"}' "$SPOKE"
-extract SPOKE_KEY '.key' "$b"
+expect 'setup: spoke client key created' 201
+extract SPOKE_KEY '.key' "$b" secret
 START=$SECONDS
 api POST "http://127.0.0.1:$SPOKE_RELAY/v1/chat/completions" b \
   '{"model":"mock-a","messages":[{"role":"user","content":"hi"}]}' "$SPOKE_KEY"
@@ -343,6 +413,9 @@ check 'g: spoke ledger — served_by_source names the hub user' \
 api POST "http://127.0.0.1:$HUB_RELAY/v1/chat/completions" b \
   '{"model":"mock-hub","messages":[{"role":"user","content":"hi"}]}' "$HUB_KEY"
 check 'h: plain local hub request served' '.choices[0].message.content == "mock reply from mock-hub"' "$b"
+# A deliberate fixed pause, not a wait_for: this check asserts the ledger did
+# NOT move — there is no arrival condition to poll for, so the pause only
+# gives a hypothetical mis-stamped row time to show up before the compare.
 sleep 1
 api GET "http://127.0.0.1:$HUB_ADMIN/api/admin/federation/stats" b '' "$HUB"
 # extract (jq -e + non-empty) — a plain jq would print "null" for a missing
