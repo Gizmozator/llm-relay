@@ -363,7 +363,10 @@ func TestAgentGuidePublic(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	md := string(body)
 	for _, want := range []string{"https://relay.example/v1/utilization",
-		"check_utilization", "sk-", "https://dash.example"} {
+		"check_utilization", "sk-", "https://dash.example",
+		// Section 4 (OpenAI-compatible inference surface): model listing
+		// and generation must be documented with the real shapes.
+		"https://relay.example/v1/models", "owned_by", "chat.completion"} {
 		if !strings.Contains(md, want) {
 			t.Errorf("guide missing %q", want)
 		}

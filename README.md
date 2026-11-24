@@ -34,7 +34,9 @@ The **Agent API** page explains how to point an AI agent at the relay: hand
 your agent the public guide link (`{relay}/v1/agent-guide`), or wire the MCP
 endpoint (`{relay}/mcp`, one `check_utilization` tool) so it can check
 whether a model is `free` / `busy` / `draining` / `offline` before taking
-delegated work. Agents authenticate with the same `sk-` keys from **My keys**.
+delegated work. The guide also shows how to use the relay as an
+OpenAI-compatible endpoint (`{relay}/v1`: list models, chat/text completions)
+once a model is free. Agents authenticate with the same `sk-` keys from **My keys**.
 
 ![llm-relay usage dashboard — per-key token metering and cost breakdown](docs/screenshots/usage.png)
 
