@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { api, errMsg } from '../api';
 import type { LiveConnection, LiveModel, LiveResponse } from '../api';
 import { useAuth } from '../auth';
-import { fmtAgo, fmtDateTime, fmtDurationSec, fmtInt } from '../format';
+import { fmtAgo, fmtDateTime, fmtDurationSec, fmtHourMinuteUTC, fmtInt } from '../format';
 import { formatMetricValue, LIVE_METRICS } from '../metrics';
 import type { Metric } from '../metrics';
 import { Banner, Card, Empty, Loading } from '../components/ui';
@@ -150,7 +150,7 @@ export default function DashboardPage() {
 
   const chart = useMemo(() => {
     return {
-      labels: buckets.map((b) => b.minute.slice(11, 16)),
+      labels: buckets.map((b) => fmtHourMinuteUTC(b.minute)),
       values: buckets.map((b) => metric.value(b)),
     };
   }, [buckets, metric]);
