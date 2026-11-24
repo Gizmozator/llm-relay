@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom';
 import { api, errMsg, FED_ROLES } from '../api';
 import type { FedCounts, FedRole, FedSettings } from '../api';
 import { fmtInt, fmtMoney, inNewTokens } from '../format';
+import { useFedRole } from '../fedrole';
 import { useLoad } from '../useLoad';
 import { useToast } from '../components/Toast';
 import { Banner, Card, Empty, Field, Loading, StatsWindowSelect } from '../components/ui';
@@ -16,6 +17,7 @@ import { Banner, Card, Empty, Field, Loading, StatsWindowSelect } from '../compo
  */
 export default function AdminFederationPage() {
   const toast = useToast();
+  const fedRole = useFedRole();
   const settings = useLoad(() => api.fedSettings(), []);
   const currency = useLoad(() => api.settings(), []).data?.currency ?? '';
   const [role, setRole] = useState<FedRole | null>(null);
@@ -59,7 +61,12 @@ export default function AdminFederationPage() {
     e.preventDefault();
     setBusy(true);
     try {
-      await api.putFedSettings(curRole, curUrl.trim(), curToken.trim());
+      const res = await api.putFedSettings(curRole, curUrl.trim(), curToken.trim());
+      // Publish the role the server says it persisted: the sidebar menu is
+      // keyed on the shared role, so it follows the save at once — no reload,
+      // and no stale "Connect server" entry left pointing at a page that no
+      // longer applies.
+      fedRole.saved(res.role);
       toast.push('success', 'Federation settings saved.');
       setRole(null);
       setHubUrl(null);
