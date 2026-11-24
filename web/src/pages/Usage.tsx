@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
 import type { AdminUser, GroupBy, UsageDetail, UsageSummary } from '../api';
 import { daysAgoISO, fmtDateTime, fmtInt, fmtMoney, inNewTokens } from '../format';
+import { formatMetricValue, USAGE_METRICS } from '../metrics';
+import type { Metric } from '../metrics';
 import { useLoad } from '../useLoad';
 import { useToast } from '../components/Toast';
 import { Banner, Card, Empty, Loading } from '../components/ui';
@@ -27,6 +29,8 @@ export default function UsagePage({ admin }: { admin: boolean }) {
   const [userId, setUserId] = useState<number | ''>('');
   const [modelFilter, setModelFilter] = useState('');
   const [page, setPage] = useState(1);
+  // By-day chart series; Cost first in USAGE_METRICS is the default.
+  const [metric, setMetric] = useState<Metric>(USAGE_METRICS[0]);
 
   useEffect(() => setPage(1), [from, to, userId, groupBy, modelFilter]);
 
@@ -69,7 +73,7 @@ export default function UsagePage({ admin }: { admin: boolean }) {
     return keys;
   }, [modelOptions.data, modelFilter]);
 
-  // Day series drives the totals cards + the cost chart.
+  // Day series drives the totals cards + the by-day chart.
   const daySummary = useLoad(
     () =>
       rangeInvalid
@@ -112,12 +116,11 @@ export default function UsagePage({ admin }: { admin: boolean }) {
     );
     return {
       labels: groups.map((g) => g.label),
-      values: groups.map((g) => g.cost_micro / 1e6),
+      values: groups.map((g) => metric.value(g)),
     };
-  }, [daySummary.data]);
+  }, [daySummary.data, metric]);
 
   const money = (micro: number) => fmtMoney(micro, currency);
-  const fmtAxis = (v: number) => fmtMoney(v * 1e6, currency);
 
   // Surface a load failure as a toast too (the inline banner already shows it),
   // once per message while it persists. The set is per-mount and resets when
@@ -226,11 +229,34 @@ export default function UsagePage({ admin }: { admin: boolean }) {
           </div>
 
           <section className="panel">
-            <h3>Cost by day</h3>
+            <div className="panel-head">
+              <h3>{metric.chartLabel} by day</h3>
+              <label className="field">
+                <select
+                  className="input"
+                  value={metric.id}
+                  onChange={(e) => {
+                    const next = USAGE_METRICS.find((m) => m.id === e.target.value);
+                    if (next) setMetric(next);
+                  }}
+                >
+                  {USAGE_METRICS.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
             {chart.labels.length === 0 ? (
               <Empty label="No usage in this range." />
             ) : (
-              <LineChart labels={chart.labels} values={chart.values} label="Cost" format={fmtAxis} />
+              <LineChart
+                labels={chart.labels}
+                values={chart.values}
+                label={metric.chartLabel}
+                format={(v) => formatMetricValue(metric, v, currency)}
+              />
             )}
           </section>
 
