@@ -7,7 +7,8 @@ page. No inbound ports on the remote box; works on any relay role
 (standalone, hub or spoke). The remote box runs the same `llm-relay`
 binary in connector mode (`HEADLESS=true`): it binds nothing, owns no
 state, and just pipes `/v1/*` + `/health` between the relay and its local
-engine.
+engine — unless you opt into **edge proxy mode** (`PROXY_LISTEN`), where it
+also serves its own LAN's clients through the channel.
 
 Design + decisions: `docs/plans/2026-11-24-remote-backend-v1.md`.
 Env reference: README **Remote backends** section + `.env.example`.
@@ -60,6 +61,52 @@ token in the env and restart the connector. Disable or delete does the same.
     -d '{"model":"pub-model","messages":[{"role":"user","content":"hi"}]}'
   ```
 
+## Channel admission (tier 5)
+
+The abuse-protection stack (`internal/ratelimit`, README **Abuse
+protection**) guards the connect endpoints per source IP, and live edge
+traffic per **channel**: every client request forwarded over a backend's
+channel passes the tier-5 bucket (`RATELIMIT_REMOTE_CHANNEL_*`, default
+`100`/`200`) keyed on the backend id — per-socket IP is the wrong key
+here, since one box multiplexes all its users over one source address.
+The tunnel itself stays bounded by `fed.MaxInflight` (16 in-flight
+requests per channel); the edge listener fails fast with `503` when the
+slots are full rather than queueing (see **Edge proxy mode**).
+
+## Edge proxy mode (`PROXY_LISTEN`)
+
+The connector can also serve the box's LAN directly: with `PROXY_LISTEN`
+set (e.g. `8080` or `127.0.0.1:8080`), it binds a local `/v1` listener
+and forwards client traffic over the channel to the relay, which runs
+each request through its full pipeline — key auth, catalog, groups,
+metering, routing. The client's `sk-` key rides verbatim (the `rb-`
+token authenticates the channel, never a `/v1` request), so usage rows
+land on the real key and user, and the relay's per-key limit applies to
+them as to any other traffic.
+
+- **Bind discipline**: a bare port or `:port` binds `127.0.0.1`. Only an
+  explicit host (`0.0.0.0:…`, a LAN address) binds elsewhere — and that
+  is a loud operator decision: the relay cannot defend a public connector
+  box. Keep the listener on the LAN.
+- **Fail fast, never queue**: local concurrency cap (64, then `503` +
+  `Retry-After`), channel slots full → immediate `503`, body capped at
+  the tunnel limit, read/header timeouts against slow-loris.
+- **Cancel both ways**: the local client hanging up sends a `Cancel`
+  frame and the relay aborts the upstream call; a dead channel ends all
+  streams it was serving.
+- **Loop guard**: a request that arrived over backend X's channel is
+  never routed back to X — a group falls over to its other members, a
+  single-model request hosted on X is refused. Ordinary (non-edge)
+  traffic still routes to X normally.
+- **Metering honesty**: the relay sees the connector box as the direct
+  peer and the LAN client in `X-Forwarded-For` (honored only with
+  `TRUST_PROXY_HEADERS` on, as everywhere).
+
+Verify: from a client machine, `curl -H "Authorization: Bearer sk-…"
+http://<box>:8080/v1/chat/completions -d '{"model":"…","messages":[]}'`
+answers exactly as it would from the relay, and the Usage page shows the
+row against the client's own key.
+
 ## Common failures
 
 - **Relay unreachable** (`headless: relay link down …; redial in …`):
@@ -91,16 +138,9 @@ token in the env and restart the connector. Disable or delete does the same.
 - **Connector restart flaps the row offline/online briefly**: expected —
   the new connection replaces the old one on the handshake; no action
   needed.
-
-## Channel admission (reserved seam, ticket #18)
-
-The abuse-protection stack (`internal/ratelimit`, README **Abuse
-protection**) guards the connect endpoints per source IP, but per-channel
-admission for live tunnels (tier 5) is deliberately **not** wired yet:
-the federation channel keeps its bespoke `fed.MaxInflight` cap, and remote
-channels have none. When the channel rework (#17) lands, that per-peer /
-per-backend cap moves into `internal/ratelimit` as the tier-5 store keyed
-on the channel identity — per-socket IP is the wrong key there, since one
-box multiplexes its channels over one source address. Until then, treat
-`fed.MaxInflight` as the only per-channel bound and do not add a second one
-at the HTTP layer.
+- **Edge listener answers `503` (`Retry-After: 1`)**: fail-fast by design
+  — the local concurrency cap (64) or the channel's 16 tunnel slots are
+  full (long streams). The client should back off; nothing queued up.
+- **Edge listener answers `429`**: the tier-5 per-channel bucket is
+  drained for this backend (`RATELIMIT_REMOTE_CHANNEL_*`); other boxes'
+  channels have their own buckets.

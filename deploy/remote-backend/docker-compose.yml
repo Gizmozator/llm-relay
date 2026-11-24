@@ -8,8 +8,11 @@ services:
     image: gitea.rantaeskola.fi/gizmoz/llm-relay:latest
     restart: unless-stopped
     env_file: .env
-    # The connector dials out only — it binds no ports. Host networking lets
-    # ENGINE_URL=http://localhost:PORT reach the engine on this machine; if
-    # your engine runs on a shared docker network, drop this and use the
-    # service name in ENGINE_URL instead.
+    # The connector dials out only — it binds no ports (unless PROXY_LISTEN
+    # is set in .env: the edge proxy listener then binds that address on
+    # this host; with host networking, 127.0.0.1 is the box's loopback and
+    # a LAN-facing listener needs an explicit host, see .env.example).
+    # Host networking lets ENGINE_URL=http://localhost:PORT reach the engine
+    # on this machine; if your engine runs on a shared docker network, drop
+    # this and use the service name in ENGINE_URL instead.
     network_mode: host

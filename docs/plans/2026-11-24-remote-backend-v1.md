@@ -177,3 +177,18 @@ comes from the registry via the health cache.
   echo works); `EngineToken` doc corrected (Bearer only). Gate hardened
   further per reviewer note: pre-encoded `%2e%2e` frame paths (hostile
   relay crafting frames directly) are refused via the unescaped form too.
+- 2026-11-25 — ticket #17 shipped (edge proxy mode): the connector can bind
+  a local `/v1` listener (`PROXY_LISTEN`, off by default, loopback unless
+  an explicit host) that forwards its LAN clients' requests over the
+  channel as Req frames; the relay rebuilds them and runs its own proxy mux
+  — the client `sk-` rides verbatim, so key auth and metering land on the
+  real key/user (mirror of `fed/serve.go`, deliberately NOT a reuse: the
+  fed path strips Authorization, this one must not). Guards: tier-5
+  per-channel limiter (`internal/ratelimit`, keyed on the backend id, not
+  the shared socket IP), loop guard (a request over backend X's channel is
+  never routed back to X — context stamp read at the `RoundTrip` seam),
+  fail-fast admission (channel full = immediate 503, never a queue),
+  cancel propagation both ways. Tests: chat + SSE streaming e2e, 401 +
+  honest metering rows, loop guard (group failover + single-model refuse +
+  non-edge sanity), channel-full fail-fast, mid-stream cancel, per-channel
+  keying (two boxes, one source IP), address-normalization unit test.

@@ -262,6 +262,7 @@ itself can never become the DoS, and every denial carries a truthful
 | machine endpoints | source IP | `/federation/v1/*`, `/remote/v1/connect` (each bad token costs a hash + DB lookup) | `RATELIMIT_CONNECT_RATE`/`_BURST` (`0.2`/`10`) |
 | `/v1` per client | source IP | the public relay surface, pre-auth (bad-key floods) | `RATELIMIT_V1_IP_RATE`/`_BURST` (`100`/`200`) |
 | `/v1` per key | resolved API key | authenticated abuse, applied after auth before proxy work | `RATELIMIT_V1_KEY_RATE`/`_BURST` (`50`/`100`) |
+| remote edge channel | remote-backend id | client requests forwarded over a backend box's channel (tier 5, ticket #17) — keyed on the **backend**, not the socket IP: one box shares one source for all its users | `RATELIMIT_REMOTE_CHANNEL_RATE`/`_BURST` (`100`/`200`) |
 | admin API | dashboard user | runaway scripts / stolen sessions on `/api/*` | `RATELIMIT_ADMIN_RATE`/`_BURST` (`100`/`200`) |
 | global shed | server-wide | total in-flight requests → `503` at saturation | `RATELIMIT_GLOBAL_MAX_INFLIGHT` (`1024`) |
 
@@ -319,12 +320,34 @@ on its own.
 | `RELAY_PIN` | — | the relay cert fingerprint (`sha256:…`) to pin when the relay uses a self-signed cert; empty verifies against the system CA store (a TLS-terminating proxy with a real cert) |
 | `ENGINE_URL` | — **required** | the local OpenAI-compatible engine to expose |
 | `ENGINE_TOKEN` | — | bearer token for the engine (optional) |
+| `PROXY_LISTEN` | — (off) | **edge proxy mode**: bind a local `/v1` listener on this box that forwards its clients' traffic over the channel to the relay (see below). Empty = the connector binds nothing |
 
 One connector = one engine; run one connector per engine. The connector
 serves only `/v1/*` and `/health` to the relay — the tunnel never becomes a
 proxy into the box's network. A connector box needs no `JWT_SECRET` (it
 serves no dashboard) and binds no ports. Rotating the token on the Backends
 page drops the live connection immediately; so do disable and delete.
+
+### Edge proxy mode (`PROXY_LISTEN`)
+
+A box on a remote LAN can also be that LAN's **gateway to the relay**: with
+`PROXY_LISTEN` set (e.g. `8080`), the connector binds a local `/v1` listener
+and forwards whatever its clients send over the existing channel. The relay
+runs each request through its full pipeline — the client's `sk-` key is
+authenticated by the relay itself, usage lands on the real key and user,
+routing and groups work as always. Clients point their OpenAI base URL at
+the box instead of the relay; no keys live on the box.
+
+> **⚠ The default bind is `127.0.0.1`.** A bare port or `:port` binds
+> loopback only. Only an explicit host (`0.0.0.0:8080`, a LAN address)
+> opens the listener to other machines — **rebinding public is on you**:
+> the relay rate-limits each channel per-backend, but it cannot defend a
+> connector box exposed to the open internet. Keep the listener on the LAN.
+
+Guards on the path: a per-channel rate limit (tier 5, keyed on the backend,
+`RATELIMIT_REMOTE_CHANNEL_*`), a local concurrency cap with immediate `503`
+shed (never a queue), a body-size cap, and a loop guard — traffic arriving
+over a backend's channel is never routed back to that same backend.
 
 Ready-made copies live in `deploy/remote-backend/`. Bring-up steps, how to
 verify on the relay and common failures: `docs/workflows/remote-backend.md`.
@@ -400,10 +423,11 @@ Environment (or `.env`, see `.env.example`):
 | `RATELIMIT_CONNECT_RATE` / `_BURST` | `0.2` / `10` | per-source-IP bucket on `/federation/v1/*` + `/remote/v1/connect`. `0` disables |
 | `RATELIMIT_V1_IP_RATE` / `_BURST` | `100` / `200` | per-source-IP bucket on the public `/v1` surface (pre-auth). `0` disables |
 | `RATELIMIT_V1_KEY_RATE` / `_BURST` | `50` / `100` | per-API-key bucket on authenticated `/v1` traffic. `0` disables |
+| `RATELIMIT_REMOTE_CHANNEL_RATE` / `_BURST` | `100` / `200` | per-remote-backend bucket on edge-proxy traffic forwarded over a backend's channel (tier 5). `0` disables |
 | `RATELIMIT_ADMIN_RATE` / `_BURST` | `100` / `200` | per-user bucket on the authenticated dashboard API. `0` disables |
 | `RATELIMIT_GLOBAL_MAX_INFLIGHT` | `1024` | server-wide in-flight cap; at saturation new requests get 503 + `Retry-After`. `0` disables the shed |
 | `PUBLIC_RELAY_URL` / `PUBLIC_DASHBOARD_URL` | — | URLs shown in the dashboard copy buttons and interpolated into the agent guide; **include the scheme**, and a hostname or a plain IP:port both work (LAN hosting: `http://192.0.2.10:8080`); relay is the **root** (no `/v1` — the dashboard appends `/v1` for the OpenAI base) |
-| `HEADLESS` (+ `RELAY_URL`/`RELAY_TOKEN`/`ENGINE_URL`/`ENGINE_TOKEN`) | `false` | remote-backend connector: dial in to a relay and expose a local engine — see **Remote backends** |
+| `HEADLESS` (+ `RELAY_URL`/`RELAY_TOKEN`/`ENGINE_URL`/`ENGINE_TOKEN`, opt `PROXY_LISTEN`) | `false` | remote-backend connector: dial in to a relay and expose a local engine — see **Remote backends** |
 | `TZ` | `Europe/Helsinki` | timezone |
 
 ## Deployment
