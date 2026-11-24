@@ -440,9 +440,13 @@ func fedSince(r *http.Request) (string, error) {
 // AdminFedStats serves GET /api/admin/federation/stats?days=N — the
 // federation ledger, role-dependent:
 //
-//	hub:   {"role":"hub","since":…,"users":[FedUserTotal…],"peers":[FedPeerTotal…]}
+//	hub:   {"role":"hub","since":…,"users":[FedUserTotal…],"peers":[FedPeerTotal…],
+//	       "local_only":[FedLocalOnlyEntry…]}
 //	       (the fairness ledger: every cross-peer flow wrote a consumed row
-//	       on the spender and a served row on the server)
+//	       on the spender and a served row on the server; local_only names
+//	       the accounts whose window usage is entirely hub-local — present
+//	       on the Usage page, absent from the ledger by design, so the UI
+//	       can say "no federation activity" instead of showing a blank)
 //	spoke: {"role":"spoke","since":…,"served_by_source":[FedSourceTotals…],
 //	       "consumed":[FedConsumedEntry…]}
 //	       (what this box served to which hub-stamped identity, and what
@@ -470,8 +474,14 @@ func (s *Server) AdminFedStats(w http.ResponseWriter, r *http.Request, c *auth.C
 			writeErr(w, http.StatusInternalServerError, "internal error")
 			return
 		}
+		local, err := store.FedLocalOnlyUsers(s.DB, since, 0)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "internal error")
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"role": role, "since": since, "users": users, "peers": peers,
+			"local_only": local,
 		})
 	case store.FedRoleSpoke:
 		served, err := store.FedServedBySource(s.DB, since, "")
@@ -496,8 +506,11 @@ func (s *Server) AdminFedStats(w http.ResponseWriter, r *http.Request, c *auth.C
 // FedStats serves GET /api/federation/stats?days=N — the caller's own
 // federation totals (session auth, always scoped to the caller):
 //
-//	hub:   {"role":"hub","since":…,"totals":[FedUserTotal]} — the caller's
-//	       served/consumed entry (empty when they have no federation rows).
+//	hub:   {"role":"hub","since":…,"totals":[FedUserTotal],"local_only":[…]}
+//	       — the caller's served/consumed entry (empty when they have no
+//	       federation rows; local_only then carries their own hub-local
+//	       usage, so "no federation activity" stays distinguishable from
+//	       "no data at all").
 //	spoke: {"role":"spoke","since":…,"consumed":[FedConsumedEntry]} — what
 //	       the caller spent on federated models. Served rows belong to the
 //	       box, not to a session user, so they only appear on the admin view.
@@ -519,8 +532,13 @@ func (s *Server) FedStats(w http.ResponseWriter, r *http.Request, c *auth.Claims
 			writeErr(w, http.StatusInternalServerError, "internal error")
 			return
 		}
+		local, err := store.FedLocalOnlyUsers(s.DB, since, c.UserID)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "internal error")
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"role": role, "since": since, "totals": totals,
+			"role": role, "since": since, "totals": totals, "local_only": local,
 		})
 	case store.FedRoleSpoke:
 		consumed, err := store.FedConsumedSlice(s.DB, since, c.UserID)

@@ -14,8 +14,9 @@ import (
 )
 
 type fedCountsJSON struct {
-	Requests int64 `json:"requests"`
-	Prompt   int64 `json:"prompt_tokens"`
+	Requests   int64 `json:"requests"`
+	Prompt     int64 `json:"prompt_tokens"`
+	Completion int64 `json:"completion_tokens"`
 }
 
 type fedUserJSON struct {
@@ -23,6 +24,12 @@ type fedUserJSON struct {
 	User     string        `json:"user"`
 	Served   fedCountsJSON `json:"served"`
 	Consumed fedCountsJSON `json:"consumed"`
+}
+
+type fedLocalJSON struct {
+	UserID int64         `json:"user_id"`
+	User   string        `json:"user"`
+	Counts fedCountsJSON `json:"counts"`
 }
 
 func getJSON(t *testing.T, e *testEnv, path, tok string, out any) int {
@@ -81,6 +88,10 @@ func TestFedStatsEndpoints(t *testing.T) {
 	if err := e.db.QueryRow(`SELECT id FROM users WHERE username='admin'`).Scan(&adminID); err != nil {
 		t.Fatal(err)
 	}
+	var aliceID int64
+	if err := e.db.QueryRow(`SELECT id FROM users WHERE username='alice'`).Scan(&aliceID); err != nil {
+		t.Fatal(err)
+	}
 	peer, _, err := store.CreatePeer(e.db, "spoke-a", adminID)
 	if err != nil {
 		t.Fatal(err)
@@ -92,6 +103,10 @@ func TestFedStatsEndpoints(t *testing.T) {
 		FedPeerID: &pid, Prompt: 10, Completion: 5, CostTotal: 42})
 	insertFedRow(t, e, &store.UsageEvent{UserID: adminID, FedDirection: "served",
 		FedPeerID: &pid, FedUser: "remote", Prompt: 7})
+	// Ticket #13: alice has hub-local usage only — invisible in the ledger
+	// by design, so the payload must name her in local_only (the UI's
+	// "no federation activity" signal, distinct from "no data at all").
+	insertFedRow(t, e, &store.UsageEvent{UserID: aliceID, Prompt: 6, Completion: 2, CostTotal: 30})
 
 	var hub struct {
 		Role  string        `json:"role"`
@@ -100,6 +115,7 @@ func TestFedStatsEndpoints(t *testing.T) {
 			PeerID int64  `json:"peer_id"`
 			Peer   string `json:"peer"`
 		} `json:"peers"`
+		LocalOnly []fedLocalJSON `json:"local_only"`
 	}
 	if code := getJSON(t, e, "/api/admin/federation/stats", tok, &hub); code != 200 {
 		t.Fatalf("admin stats hub = %d", code)
@@ -110,10 +126,20 @@ func TestFedStatsEndpoints(t *testing.T) {
 		len(hub.Peers) != 1 || hub.Peers[0].Peer != "spoke-a" {
 		t.Errorf("hub payload = %+v", hub)
 	}
-	// Personal view: only the caller's entry — alice has no federation rows.
+	// local_only: exactly alice (admin has federation rows and must not be
+	// listed), carrying her local token totals.
+	if len(hub.LocalOnly) != 1 || hub.LocalOnly[0].User != "alice" ||
+		hub.LocalOnly[0].UserID != aliceID || hub.LocalOnly[0].Counts.Prompt != 6 ||
+		hub.LocalOnly[0].Counts.Completion != 2 {
+		t.Errorf("hub local_only = %+v, want only alice 6p/2c", hub.LocalOnly)
+	}
+	// Personal view: only the caller's entry — alice has no federation rows,
+	// and her local usage must not produce a phantom ledger row; her own
+	// payload carries the local_only entry instead (#13).
 	var mine struct {
-		Role   string        `json:"role"`
-		Totals []fedUserJSON `json:"totals"`
+		Role      string         `json:"role"`
+		Totals    []fedUserJSON  `json:"totals"`
+		LocalOnly []fedLocalJSON `json:"local_only"`
 	}
 	if code := getJSON(t, e, "/api/federation/stats", alice, &mine); code != 200 {
 		t.Fatalf("alice stats = %d", code)
@@ -121,12 +147,19 @@ func TestFedStatsEndpoints(t *testing.T) {
 	if mine.Role != "hub" || len(mine.Totals) != 0 {
 		t.Errorf("alice totals = %+v, want empty", mine)
 	}
+	if len(mine.LocalOnly) != 1 || mine.LocalOnly[0].User != "alice" ||
+		mine.LocalOnly[0].Counts.Requests != 1 {
+		t.Errorf("alice local_only = %+v, want her one local row", mine.LocalOnly)
+	}
 	if code := getJSON(t, e, "/api/federation/stats", tok, &mine); code != 200 {
 		t.Fatalf("admin stats personal = %d", code)
 	}
 	if len(mine.Totals) != 1 || mine.Totals[0].User != "admin" ||
 		mine.Totals[0].Consumed.Requests != 1 {
 		t.Errorf("admin totals = %+v", mine)
+	}
+	if len(mine.LocalOnly) != 0 {
+		t.Errorf("admin local_only = %+v, want empty (admin has fed rows)", mine.LocalOnly)
 	}
 
 	// ---- spoke role ----
@@ -147,10 +180,6 @@ func TestFedStatsEndpoints(t *testing.T) {
 	}
 	m, err := store.CreateModel(e.db, be.ID, "alpha-up", "alpha")
 	if err != nil {
-		t.Fatal(err)
-	}
-	var aliceID int64
-	if err := e.db.QueryRow(`SELECT id FROM users WHERE username='alice'`).Scan(&aliceID); err != nil {
 		t.Fatal(err)
 	}
 	insertFedRow(t, e, &store.UsageEvent{UserID: aliceID, ModelID: m.ID, Prompt: 4})
