@@ -1,5 +1,6 @@
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { AuthProvider } from './auth';
+import { FedRoleProvider } from './fedrole';
 import { ToastProvider } from './components/Toast';
 import Layout, { RequireAdmin, RequireAuth } from './Layout';
 import LoginPage from './pages/Login';
@@ -20,80 +21,82 @@ export default function App() {
   return (
     <ToastProvider>
       <AuthProvider>
-        <Routes>
-          <Route path="/login" element={<LoginPage />} />
-          <Route
-            element={
-              <RequireAuth>
-                <Layout />
-              </RequireAuth>
-            }
-          >
-            <Route index element={<DashboardPage />} />
-            <Route path="usage" element={<UsagePage admin={false} />} />
-            <Route path="keys" element={<KeysPage />} />
-            <Route path="agents" element={<AgentGuidePage />} />
-            <Route path="setup" element={<SetupGuidePage />} />
-            <Route path="models" element={<ModelsPage />} />
+        <FedRoleProvider>
+          <Routes>
+            <Route path="/login" element={<LoginPage />} />
             <Route
-              path="admin/backends"
               element={
-                <RequireAdmin>
-                  <BackendsPage />
-                </RequireAdmin>
+                <RequireAuth>
+                  <Layout />
+                </RequireAuth>
               }
-            />
-            <Route
-              path="admin/models"
-              element={
-                <RequireAdmin>
-                  <AdminModelsPage />
-                </RequireAdmin>
-              }
-            />
-            <Route
-              path="admin/users"
-              element={
-                <RequireAdmin>
-                  <UsersPage />
-                </RequireAdmin>
-              }
-            />
-            <Route
-              path="admin/usage"
-              element={
-                <RequireAdmin>
-                  <UsagePage admin={true} />
-                </RequireAdmin>
-              }
-            />
-            <Route
-              path="admin/federation"
-              element={
-                <RequireAdmin>
-                  <AdminFederationPage />
-                </RequireAdmin>
-              }
-            />
-            <Route
-              path="admin/servers"
-              element={
-                <RequireAdmin>
-                  <ServersPage />
-                </RequireAdmin>
-              }
-            />
-            <Route
-              path="admin/settings"
-              element={
-                <RequireAdmin>
-                  <SettingsPage />
-                </RequireAdmin>
-              }
-            />
-          </Route>
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
+            >
+              <Route index element={<DashboardPage />} />
+              <Route path="usage" element={<UsagePage admin={false} />} />
+              <Route path="keys" element={<KeysPage />} />
+              <Route path="agents" element={<AgentGuidePage />} />
+              <Route path="setup" element={<SetupGuidePage />} />
+              <Route path="models" element={<ModelsPage />} />
+              <Route
+                path="admin/backends"
+                element={
+                  <RequireAdmin>
+                    <BackendsPage />
+                  </RequireAdmin>
+                }
+              />
+              <Route
+                path="admin/models"
+                element={
+                  <RequireAdmin>
+                    <AdminModelsPage />
+                  </RequireAdmin>
+                }
+              />
+              <Route
+                path="admin/users"
+                element={
+                  <RequireAdmin>
+                    <UsersPage />
+                  </RequireAdmin>
+                }
+              />
+              <Route
+                path="admin/usage"
+                element={
+                  <RequireAdmin>
+                    <UsagePage admin={true} />
+                  </RequireAdmin>
+                }
+              />
+              <Route
+                path="admin/federation"
+                element={
+                  <RequireAdmin>
+                    <AdminFederationPage />
+                  </RequireAdmin>
+                }
+              />
+              <Route
+                path="admin/servers"
+                element={
+                  <RequireAdmin>
+                    <ServersPage />
+                  </RequireAdmin>
+                }
+              />
+              <Route
+                path="admin/settings"
+                element={
+                  <RequireAdmin>
+                    <SettingsPage />
+                  </RequireAdmin>
+                }
+              />
+            </Route>
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </FedRoleProvider>
       </AuthProvider>
     </ToastProvider>
   );
