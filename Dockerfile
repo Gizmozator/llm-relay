@@ -3,7 +3,10 @@
 # frontend image and breaks offline builds. The built-in frontend is enough.
 
 # ---------- web dashboard ----------
-FROM node:24-alpine AS web
+# Pinned to $BUILDPLATFORM: the SPA output is architecture-independent static
+# files, so this stage always runs on the native build arch (fast, no QEMU)
+# regardless of the target image platform.
+FROM --platform=$BUILDPLATFORM node:24-alpine AS web
 WORKDIR /web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci --no-audit --no-fund
@@ -11,8 +14,14 @@ COPY web/ ./
 RUN npm run build
 
 # ---------- go binary ----------
-FROM golang:1.26 AS build
+# Also native ($BUILDPLATFORM): with CGO off, Go cross-compiles to any GOARCH
+# from one host, so no target-arch emulation is needed. TARGETOS/TARGETARCH are
+# supplied automatically by BuildKit from `docker buildx build --platform=…`;
+# a plain single-platform `docker build` leaves them at the host arch.
+FROM --platform=$BUILDPLATFORM golang:1.26 AS build
 WORKDIR /src
+ARG TARGETOS
+ARG TARGETARCH
 
 # Dependency layer first so code edits do not invalidate the module cache.
 # go.sum is globbed on purpose: it does not exist until the first external
@@ -26,9 +35,12 @@ COPY . .
 # Fresh SPA build from the web stage wins over whatever dist was committed.
 COPY --from=web /web/dist ./web/dist
 
-# CGO off => fully static binary => tiny final image.
-ENV CGO_ENABLED=0 GOOS=linux
-RUN go build -trimpath -ldflags="-s -w" -o /out/llm-relay ./cmd/llm-relay
+# CGO off => fully static binary => tiny final image. GOOS/GOARCH follow the
+# requested target so one `buildx --platform=linux/amd64,linux/arm64` run
+# emits both from a single host.
+ENV CGO_ENABLED=0
+RUN GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
+    go build -trimpath -ldflags="-s -w" -o /out/llm-relay ./cmd/llm-relay
 
 # ---------- runtime ----------
 FROM scratch

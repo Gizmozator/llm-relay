@@ -221,7 +221,7 @@ Compose-style example (generic hosts; the hub token comes from the hub's
 services:
   llm-relay:
     image: llm-relay:latest
-    ports: ["8080:8080", "8081:8081"]
+    ports: ["8080:8080"]   # relay port only — headless never binds the admin port
     environment:
       JWT_SECRET: "…openssl rand -hex 32…"
       HEADLESS: "true"
@@ -310,7 +310,12 @@ Environment (or `.env`, see `.env.example`):
 
 `deploy/` ships a sample container-compose stack. Point it at your own registry and
 data directory, set `JWT_SECRET` (+ optional bootstrap admin) in the stack `.env`,
-and publish a new image version with `make docker-release VERSION=x.y.z`.
+and publish a new image version with `make docker-release VERSION=x.y.z`. That
+target cross-builds a multi-arch manifest (`linux/amd64` + `linux/arm64` by
+default, override with `PLATFORMS=…`) and pushes it in one step via BuildKit —
+the Go binary is a static cross-compile, so no emulation is needed. The first
+run auto-creates a `docker-container` buildx builder (`BUILDER=…` to name it).
+`make docker-build` remains the fast single-arch local build for development.
 
 ## Layout
 

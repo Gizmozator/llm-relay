@@ -79,12 +79,21 @@ clean: ## remove build artifacts
 
 # ------------------------------------------------------------------ docker
 
-docker-build: ## build the container image ($(IMAGE))
+docker-build: ## build the container image locally for the host arch ($(IMAGE))
 	docker build -t $(IMAGE) .
 
-docker-release: docker-build ## build + push image to the Gitea registry (VERSION=x.y.z)
-	docker tag $(IMAGE) $(REGISTRY):$(VERSION)
-	docker push $(REGISTRY):$(VERSION)
+# Multi-arch release needs a container-driver builder (the default `docker`
+# driver cannot emit a multi-platform manifest). PLATFORMS is the common
+# server/SBC set; override with `make docker-release PLATFORMS=linux/amd64`.
+PLATFORMS ?= linux/amd64,linux/arm64
+BUILDER   ?= llm-relay-xbuild
+
+dockerx-setup: ## create the multi-arch buildx builder once (docker-container driver)
+	docker buildx inspect $(BUILDER) >/dev/null 2>&1 \
+	  || docker buildx create --name $(BUILDER) --driver docker-container --bootstrap
+
+docker-release: dockerx-setup ## cross-build $(PLATFORMS) + push multi-arch manifest to the registry (VERSION=x.y.z)
+	docker buildx build --builder $(BUILDER) --platform $(PLATFORMS) -t $(REGISTRY):$(VERSION) --push .
 
 docker-up: ## start the stack detached
 	docker compose up -d --build
