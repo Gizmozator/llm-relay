@@ -46,7 +46,9 @@ func getJSON(t *testing.T, e *testEnv, path, tok string, out any) int {
 
 func insertFedRow(t *testing.T, e *testEnv, ev *store.UsageEvent) {
 	t.Helper()
-	ev.TS = time.Now().UTC().Format(time.RFC3339)
+	if ev.TS == "" {
+		ev.TS = time.Now().UTC().Format(time.RFC3339)
+	}
 	ev.Endpoint = "chat"
 	if err := store.InsertUsage(e.db, ev); err != nil {
 		t.Fatal(err)
@@ -72,6 +74,17 @@ func TestFedStatsEndpoints(t *testing.T) {
 	}
 	if code := getJSON(t, e, "/api/federation/stats?days=abc", alice, nil); code != http.StatusBadRequest {
 		t.Errorf("days=abc = %d, want 400", code)
+	}
+	// month=YYYY-MM is the calendar-window alternative; junk is rejected
+	// before the role switch, a valid month is accepted.
+	if code := getJSON(t, e, "/api/admin/federation/stats?month=bogus", tok, nil); code != http.StatusBadRequest {
+		t.Errorf("month=bogus = %d, want 400", code)
+	}
+	if code := getJSON(t, e, "/api/admin/federation/stats?month=2026-13", tok, nil); code != http.StatusBadRequest {
+		t.Errorf("month=2026-13 = %d, want 400", code)
+	}
+	if code := getJSON(t, e, "/api/federation/stats?month=2026-11", alice, nil); code != http.StatusOK {
+		t.Errorf("month=2026-11 = %d, want 200", code)
 	}
 	// A plain user cannot reach the admin view.
 	if code := getJSON(t, e, "/api/admin/federation/stats", alice, nil); code != http.StatusForbidden {
@@ -231,5 +244,106 @@ func TestFedStatsEndpoints(t *testing.T) {
 	}
 	if len(mineSpoke.Consumed) != 0 {
 		t.Errorf("admin spoke slice = %+v, want empty", mineSpoke)
+	}
+}
+
+// Plan 2026-11-25-fairness-ledger through the endpoints: alice spending on
+// a backend owned by admin is double-entered (admin served / alice
+// consumed) on the hub ledger, alice drops out of local_only, and both
+// personal views agree. The calendar-month window must carry the same row.
+func TestFedStatsLocalCrossUserCredit(t *testing.T) {
+	e := newTestEnv(t, http.NotFoundHandler())
+	tok := login(t, e)
+	alice := userToken(t, e, "alice")
+	if resp := e.do(t, "PUT", "/api/admin/federation", `{"role":"hub"}`, tok); resp.StatusCode != 200 {
+		t.Fatalf("hub PUT: %s", bodyString(t, resp))
+	} else {
+		resp.Body.Close()
+	}
+	var adminID, aliceID int64
+	if err := e.db.QueryRow(`SELECT id FROM users WHERE username='admin'`).Scan(&adminID); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.db.QueryRow(`SELECT id FROM users WHERE username='alice'`).Scan(&aliceID); err != nil {
+		t.Fatal(err)
+	}
+	be, err := store.CreateBackendWithOwner(e.db, "gpu", "http://gpu:8080", "", &adminID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := store.CreateModel(e.db, be.ID, "up", "hosted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// One clock read: the row's TS and the month window derive from the
+	// same instant, so a UTC month rollover between the insert and the
+	// month query cannot move the row out of the month it was stamped in.
+	now := time.Now().UTC()
+	insertFedRow(t, e, &store.UsageEvent{TS: now.Format(time.RFC3339), UserID: aliceID, ModelID: m.ID,
+		Prompt: 8, Completion: 3, CostTotal: 60})
+
+	var hub struct {
+		Users     []fedUserJSON  `json:"users"`
+		LocalOnly []fedLocalJSON `json:"local_only"`
+	}
+	if code := getJSON(t, e, "/api/admin/federation/stats", tok, &hub); code != 200 {
+		t.Fatalf("admin stats = %d", code)
+	}
+	byName := map[string]fedUserJSON{}
+	for _, u := range hub.Users {
+		byName[u.User] = u
+	}
+	if len(hub.Users) != 2 || byName["admin"].Served.Prompt != 8 ||
+		byName["admin"].Consumed.Prompt != 0 || byName["alice"].Consumed.Prompt != 8 ||
+		byName["alice"].Consumed.Completion != 3 || byName["alice"].Served.Prompt != 0 {
+		t.Errorf("hub ledger = %+v, want admin served 8p / alice consumed 8p/3c", hub.Users)
+	}
+	if len(hub.LocalOnly) != 0 {
+		t.Errorf("local_only = %+v, want empty (both accounts are in the ledger now)", hub.LocalOnly)
+	}
+
+	// Personal views: each side sees only its own entry.
+	var mine struct {
+		Totals    []fedUserJSON  `json:"totals"`
+		LocalOnly []fedLocalJSON `json:"local_only"`
+	}
+	if code := getJSON(t, e, "/api/federation/stats", alice, &mine); code != 200 {
+		t.Fatalf("alice stats = %d", code)
+	}
+	if len(mine.Totals) != 1 || mine.Totals[0].User != "alice" ||
+		mine.Totals[0].Consumed.Prompt != 8 || len(mine.LocalOnly) != 0 {
+		t.Errorf("alice totals = %+v / %+v", mine.Totals, mine.LocalOnly)
+	}
+	if code := getJSON(t, e, "/api/federation/stats", tok, &mine); code != 200 {
+		t.Fatalf("admin stats personal = %d", code)
+	}
+	if len(mine.Totals) != 1 || mine.Totals[0].User != "admin" ||
+		mine.Totals[0].Served.Prompt != 8 {
+		t.Errorf("admin totals = %+v", mine.Totals)
+	}
+
+	// The calendar-month window (this UTC month) carries the same row —
+	// the row was stamped now, and the month covers [1st, 1st of next).
+	var monthHub struct {
+		Users []fedUserJSON `json:"users"`
+		Until string        `json:"until"`
+	}
+	month := now.Format("2006-01")
+	if code := getJSON(t, e, "/api/admin/federation/stats?month="+month, tok, &monthHub); code != 200 {
+		t.Fatalf("month stats = %d", code)
+	}
+	if len(monthHub.Users) != 2 || monthHub.Until == "" {
+		t.Errorf("month ledger = %+v until=%q, want the same pair and a closed window",
+			monthHub.Users, monthHub.Until)
+	}
+	// A month far in the past: closed window, nothing in it.
+	var emptyHub struct {
+		Users []fedUserJSON `json:"users"`
+	}
+	if code := getJSON(t, e, "/api/admin/federation/stats?month=2020-01", tok, &emptyHub); code != 200 {
+		t.Fatalf("past month stats = %d", code)
+	}
+	if len(emptyHub.Users) != 0 {
+		t.Errorf("2020-01 ledger = %+v, want empty", emptyHub.Users)
 	}
 }

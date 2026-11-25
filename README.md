@@ -187,11 +187,15 @@ online state, version, shared models and the served-vs-consumed ledger, per
 user and per server. Usage through a federated model is metered to the
 consuming user and credited to the serving account: fairness bookkeeping,
 not billing. The ledger tables carry the token usage itself — requests, new
-input tokens, output tokens and cost per user and per server. The ledger
-tracks **federation** traffic only: an account whose usage is entirely
-hub-local has no row there by design, so the page names those accounts
-("no federation activity — their usage is on the Usage page") instead of
-leaving a blank that reads as missing data.
+input tokens, output tokens and cost per user and per server. The ledger counts
+**cross-account** traffic whichever transport it took: using another account's
+hosted model directly on the hub is credited just like traffic arriving through
+a connected server (own-model and unowned-backend usage stays out). An account
+with nothing attributable in the window has no row there by design, so the page
+names those accounts ("nothing to attribute — their usage is on the Usage
+page") instead of leaving a blank that reads as missing data. The window is a
+rolling last-N-days range or a UTC calendar month (this/last month presets on
+the page).
 
 **Crediting the hub's own hardware**: a spoke's served capacity is credited to
 its peer's owner user, but the hub's own backends had no such owner, so hub-local

@@ -233,26 +233,62 @@ export function Field({
   );
 }
 
-/** Stats-window choices for the federation pages (the API accepts 1..365;
- *  these are the presets the UI offers). */
+/** Stats-window choices for the federation pages: rolling day windows
+ *  (the API accepts 1..365) plus UTC calendar months — "this month" and
+ *  "last month" are the fairness-review presets. */
 export const STATS_DAY_CHOICES = [7, 30, 90, 365];
 
-/** "Stats window" select (last N days), shared by the federation pages. */
+export type StatsWindow =
+  | { kind: 'days'; days: number }
+  | { kind: 'month'; ym: string }; // "YYYY-MM" (UTC calendar month)
+
+/** The query pair the stats endpoints take (days XOR month). */
+export function windowToQuery(w: StatsWindow): { days?: number; month?: string } {
+  return w.kind === 'days' ? { days: w.days } : { month: w.ym };
+}
+
+/** UTC "YYYY-MM" offset months from now (negative goes back). */
+function monthOffset(utcNow: Date, offset: number): string {
+  const d = new Date(Date.UTC(utcNow.getUTCFullYear(), utcNow.getUTCMonth() + offset, 1));
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+
+/** Human label for the window, used in the panel headings. */
+export function windowLabel(w: StatsWindow): string {
+  if (w.kind === 'days') return `last ${w.days} days`;
+  const [y, m] = w.ym.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString('en-US', {
+    month: 'long',
+    year: 'numeric',
+    timeZone: 'UTC',
+  });
+}
+
+/** "Stats window" select (rolling days + calendar months), shared by the
+ *  federation pages. */
 export function StatsWindowSelect({
   value,
   onChange,
 }: {
-  value: number;
-  onChange: (days: number) => void;
+  value: StatsWindow;
+  onChange: (w: StatsWindow) => void;
 }) {
+  const now = new Date();
+  const thisMonth = monthOffset(now, 0);
+  const lastMonth = monthOffset(now, -1);
+  const enc = (w: StatsWindow) => (w.kind === 'days' ? `d${w.days}` : `m:${w.ym}`);
+  const dec = (s: string): StatsWindow =>
+    s.startsWith('m:') ? { kind: 'month', ym: s.slice(2) } : { kind: 'days', days: Number(s.slice(1)) };
   return (
     <Field label="Stats window">
-      <select className="input" value={value} onChange={(e) => onChange(Number(e.target.value))}>
+      <select className="input" value={enc(value)} onChange={(e) => onChange(dec(e.target.value))}>
         {STATS_DAY_CHOICES.map((d) => (
-          <option key={d} value={d}>
+          <option key={d} value={`d${d}`}>
             last {d} days
           </option>
         ))}
+        <option value={`m:${thisMonth}`}>this month ({windowLabel({ kind: 'month', ym: thisMonth })})</option>
+        <option value={`m:${lastMonth}`}>last month ({windowLabel({ kind: 'month', ym: lastMonth })})</option>
       </select>
     </Field>
   );

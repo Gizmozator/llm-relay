@@ -96,7 +96,7 @@ func TestFedUserTotals(t *testing.T) {
 	insertFed(t, d, &store.UsageEvent{UserID: 997, FedDirection: "served", Prompt: 5})
 
 	since := ago(30 * 24 * time.Hour)
-	all, err := store.FedUserTotals(d, since, 0)
+	all, err := store.FedUserTotals(d, since, "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestFedUserTotals(t *testing.T) {
 		d2.Served.Prompt != 0 {
 		t.Errorf("deleted 998 = %+v, want consumed 5p/2req only", d2)
 	}
-	one, err := store.FedUserTotals(d, since, b)
+	one, err := store.FedUserTotals(d, since, "", b)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +167,7 @@ func TestFedPeerTotals(t *testing.T) {
 	// A served row with NULL peer (a spoke's own shape) must not appear.
 	insertFed(t, d, &store.UsageEvent{UserID: a, FedDirection: "served", Prompt: 99})
 
-	out, err := store.FedPeerTotals(d, ago(30*24*time.Hour))
+	out, err := store.FedPeerTotals(d, ago(30*24*time.Hour), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +202,7 @@ func TestFedServedBySource(t *testing.T) {
 	insertFed(t, d, &store.UsageEvent{FedDirection: "served", FedUser: "hub-bob", Prompt: 4})
 	insertFed(t, d, &store.UsageEvent{FedDirection: "consumed", FedUser: "hub-alice", Prompt: 100})
 
-	all, err := store.FedServedBySource(d, ago(30*24*time.Hour), "")
+	all, err := store.FedServedBySource(d, ago(30*24*time.Hour), "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +210,7 @@ func TestFedServedBySource(t *testing.T) {
 		all[0].Counts.Prompt != 11 || all[1].FedUser != "hub-bob" {
 		t.Errorf("all = %+v", all)
 	}
-	one, err := store.FedServedBySource(d, ago(30*24*time.Hour), "hub-bob")
+	one, err := store.FedServedBySource(d, ago(30*24*time.Hour), "", "hub-bob")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +242,7 @@ func TestFedConsumedSlice(t *testing.T) {
 	insertFed(t, d, &store.UsageEvent{UserID: a, ModelID: localM, Prompt: 999})
 	insertFed(t, d, &store.UsageEvent{UserID: b, ModelID: hubM, Prompt: 1})
 
-	all, err := store.FedConsumedSlice(d, ago(30*24*time.Hour), 0)
+	all, err := store.FedConsumedSlice(d, ago(30*24*time.Hour), "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +251,7 @@ func TestFedConsumedSlice(t *testing.T) {
 		all[0].Counts.Prompt != 15 || all[1].User != "bob" || all[1].UserID != b {
 		t.Errorf("all = %+v (local-model must be excluded)", all)
 	}
-	one, err := store.FedConsumedSlice(d, ago(30*24*time.Hour), b)
+	one, err := store.FedConsumedSlice(d, ago(30*24*time.Hour), "", b)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -311,7 +311,7 @@ func TestFedUserTotalsHubOwner(t *testing.T) {
 	insertFed(t, d, &store.UsageEvent{UserID: spokeOwner, ModelID: m.ID,
 		FedDirection: "consumed", Prompt: 10, Completion: 5, CostTotal: 100})
 
-	all, err := store.FedUserTotals(d, ago(30*24*time.Hour), 0)
+	all, err := store.FedUserTotals(d, ago(30*24*time.Hour), "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -348,7 +348,7 @@ func TestFedUserTotalsNoOwnerUnchanged(t *testing.T) {
 	insertFed(t, d, &store.UsageEvent{UserID: spokeOwner, ModelID: m.ID,
 		FedDirection: "consumed", Prompt: 10, Completion: 5, CostTotal: 100})
 
-	all, err := store.FedUserTotals(d, ago(30*24*time.Hour), 0)
+	all, err := store.FedUserTotals(d, ago(30*24*time.Hour), "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -380,7 +380,7 @@ func TestFedUserTotalsOwnerNotDoubleCounted(t *testing.T) {
 	insertFed(t, d, &store.UsageEvent{UserID: owner, ModelID: m.ID,
 		FedDirection: "served", FedPeerID: &peerID, Prompt: 4})
 
-	all, err := store.FedUserTotals(d, ago(30*24*time.Hour), 0)
+	all, err := store.FedUserTotals(d, ago(30*24*time.Hour), "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -408,7 +408,7 @@ func TestFedUserTotalsTokenTotals(t *testing.T) {
 	insertFed(t, d, &store.UsageEvent{UserID: alice, FedDirection: "served", FedPeerID: &peerID,
 		Prompt: 20, Completion: 3, Cached: 5, CacheWrite: 1, CostTotal: 60})
 
-	all, err := store.FedUserTotals(d, ago(30*24*time.Hour), alice)
+	all, err := store.FedUserTotals(d, ago(30*24*time.Hour), "", alice)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -423,6 +423,165 @@ func TestFedUserTotalsTokenTotals(t *testing.T) {
 	want = store.FedCounts{Requests: 2, Prompt: 50, Completion: 10, Cached: 15, CacheWrite: 3, CostMicro: 150}
 	if got.Served != want {
 		t.Errorf("served = %+v, want %+v", got.Served, want)
+	}
+}
+
+// Plan 2026-11-25-fairness-ledger: hub-local traffic on ANOTHER account's
+// hardware is a fairness event — the backend owner is credited with
+// serving, the spender with consuming — exactly like a cross-peer flow, so
+// "my hosted models being used by other accounts" shows up no matter which
+// transport the traffic took. Unpairable rows stay out: self-use, ownerless
+// backends, anonymous rows, out-of-window rows (both bounds).
+func TestFedUserTotalsLocalCrossUser(t *testing.T) {
+	d := migratedDB(t)
+	host := fedUser(t, d, "host")
+	spender := fedUser(t, d, "spender")
+	owned, err := store.CreateBackendWithOwner(d, "gpu", "http://gpu:8080", "", &host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mOwned, err := store.CreateModel(d, owned.ID, "up", "hosted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := store.CreateBackend(d, "shared", "http://shared:8080", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mPlain, err := store.CreateModel(d, plain.ID, "up2", "unowned")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// spender on host's hardware: the double entry (2 rows, 14p/6c).
+	insertFed(t, d, &store.UsageEvent{UserID: spender, ModelID: mOwned.ID,
+		Prompt: 10, Completion: 5, Cached: 2, CacheWrite: 1, CostTotal: 100})
+	insertFed(t, d, &store.UsageEvent{UserID: spender, ModelID: mOwned.ID,
+		Prompt: 4, Completion: 1, CostTotal: 40})
+	// A mid-window row for the bounded-window check below.
+	insertFed(t, d, &store.UsageEvent{UserID: spender, ModelID: mOwned.ID,
+		TS: ago(15 * 24 * time.Hour), Prompt: 7})
+	// host using their own backend: self-use, invisible on both sides.
+	insertFed(t, d, &store.UsageEvent{UserID: host, ModelID: mOwned.ID, Prompt: 999})
+	// ownerless backend: nothing to attribute.
+	insertFed(t, d, &store.UsageEvent{UserID: spender, ModelID: mPlain.ID, Prompt: 999})
+	// anonymous row (user_id 0) on the owned backend: no spender to pair.
+	insertFed(t, d, &store.UsageEvent{UserID: 0, ModelID: mOwned.ID, Prompt: 999})
+	// out-of-window (before `since`) on the owned backend.
+	insertFed(t, d, &store.UsageEvent{UserID: spender, ModelID: mOwned.ID,
+		TS: ago(40 * 24 * time.Hour), Prompt: 999})
+
+	all, err := store.FedUserTotals(d, ago(30*24*time.Hour), "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("entries = %d, want 2 (host, spender): %+v", len(all), all)
+	}
+	byName := map[string]store.FedUserTotal{}
+	for _, e := range all {
+		byName[e.User] = e
+	}
+	ho := byName["host"]
+	if ho.UserID != host || ho.Served.Requests != 3 || ho.Served.Prompt != 21 ||
+		ho.Served.Completion != 6 || ho.Served.Cached != 2 || ho.Served.CacheWrite != 1 ||
+		ho.Served.CostMicro != 140 || ho.Consumed.Requests != 0 {
+		t.Errorf("host = %+v, want served 3req/21p/6c/2cached/1cw/140micro, consumed 0", ho)
+	}
+	sp := byName["spender"]
+	if sp.UserID != spender || sp.Consumed.Requests != 3 || sp.Consumed.Prompt != 21 ||
+		sp.Served.Requests != 0 {
+		t.Errorf("spender = %+v, want consumed 3req/21p, served 0", sp)
+	}
+
+	// Scoped both ways: the host sees their served credit, the spender
+	// their consumed debit; neither entry carries the counterparty.
+	one, err := store.FedUserTotals(d, ago(30*24*time.Hour), "", host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(one) != 1 || one[0].UserID != host || one[0].Served.Prompt != 21 {
+		t.Errorf("scoped host = %+v, want only host served 21p", one)
+	}
+	one, err = store.FedUserTotals(d, ago(30*24*time.Hour), "", spender)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(one) != 1 || one[0].UserID != spender || one[0].Consumed.Prompt != 21 {
+		t.Errorf("scoped spender = %+v, want only spender consumed 21p", one)
+	}
+
+	// The `until` bound (calendar-month windows): [30d ago, 10d ago) keeps
+	// only the mid-window row — the "now" rows are past the upper bound.
+	bounded, err := store.FedUserTotals(d, ago(30*24*time.Hour), ago(10*24*time.Hour), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bounded) != 2 || bounded[0].Served.Requests+bounded[1].Served.Requests != 1 ||
+		bounded[0].Consumed.Requests+bounded[1].Consumed.Requests != 1 {
+		t.Errorf("bounded = %+v, want exactly the 15d-ago row double-entered (1req each side)", bounded)
+	}
+}
+
+// FedLedger keeps local_only consistent with the ledger it ships beside it:
+// an account the ledger shows — here via the local cross-user pass on BOTH
+// sides (host with self-use rows of their own, spender) — is dropped from
+// the list; usage that is attributable to nobody else (ownerless backend)
+// stays in it.
+func TestFedLedgerDropsLedgerMembers(t *testing.T) {
+	d := migratedDB(t)
+	host := fedUser(t, d, "host")
+	spender := fedUser(t, d, "spender")
+	quiet := fedUser(t, d, "quiet")
+	owned, err := store.CreateBackendWithOwner(d, "gpu", "http://gpu:8080", "", &host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mOwned, err := store.CreateModel(d, owned.ID, "up", "hosted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := store.CreateBackend(d, "shared", "http://shared:8080", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mPlain, err := store.CreateModel(d, plain.ID, "up2", "unowned")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// host: self-use local rows (raw local-only query WOULD list them —
+	// local rows, no fed rows) but the ledger shows them as a server.
+	insertFed(t, d, &store.UsageEvent{UserID: host, ModelID: mOwned.ID, Prompt: 5})
+	// spender: cross-user local rows → ledger (consumed side).
+	insertFed(t, d, &store.UsageEvent{UserID: spender, ModelID: mOwned.ID, Prompt: 8})
+	// quiet: usage on an ownerless backend → stays local-only.
+	insertFed(t, d, &store.UsageEvent{UserID: quiet, ModelID: mPlain.ID, Prompt: 3})
+
+	since := ago(30 * 24 * time.Hour)
+	// The raw query alone would list all three (all local, none fed).
+	raw, err := store.FedLocalOnlyUsers(d, since, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) != 3 {
+		t.Fatalf("raw local-only = %+v, want all three before the ledger filter", raw)
+	}
+	users, local, err := store.FedLedger(d, since, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(users) != 2 {
+		t.Fatalf("ledger = %+v, want host + spender", users)
+	}
+	if len(local) != 1 || local[0].User != "quiet" {
+		t.Errorf("local_only = %+v, want only quiet", local)
+	}
+	// Scoped: the spender's own pair agrees with the admin view.
+	oneUsers, oneLocal, err := store.FedLedger(d, since, "", spender)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(oneUsers) != 1 || oneUsers[0].UserID != spender || len(oneLocal) != 0 {
+		t.Errorf("scoped spender = %+v/%+v, want own entry, no local_only", oneUsers, oneLocal)
 	}
 }
 
@@ -450,7 +609,7 @@ func TestFedLocalOnlyUsers(t *testing.T) {
 		TS: ago(40 * 24 * time.Hour), Prompt: 9})
 
 	since := ago(30 * 24 * time.Hour)
-	got, err := store.FedLocalOnlyUsers(d, since, 0)
+	got, err := store.FedLocalOnlyUsers(d, since, "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -478,14 +637,14 @@ func TestFedLocalOnlyUsers(t *testing.T) {
 
 	// Scoped: the local-only user's own query finds them; the mixed user's
 	// finds nobody (their local row does not make them ledger-invisible).
-	one, err := store.FedLocalOnlyUsers(d, since, local)
+	one, err := store.FedLocalOnlyUsers(d, since, "", local)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(one) != 1 || one[0].User != "local-only" {
 		t.Errorf("scoped local-only = %+v, want the one entry", one)
 	}
-	one, err = store.FedLocalOnlyUsers(d, since, mixed)
+	one, err = store.FedLocalOnlyUsers(d, since, "", mixed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -496,7 +655,7 @@ func TestFedLocalOnlyUsers(t *testing.T) {
 	// The ledger itself stays honest: the local-only user has NO phantom
 	// zero row in FedUserTotals — the no-federation state is absence from
 	// the ledger plus presence in this list, never a fake entry.
-	totals, err := store.FedUserTotals(d, since, 0)
+	totals, err := store.FedUserTotals(d, since, "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}

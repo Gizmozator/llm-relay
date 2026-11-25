@@ -27,7 +27,10 @@ import {
   Modal,
   StatsWindowSelect,
   Toggle,
+  windowLabel,
+  windowToQuery,
 } from '../components/ui';
+import type { StatsWindow } from '../components/ui';
 
 /**
  * Federation (admin) — the one page for the whole feature. It used to be two
@@ -58,7 +61,7 @@ export default function AdminFederationPage() {
   const [hubPin, setHubPin] = useState<string | null>(null);
   const [reveal, setReveal] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [days, setDays] = useState(30);
+  const [win, setWin] = useState<StatsWindow>({ kind: 'days', days: 30 });
   // Peer-registry UI state (moved from the old Servers page).
   const [rotateToken, setRotateToken] = useState<{ name: string; token: string } | null>(null);
   const [expanded, setExpanded] = useState<number | null>(null);
@@ -117,8 +120,8 @@ export default function AdminFederationPage() {
   // The ledger: hub fairness + per-peer rollup, spoke served/consumed. One
   // load feeds both (the old pages each carried their own fedAdminStats call).
   const stats = useLoad(
-    () => (curRole === 'standalone' ? Promise.resolve(null) : api.fedAdminStats(days)),
-    [curRole, days],
+    () => (curRole === 'standalone' ? Promise.resolve(null) : api.fedAdminStats(windowToQuery(win))),
+    [curRole, win],
   );
 
   const save = async (e: FormEvent) => {
@@ -214,7 +217,7 @@ export default function AdminFederationPage() {
     <div className="page">
       <div className="page-head">
         <h2>Federation</h2>
-        {curRole !== 'standalone' && <StatsWindowSelect value={days} onChange={setDays} />}
+        {curRole !== 'standalone' && <StatsWindowSelect value={win} onChange={setWin} />}
       </div>
 
       {settings.loading && !settings.data ? (
@@ -440,7 +443,7 @@ export default function AdminFederationPage() {
           )}
 
           {/* ---- Section 3: Ledger — hub and spoke (standalone has none) ---- */}
-          {curRole !== 'standalone' && <Ledger stats={stats} days={days} currency={currency} />}
+          {curRole !== 'standalone' && <Ledger stats={stats} win={win} currency={currency} />}
         </>
       )}
 
@@ -498,39 +501,45 @@ function SpokeConnection({ status }: { status: FedSettings['spoke'] }) {
  * to the hub and what its own users consumed on federated models. A refresh
  * failure keeps the last good payload on screen (useLoad retains data on error).
  * The hub fairness panel distinguishes three states (ticket #13): ledger
- * rows, "no federation activity" (local-only usage exists — named, so the
- * gap reads as design, not a bug), and "no data at all".
+ * rows, "nothing to attribute" (only unattributable local usage exists —
+ * named, so the gap reads as design, not a bug), and "no data at all".
  */
 function Ledger({
   stats,
-  days,
+  win,
   currency,
 }: {
   stats: LoadState<FedAdminStats | null>;
-  days: number;
+  win: StatsWindow;
   currency: string;
 }) {
+  const winLabel = windowLabel(win);
   if (stats.loading && !stats.data) return <Loading />;
   if (!stats.data) {
     return <Banner>{stats.error ?? 'Could not load the federation ledger.'}</Banner>;
   }
   if (stats.data.role === 'hub') {
     // Three honest states (ticket #13): ledger rows → the table; no rows
-    // but local-only accounts → "no federation activity, usage is local";
-    // neither → there is simply no data in this window.
+    // but unattributable accounts → "nothing to attribute, usage is on the
+    // Usage page"; neither → there is simply no data in this window.
     const state = fedLedgerState(stats.data.users.length, stats.data.local_only.length);
     return (
       <>
         <section className="panel">
-          <h3>Fairness — served vs consumed per user (last {days} days)</h3>
+          <h3>Fairness — served vs consumed per user ({winLabel})</h3>
+          <p className="dim">
+            Every request on a model hosted by another account counts as served for its host and
+            consumed for the spender — local traffic and connected-server traffic alike. Using your
+            own models, or backends with no fairness owner, is not listed here.
+          </p>
           {state === 'no-usage' ? (
             <Empty label="No usage at all in this window — neither local traffic nor federation traffic." />
           ) : state === 'no-fed-activity' ? (
             <>
-              <Empty label="No federation activity in this window." />
+              <Empty label="Nothing to attribute between accounts in this window." />
               <p className="dim">
-                {stats.data.local_only.map(localOnlyLabel).join(', ')} used hub-local models
-                only — local usage is not part of this ledger, it is on the Usage page.
+                {stats.data.local_only.map(localOnlyLabel).join(', ')} only used models on backends
+                they own or without a fairness owner — that usage is on the Usage page.
               </p>
             </>
           ) : (
@@ -579,9 +588,9 @@ function Ledger({
               </div>
               {stats.data.local_only.length > 0 && (
                 <p className="dim footnote">
-                  Not in this table — no federation activity this window (hub-local usage
-                  only): {stats.data.local_only.map(localOnlyLabel).join(', ')}. Their usage
-                  is on the Usage page.
+                  Not in this table — nothing attributable to them this window (own or
+                  unowned-backend usage only): {stats.data.local_only.map(localOnlyLabel).join(', ')}.
+                  Their usage is on the Usage page.
                 </p>
               )}
             </>
@@ -589,7 +598,7 @@ function Ledger({
         </section>
 
         <section className="panel">
-          <h3>Per server (last {days} days)</h3>
+          <h3>Per server ({winLabel})</h3>
           {stats.data.peers.length === 0 ? (
             <Empty label="No federation traffic in this window." />
           ) : (
@@ -645,7 +654,7 @@ function Ledger({
     return (
       <>
         <section className="panel">
-          <h3>Served to hub users (last {days} days)</h3>
+          <h3>Served to hub users ({winLabel})</h3>
           {stats.data.served_by_source.length === 0 ? (
             <Empty label="Nothing served to the hub in this window." />
           ) : (
@@ -660,7 +669,7 @@ function Ledger({
         </section>
 
         <section className="panel">
-          <h3>Consumed by local users on federated models (last {days} days)</h3>
+          <h3>Consumed by local users on federated models ({winLabel})</h3>
           {stats.data.consumed.length === 0 ? (
             <Empty label="No local user spent on federated models in this window." />
           ) : (

@@ -425,35 +425,52 @@ func (s *Server) AdminPutFederation(w http.ResponseWriter, r *http.Request, c *a
 
 // fedSince parses ?days=N (default 30, bounded 1..365) into the UTC
 // RFC3339 lower bound the federation stats queries take.
-func fedSince(r *http.Request) (string, error) {
+// fedWindow resolves the stats window from the query string:
+//
+//	month=YYYY-MM → that UTC calendar month, [first day, first day of next)
+//	days=N        → rolling last-N-days window (default 30), open upper bound
+//
+// month wins when both are present. ts is UTC RFC3339 text, so the
+// lexicographic bounds are exact; the response echoes both so the caller
+// can label the window it got.
+func fedWindow(r *http.Request) (since, until string, err error) {
+	if m := r.URL.Query().Get("month"); m != "" {
+		t, perr := time.Parse("2006-01", m)
+		if perr != nil {
+			return "", "", errors.New("month must be YYYY-MM")
+		}
+		return t.Format(time.RFC3339), t.AddDate(0, 1, 0).Format(time.RFC3339), nil
+	}
 	days := 30
 	if v := r.URL.Query().Get("days"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 1 || n > 365 {
-			return "", errors.New("days must be 1..365")
+			return "", "", errors.New("days must be 1..365")
 		}
 		days = n
 	}
-	return time.Now().UTC().Add(-time.Duration(days) * 24 * time.Hour).Format(time.RFC3339), nil
+	return time.Now().UTC().Add(-time.Duration(days) * 24 * time.Hour).Format(time.RFC3339), "", nil
 }
 
-// AdminFedStats serves GET /api/admin/federation/stats?days=N — the
-// federation ledger, role-dependent:
+// AdminFedStats serves GET /api/admin/federation/stats?days=N|month=YYYY-MM
+// — the fairness ledger, role-dependent:
 //
-//	hub:   {"role":"hub","since":…,"users":[FedUserTotal…],"peers":[FedPeerTotal…],
-//	       "local_only":[FedLocalOnlyEntry…]}
-//	       (the fairness ledger: every cross-peer flow wrote a consumed row
-//	       on the spender and a served row on the server; local_only names
-//	       the accounts whose window usage is entirely hub-local — present
-//	       on the Usage page, absent from the ledger by design, so the UI
-//	       can say "no federation activity" instead of showing a blank)
-//	spoke: {"role":"spoke","since":…,"served_by_source":[FedSourceTotals…],
+//	hub:   {"role":"hub","since":…,"until":…,"users":[FedUserTotal…],
+//	       "peers":[FedPeerTotal…],"local_only":[FedLocalOnlyEntry…]}
+//	       (the fairness ledger: cross-peer flows and hub-local traffic on
+//	       another account's hardware, double-entered as the host's served
+//	       and the spender's consumed; local_only names the accounts whose
+//	       window usage is attributable to nobody else — self-use or
+//	       ownerless backends only — present on the Usage page, absent from
+//	       the ledger by design, so the UI can say "nothing to attribute"
+//	       instead of showing a blank. until is "" for rolling windows.)
+//	spoke: {"role":"spoke","since":…,"until":…,"served_by_source":[FedSourceTotals…],
 //	       "consumed":[FedConsumedEntry…]}
 //	       (what this box served to which hub-stamped identity, and what
 //	       local users spent on federated models)
 //	other: {"role":"standalone"}
 func (s *Server) AdminFedStats(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
-	since, err := fedSince(r)
+	since, until, err := fedWindow(r)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -464,38 +481,33 @@ func (s *Server) AdminFedStats(w http.ResponseWriter, r *http.Request, c *auth.C
 	}
 	switch role {
 	case store.FedRoleHub:
-		users, err := store.FedUserTotals(s.DB, since, 0)
+		users, local, err := store.FedLedger(s.DB, since, until, 0)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, "internal error")
 			return
 		}
-		peers, err := store.FedPeerTotals(s.DB, since)
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "internal error")
-			return
-		}
-		local, err := store.FedLocalOnlyUsers(s.DB, since, 0)
+		peers, err := store.FedPeerTotals(s.DB, since, until)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, "internal error")
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"role": role, "since": since, "users": users, "peers": peers,
-			"local_only": local,
+			"role": role, "since": since, "until": until, "users": users,
+			"peers": peers, "local_only": local,
 		})
 	case store.FedRoleSpoke:
-		served, err := store.FedServedBySource(s.DB, since, "")
+		served, err := store.FedServedBySource(s.DB, since, until, "")
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, "internal error")
 			return
 		}
-		consumed, err := store.FedConsumedSlice(s.DB, since, 0)
+		consumed, err := store.FedConsumedSlice(s.DB, since, until, 0)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, "internal error")
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"role": role, "since": since,
+			"role": role, "since": since, "until": until,
 			"served_by_source": served, "consumed": consumed,
 		})
 	default:
@@ -503,20 +515,23 @@ func (s *Server) AdminFedStats(w http.ResponseWriter, r *http.Request, c *auth.C
 	}
 }
 
-// FedStats serves GET /api/federation/stats?days=N — the caller's own
-// federation totals (session auth, always scoped to the caller):
+// FedStats serves GET /api/federation/stats?days=N|month=YYYY-MM — the
+// caller's own fairness totals (session auth, always scoped to the caller):
 //
-//	hub:   {"role":"hub","since":…,"totals":[FedUserTotal],"local_only":[…]}
-//	       — the caller's served/consumed entry (empty when they have no
-//	       federation rows; local_only then carries their own hub-local
-//	       usage, so "no federation activity" stays distinguishable from
-//	       "no data at all").
-//	spoke: {"role":"spoke","since":…,"consumed":[FedConsumedEntry]} — what
-//	       the caller spent on federated models. Served rows belong to the
-//	       box, not to a session user, so they only appear on the admin view.
+//	hub:   {"role":"hub","since":…,"until":…,"totals":[FedUserTotal],"local_only":[…]}
+//	       — the caller's served/consumed entry: what their hosted models
+//	       served to other accounts and what they spent on others'
+//	       hardware, local and federated alike (empty when nothing is
+//	       attributable to them; local_only then carries their own
+//	       unattributable usage, so "no fairness activity" stays
+//	       distinguishable from "no data at all").
+//	spoke: {"role":"spoke","since":…,"until":…,"consumed":[FedConsumedEntry]} —
+//	       what the caller spent on federated models. Served rows belong to
+//	       the box, not to a session user, so they only appear on the admin
+//	       view.
 //	other: {"role":"standalone"}
 func (s *Server) FedStats(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
-	since, err := fedSince(r)
+	since, until, err := fedWindow(r)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -527,27 +542,22 @@ func (s *Server) FedStats(w http.ResponseWriter, r *http.Request, c *auth.Claims
 	}
 	switch role {
 	case store.FedRoleHub:
-		totals, err := store.FedUserTotals(s.DB, since, c.UserID)
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "internal error")
-			return
-		}
-		local, err := store.FedLocalOnlyUsers(s.DB, since, c.UserID)
+		totals, local, err := store.FedLedger(s.DB, since, until, c.UserID)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, "internal error")
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"role": role, "since": since, "totals": totals, "local_only": local,
+			"role": role, "since": since, "until": until, "totals": totals, "local_only": local,
 		})
 	case store.FedRoleSpoke:
-		consumed, err := store.FedConsumedSlice(s.DB, since, c.UserID)
+		consumed, err := store.FedConsumedSlice(s.DB, since, until, c.UserID)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, "internal error")
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"role": role, "since": since, "consumed": consumed,
+			"role": role, "since": since, "until": until, "consumed": consumed,
 		})
 	default:
 		writeJSON(w, http.StatusOK, map[string]any{"role": role})

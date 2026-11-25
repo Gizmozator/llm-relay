@@ -1,23 +1,38 @@
 // Federation metering aggregation (plan 2026-11-22-relay-federation,
-// task 4). The hub's usage_log is the fairness ledger: every cross-peer
-// flow writes a 'consumed' row (whose account spent) and a 'served' row
-// (whose capacity went out), so served-vs-consumed per user or per peer
-// falls out of one GROUP BY over fed_direction. Uniform convention:
-// fed_peer_id ALWAYS names the hosting peer — the peer whose hardware
-// served — and is NULL when hub hardware served or the row sits on a
-// spoke with no local peer row; consumed rows identify the consumer by
-// user_id. Spokes keep two local views instead: what this box served to
-// whom (fed_user, hub-stamped), and what local users spent on federated
-// (synthetic-backend) models — that slice is identified by the backend
-// scheme, not by fed columns (spoke-local consumption rows are
-// deliberately unstamped). Hub-local usage never appears in any of these
-// rollups; FedLocalOnlyUsers names the accounts that are usage-present but
-// ledger-absent, so the UI can explain the gap instead of showing a blank
-// (ticket #13).
+// task 4; fairness scope widened per plan 2026-11-25-fairness-ledger).
+// The hub's usage_log is the fairness ledger, fed from two sources:
 //
-// All queries take a `since` UTC RFC3339 bound (the same convention as
-// UsageFilter.Since: ts is stored as UTC RFC3339 text, so lexicographic
-// >= is exact).
+//   - Cross-peer flows: every one wrote a 'consumed' row (whose account
+//     spent) and a 'served' row (whose capacity went out); a consumed row
+//     with fed_peer_id NULL was served by THIS relay's hardware, so the
+//     serving backend's owner is credited with the serving (hub-owner
+//     pass, ticket #12).
+//   - Hub-local cross-user traffic: a plain row (fed_direction ”) whose
+//     backend has an owner other than the consuming user — that owner's
+//     hardware served that user, so owner.served and consumer.consumed
+//     both grow, exactly like a cross-peer flow. This is what makes
+//     "my hosted models being used by other accounts" visible in the
+//     ledger no matter which transport the traffic took (local-direct or
+//     via a connected server). Self-use, ownerless backends and
+//     anonymous rows stay out: there is nothing to attribute between
+//     accounts.
+//
+// Uniform convention: fed_peer_id ALWAYS names the hosting peer — the
+// peer whose hardware served — and is NULL when hub hardware served or
+// the row sits on a spoke with no local peer row; consumed rows identify
+// the consumer by user_id. Spokes keep two local views instead: what this
+// box served to whom (fed_user, hub-stamped), and what local users spent
+// on federated (synthetic-backend) models — that slice is identified by
+// the backend scheme, not by fed columns (spoke-local consumption rows
+// are deliberately unstamped). FedLocalOnlyUsers names the accounts the
+// ledger cannot show at all (usage present, nothing attributable), so the
+// UI can explain the gap instead of showing a blank (ticket #13);
+// FedLedger keeps that list consistent with the ledger it ships beside it.
+//
+// All queries take a `since` UTC RFC3339 lower bound and an optional
+// exclusive `until` upper bound ("" = open-ended; the calendar-month
+// presets set one) — same convention as UsageFilter.Since: ts is stored
+// as UTC RFC3339 text, so lexicographic >= / < are exact.
 package store
 
 import (
@@ -39,6 +54,16 @@ type FedCounts struct {
 const fedCountAggs = `COUNT(*), COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0),
 		COALESCE(SUM(cached_tokens),0), COALESCE(SUM(cache_write_tokens),0), COALESCE(SUM(cost_total),0)`
 
+// untilBound appends the exclusive upper bound of a bounded window to a
+// WHERE clause. "" leaves it open (the rolling "last N days" shape); the
+// calendar-month presets pass the first instant of the next month.
+func untilBound(col, until string) (string, []any) {
+	if until == "" {
+		return "", nil
+	}
+	return ` AND ` + col + ` < ?`, []any{until}
+}
+
 // addFedCounts folds one aggregated bucket into another. The rollups
 // accumulate per key so a key seen in several rows (or re-touched across
 // the served/consumed passes) never loses an earlier bucket to
@@ -52,10 +77,7 @@ func addFedCounts(dst *FedCounts, c FedCounts) {
 	dst.CostMicro += c.CostMicro
 }
 
-// FedUserTotals is one user's served/consumed rollup (hub fairness view).
-// userID 0 = every user; otherwise only that user's entry is returned.
-// UserID is the aggregation key: deleted users share the '(deleted user)'
-// label but stay distinct entries (consumers disambiguate by id).
+// FedUserTotal is one user's served/consumed rollup (hub fairness view).
 type FedUserTotal struct {
 	UserID   int64     `json:"user_id"`
 	User     string    `json:"user"`
@@ -63,9 +85,17 @@ type FedUserTotal struct {
 	Consumed FedCounts `json:"consumed"`
 }
 
-func FedUserTotals(db *sql.DB, since string, userID int64) ([]FedUserTotal, error) {
+// FedUserTotals is one user's served/consumed rollup (hub fairness view):
+// the cross-peer passes plus the local cross-user pass below. userID 0 =
+// every user; otherwise only that user's entry is returned. UserID is the
+// aggregation key: deleted users share the '(deleted user)' label but
+// stay distinct entries (consumers disambiguate by id).
+func FedUserTotals(db *sql.DB, since, until string, userID int64) ([]FedUserTotal, error) {
 	where := `u.fed_direction != '' AND u.ts >= ?`
 	args := []any{since}
+	uClause, uArgs := untilBound("u.ts", until)
+	where += uClause
+	args = append(args, uArgs...)
 	if userID != 0 {
 		where += ` AND u.user_id = ?`
 		args = append(args, userID)
@@ -114,6 +144,9 @@ func FedUserTotals(db *sql.DB, since string, userID int64) ([]FedUserTotal, erro
 	// never counted on both sides.
 	ownerWhere := `u.fed_direction != '' AND u.fed_peer_id IS NULL AND b.owner_user_id IS NOT NULL AND u.ts >= ?`
 	ownerArgs := []any{since}
+	ouClause, ouArgs := untilBound("u.ts", until)
+	ownerWhere += ouClause
+	ownerArgs = append(ownerArgs, ouArgs...)
 	if userID != 0 {
 		ownerWhere += ` AND b.owner_user_id = ?`
 		ownerArgs = append(ownerArgs, userID)
@@ -140,6 +173,65 @@ func FedUserTotals(db *sql.DB, since string, userID int64) ([]FedUserTotal, erro
 		foldFedUser(byUser, id, user, "served", c)
 	}
 	if err := own.Err(); err != nil {
+		return nil, err
+	}
+
+	// Local cross-user credit (plan 2026-11-25-fairness-ledger): a
+	// hub-local row (fed_direction '') whose backend has an owner other
+	// than the consuming user is a fairness event — the owner's hardware
+	// served that account. Same double-entry as a cross-peer flow: the
+	// owner is credited served, the spender consumed. Rows that cannot be
+	// paired stay out: ownerless backends (nobody hosts them), anonymous
+	// rows (user_id 0/NULL — nobody spent), and self-use (owner ==
+	// consumer: serving yourself is neither contribution nor consumption,
+	// and it would cancel on the Net column anyway).
+	//
+	// Disjoint from the fed passes by construction (they require
+	// fed_direction != ''), so no row is ever counted twice. One range
+	// scan + join + GROUP BY — the same shape as the hub-owner pass, no
+	// per-row subquery (see the FedLocalOnlyUsers comment for why).
+	localWhere := `u.fed_direction = '' AND u.ts >= ? AND b.owner_user_id IS NOT NULL
+			AND u.user_id IS NOT NULL AND u.user_id > 0 AND u.user_id != b.owner_user_id`
+	localArgs := []any{since}
+	luClause, luArgs := untilBound("u.ts", until)
+	localWhere += luClause
+	localArgs = append(localArgs, luArgs...)
+	if userID != 0 {
+		// Scoped: the user may appear on either side — hosting for others
+		// or spending on someone else's hardware. Only their own entry is
+		// folded out (the counterparty stays unlisted, as in the fed passes).
+		localWhere += ` AND (b.owner_user_id = ? OR u.user_id = ?)`
+		localArgs = append(localArgs, userID, userID)
+	}
+	loc, err := db.Query(`SELECT b.owner_user_id, COALESCE(us.username,'(deleted user)'),
+			u.user_id, COALESCE(uc.username,'(deleted user)'), `+fedCountAggs+`
+		FROM usage_log u
+		JOIN models m ON m.id = u.model_id
+		JOIN backends b ON b.id = m.backend_id
+		LEFT JOIN users us ON us.id = b.owner_user_id
+		LEFT JOIN users uc ON uc.id = u.user_id
+		WHERE `+localWhere+`
+		GROUP BY b.owner_user_id, us.username, u.user_id, uc.username`, localArgs...)
+	if err != nil {
+		return nil, err
+	}
+	defer loc.Close()
+	for loc.Next() {
+		var hostID, consID int64
+		var host, cons string
+		var c FedCounts
+		if err := loc.Scan(&hostID, &host, &consID, &cons, &c.Requests, &c.Prompt,
+			&c.Completion, &c.Cached, &c.CacheWrite, &c.CostMicro); err != nil {
+			return nil, err
+		}
+		if userID == 0 || hostID == userID {
+			foldFedUser(byUser, hostID, host, "served", c)
+		}
+		if userID == 0 || consID == userID {
+			foldFedUser(byUser, consID, cons, "consumed", c)
+		}
+	}
+	if err := loc.Err(); err != nil {
 		return nil, err
 	}
 
@@ -187,14 +279,16 @@ type FedLocalOnlyEntry struct {
 }
 
 // FedLocalOnlyUsers lists the accounts with unstamped (hub-local) usage in
-// the window and NO federation rows in it — exactly the set that is present
-// on the Usage page but absent from the ledger. A user with BOTH local and
-// fed rows is not listed (they are already in the ledger; the hint would be
-// wrong), and neither is a user with no usage at all — the caller tells
-// "no federation activity" apart from "no data at all" by whether this list
-// or the ledger has entries. userID 0 = every user; otherwise only that
-// user's entry (empty whenever they have any federation row).
-func FedLocalOnlyUsers(db *sql.DB, since string, userID int64) ([]FedLocalOnlyEntry, error) {
+// the window and NO federation rows in it. Which of these are ALSO absent
+// from the ledger is decided by FedLedger (a user whose local rows are
+// cross-user now appears in the ledger as host or spender and is dropped
+// from this list); what remains is usage that is present on the Usage page
+// but attributable to nobody else — self-use or ownerless-backend usage
+// only. A user with any federation row is not listed here, and neither is
+// a user with no usage at all — the caller tells "no fairness activity"
+// apart from "no data at all" by whether this list or the ledger has
+// entries. userID 0 = every user; otherwise only that user's entry.
+func FedLocalOnlyUsers(db *sql.DB, since, until string, userID int64) ([]FedLocalOnlyEntry, error) {
 	// One pass over the window, grouped by account, keeping accounts that
 	// have local (unstamped) usage but NO federation rows. The "has local /
 	// has fed" decision is made inside the GROUP BY with conditional
@@ -213,6 +307,9 @@ func FedLocalOnlyUsers(db *sql.DB, since string, userID int64) ([]FedLocalOnlyEn
 	// = ''), matching the old outer WHERE fed_direction = '' filter.
 	where := `u.ts >= ?`
 	args := []any{since}
+	uClause, uArgs := untilBound("u.ts", until)
+	where += uClause
+	args = append(args, uArgs...)
 	if userID != 0 {
 		where += ` AND u.user_id = ?`
 		args = append(args, userID)
@@ -247,6 +344,36 @@ func FedLocalOnlyUsers(db *sql.DB, since string, userID int64) ([]FedLocalOnlyEn
 	return out, rows.Err()
 }
 
+// FedLedger returns the two halves of the hub fairness payload as one
+// consistent pair: the per-user ledger and the local-only list. An
+// account the ledger shows (cross-peer traffic, or local traffic on
+// another account's hardware) is dropped from the local-only list here —
+// the UI's "not in this table" note must never name someone the table
+// already has, and the raw FedLocalOnlyUsers query cannot see the
+// host-side ledger membership (it groups by the consumer, not the
+// backend owner).
+func FedLedger(db *sql.DB, since, until string, userID int64) ([]FedUserTotal, []FedLocalOnlyEntry, error) {
+	users, err := FedUserTotals(db, since, until, userID)
+	if err != nil {
+		return nil, nil, err
+	}
+	local, err := FedLocalOnlyUsers(db, since, until, userID)
+	if err != nil {
+		return nil, nil, err
+	}
+	inLedger := make(map[int64]bool, len(users))
+	for _, u := range users {
+		inLedger[u.UserID] = true
+	}
+	kept := local[:0]
+	for _, e := range local {
+		if !inLedger[e.UserID] {
+			kept = append(kept, e)
+		}
+	}
+	return users, kept, nil
+}
+
 // FedPeerTotals is one peer's served/consumed rollup (hub Servers page).
 type FedPeerTotal struct {
 	PeerID   int64     `json:"peer_id"`
@@ -266,12 +393,16 @@ type FedPeerTotal struct {
 // owner running several peers carries the same consumed total under each
 // of them — the ledger attributes spending to accounts, not to the
 // identity a person happens to run.
-func FedPeerTotals(db *sql.DB, since string) ([]FedPeerTotal, error) {
+func FedPeerTotals(db *sql.DB, since, until string) ([]FedPeerTotal, error) {
 	byPeer := map[int64]*FedPeerTotal{}
+	suClause, suArgs := untilBound("u.ts", until)
+	cuClause, cuArgs := untilBound("u.ts", until)
+	servedArgs := append([]any{since}, suArgs...)
+	consumedArgs := append([]any{since}, cuArgs...)
 	served, err := db.Query(`SELECT u.fed_peer_id, COALESCE(p.name,'(deleted peer)'), `+fedCountAggs+`
 		FROM usage_log u LEFT JOIN peers p ON p.id = u.fed_peer_id
-		WHERE u.fed_direction = 'served' AND u.fed_peer_id IS NOT NULL AND u.ts >= ?
-		GROUP BY u.fed_peer_id, p.name`, since)
+		WHERE u.fed_direction = 'served' AND u.fed_peer_id IS NOT NULL AND u.ts >= ?`+suClause+`
+		GROUP BY u.fed_peer_id, p.name`, servedArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -296,8 +427,8 @@ func FedPeerTotals(db *sql.DB, since string) ([]FedPeerTotal, error) {
 	}
 	consumed, err := db.Query(`SELECT p.id, p.name, `+fedCountAggs+`
 		FROM usage_log u JOIN peers p ON p.owner_user_id = u.user_id
-		WHERE u.fed_direction = 'consumed' AND u.ts >= ?
-		GROUP BY p.id, p.name`, since)
+		WHERE u.fed_direction = 'consumed' AND u.ts >= ?`+cuClause+`
+		GROUP BY p.id, p.name`, consumedArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -337,9 +468,12 @@ type FedSourceTotals struct {
 
 // FedServedBySource is the spoke view over its served rows. fedUser "" =
 // every source; otherwise only that identity's entry.
-func FedServedBySource(db *sql.DB, since, fedUser string) ([]FedSourceTotals, error) {
+func FedServedBySource(db *sql.DB, since, until, fedUser string) ([]FedSourceTotals, error) {
 	where := `fed_direction = 'served' AND ts >= ?`
 	args := []any{since}
+	uClause, uArgs := untilBound("ts", until)
+	where += uClause
+	args = append(args, uArgs...)
 	if fedUser != "" {
 		where += ` AND fed_user = ?`
 		args = append(args, fedUser)
@@ -375,9 +509,12 @@ type FedConsumedEntry struct {
 // that live on synthetic backends (peer://… or hub://…). Those rows carry
 // no fed columns by design (the spoke meters its own users normally);
 // the backend scheme identifies the slice. userID 0 = every user.
-func FedConsumedSlice(db *sql.DB, since string, userID int64) ([]FedConsumedEntry, error) {
+func FedConsumedSlice(db *sql.DB, since, until string, userID int64) ([]FedConsumedEntry, error) {
 	where := `(b.base_url LIKE 'peer://%' OR b.base_url LIKE 'hub://%') AND u.ts >= ?`
 	args := []any{since}
+	uClause, uArgs := untilBound("u.ts", until)
+	where += uClause
+	args = append(args, uArgs...)
 	if userID != 0 {
 		where += ` AND u.user_id = ?`
 		args = append(args, userID)

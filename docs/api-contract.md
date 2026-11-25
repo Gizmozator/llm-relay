@@ -108,38 +108,51 @@ Federation settings (JWT, admin):
 - `DELETE /api/admin/tls` → removes the row → `200 {"configured":false}`. TLS handshakes fail until a new cert exists (deliberate — no silent fallback).
 - `GET /api/federation/role` (JWT, any user) → `{"role":"hub"}` — the reconciled role only; the hub-only UI (setup guide) gates on it without needing the admin settings payload.
 
-Federation stats (plan task 4; `?days=N`, default 30, `1..365` else `400`;
-the window is the last N days, `since` echoed in the response):
+Federation stats (plan task 4; fairness scope per plan
+2026-11-25-fairness-ledger). Window: `?days=N` (default 30, `1..365` else
+`400`) = rolling last-N-days with an open upper bound, or `?month=YYYY-MM`
+(a UTC calendar month, `[first day, first day of next)`; malformed → `400`;
+`month` wins when both are present). The response echoes `since` and
+`until` (`until` is `""` for rolling windows).
 
-- `GET /api/admin/federation/stats` (JWT, admin) — the federation ledger,
+- `GET /api/admin/federation/stats` (JWT, admin) — the fairness ledger,
   **role-dependent** payload:
-  - hub (the fairness ledger — every cross-peer flow wrote a `consumed`
-    row on the spender's account and a `served` row on the server's):
-    `{"role":"hub","since":"…","users":[{"user_id":4,"user":"alice",
+  - hub (the fairness ledger — every request on capacity owned by someone
+    else is double-entered as the host's `served` and the spender's
+    `consumed`, whichever transport it took):
+    `{"role":"hub","since":"…","until":"","users":[{"user_id":4,"user":"alice",
     "served":{…},"consumed":{…}}],"peers":[{"peer_id":3,"peer":"home-server",
     "served":{…},"consumed":{…}}],"local_only":[{"user_id":7,"user":"bob",
     "counts":{…}}]}` — user entries are keyed by `user_id`
     (deleted users share the `"(deleted user)"` label but stay distinct
     entries); a peer's `served` sums the rows naming it as host, its
     `consumed` is owner-level (every consumed row of the peer's owner —
-    an owner with several peers carries the same total under each). A user's
-    `served` also picks up **hub-hardware serving credited through a backend
-    owner** (ticket #12): a federated row served by this relay's own hardware
-    (`fed_peer_id` NULL) whose serving model's backend has an `owner_user_id`
-    credits that owner with the serving — the hub mirror of a spoke's capacity
-    crediting its peer owner, so hub capacity finally appears in the per-user
-    table. Attribution is a query-time join (`usage_log → models →
-    backends.owner_user_id`), so it covers historical rows the moment an owner
-    is set; a backend with no owner contributes nothing (hub-hardware usage
-    stays uncredited) and peer-hosted rows are never double-counted.
-    `local_only` (ticket #13) names the accounts whose window usage is
-    entirely **hub-local**: unstamped rows and no federation rows, so they
-    cannot appear in `users` (the ledger aggregates `fed_direction != ''`
-    only). A user with both local and fed rows is not listed; an empty
-    `users` **and** empty `local_only` means there was no usage at all. The
-    UI uses this to say "no federation activity — this account's usage is
-    local" instead of showing a blank that reads as missing data.
-  - spoke: `{"role":"spoke","since":"…","served_by_source":[{"fed_user":
+    an owner with several peers carries the same total under each).
+    Three passes feed the per-user table: (1) cross-peer flows — each wrote
+    a `consumed` row on the spender and a `served` row on the hosting peer's
+    owner; (2) **hub-hardware serving credited through a backend owner**
+    (ticket #12): a federated row served by this relay's own hardware
+    (`fed_peer_id` NULL) whose serving model's backend has an
+    `owner_user_id` credits that owner with the serving; (3) **local
+    cross-user traffic** (plan 2026-11-25-fairness-ledger): a plain
+    (`fed_direction` empty) row whose backend has an `owner_user_id` other
+    than the consuming user credits the owner with serving and charges the
+    user's account as consumed — so "account A's hosted models being used by
+    account B" appears in the ledger whether B dialed the hub directly or
+    arrived via B's spoke. Unpairable rows stay out: self-use (owner ==
+    consumer), ownerless backends, and anonymous rows (`user_id` NULL/0).
+    All attribution is a query-time join (`usage_log → models →
+    backends.owner_user_id`), so it covers historical rows the moment an
+    owner is set; the local pass is disjoint from the fed passes by
+    `fed_direction`, and the hub-owner credit lands on the serving side of
+    rows the first pass books as consumed, so no bucket is ever inflated. `local_only` (ticket #13, narrowed by
+    2026-11-25-fairness-ledger) names the accounts with window usage the
+    ledger cannot show at all — self-use or ownerless-backend usage only, no
+    federation rows; anyone the ledger shows (either side of any pass) is
+    dropped from it. An empty `users` **and** empty `local_only` means there
+    was no usage at all. The UI uses this to say "nothing to attribute
+    between accounts" instead of showing a blank that reads as missing data.
+  - spoke: `{"role":"spoke","since":"…","until":…,"served_by_source":[{"fed_user":
     "hub-alice","counts":{…}}],"consumed":[{"user_id":4,"user":"alice",
     "counts":{…}}]}` — what this box served to which hub-stamped
     identity, and what local users spent on federated
@@ -147,13 +160,15 @@ the window is the last N days, `since` echoed in the response):
   - standalone: `{"role":"standalone"}`.
   - Every `{…}` counts bucket is `{"requests","prompt_tokens",
     "completion_tokens","cached_tokens","cache_write_tokens","cost_micro"}`.
-- `GET /api/federation/stats` (JWT, any user) — the caller's own totals,
-  always scoped to the caller (admins included): hub → `{"role":"hub",
-  "since":…,"totals":[one FedUserTotal],"local_only":[caller's local-only
-  entry or empty]}` (`local_only` carries the caller's own hub-local usage
-  when they have no federation rows — the personal "no federation activity"
-  signal, ticket #13); spoke → `{"role":"spoke",
-  "since":…,"consumed":[caller's slice]}` (served rows belong to the box,
+- `GET /api/federation/stats` (JWT, any user) — the caller's own fairness
+  totals, always scoped to the caller (admins included): hub → `{"role":"hub",
+  "since":…,"until":…,"totals":[one FedUserTotal],"local_only":[caller's entry
+  or empty]}` — the caller's served (their hosted models serving other
+  accounts, local and federated alike) and consumed (their spending on others'
+  hardware); `local_only` carries their unattributable usage when the ledger
+  has no entry for them (the personal "nothing to attribute" signal,
+  ticket #13); spoke → `{"role":"spoke",
+  "since":…,"until":…,"consumed":[caller's slice]}` (served rows belong to the box,
   not to a session user); standalone → `{"role":"standalone"}`.
 
 Per-model sharing switch (rides the model object everywhere the admin API

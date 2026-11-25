@@ -771,7 +771,7 @@ func TestHubGroupServeDoubleEntry(t *testing.T) {
 	})
 	// The rollups reflect the pair.
 	since := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
-	totals, err := store.FedUserTotals(hub.db, since, 0)
+	totals, err := store.FedUserTotals(hub.db, since, "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -782,7 +782,7 @@ func TestHubGroupServeDoubleEntry(t *testing.T) {
 	if byUser["hub"].Consumed.Prompt != 10 || byUser["bob"].Served.Prompt != 10 {
 		t.Errorf("user totals = %+v", totals)
 	}
-	peers, err := store.FedPeerTotals(hub.db, since)
+	peers, err := store.FedPeerTotals(hub.db, since, "")
 	if err != nil {
 		t.Fatal(err)
 	}
