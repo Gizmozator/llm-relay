@@ -216,8 +216,18 @@ func (e *Edge) forward(w http.ResponseWriter, r *http.Request) {
 	// Body cap: the tunnel's Req frame limit is fed.MaxBody, so anything
 	// larger could never cross — refuse locally with an honest 413
 	// instead of paying a round-trip for a transport error.
+	//
+	// OpenRequest already claimed a fed.MaxInflight slot and registered id
+	// in the conn's inflight map; only release() frees both. These error
+	// paths return before the frame is ever sent, so they MUST release or
+	// every oversized/aborted body burns a slot for the Conn's lifetime —
+	// MaxInflight of them wedge the whole tunnel (503 for everyone) and
+	// leave the abandoned channel registered so the relay's Res frames
+	// route into a dead consumer and stall the read pump. release is
+	// sync.Once-guarded, so this is safe even though later paths call it too.
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, fed.MaxBody))
 	if err != nil {
+		release()
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
 			writeEdgeError(w, http.StatusRequestEntityTooLarge, "request body over the tunnel cap")

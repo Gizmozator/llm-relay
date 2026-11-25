@@ -514,6 +514,36 @@ func TestEdgeChannelFullFailFast(t *testing.T) {
 	}
 }
 
+// A body over fed.MaxBody (or an aborted upload) is refused locally with an
+// honest 413/400 — but OpenRequest already claimed a tunnel slot, so those
+// error paths MUST release it. Before the fix each oversized body leaked one
+// of fed.MaxInflight slots: MaxInflight of them wedged the tunnel (every
+// later request 503'd "channel at capacity") and left a dead channel
+// registered so the relay's Res frames stalled the read pump. Any LAN client
+// could trigger this deliberately. Proof: MaxInflight oversized bodies, then
+// a normal request must still succeed.
+func TestEdgeBodyErrorReleasesSlot(t *testing.T) {
+	env := newEdgeEnv(t)
+	big := strings.Repeat("a", fed.MaxBody+1)
+	for i := 0; i < fed.MaxInflight; i++ {
+		resp := edgeDo(t, env.edgeURL+"/v1/chat/completions", "POST", big, env.key)
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusRequestEntityTooLarge {
+			t.Fatalf("oversized body %d: want 413, got %d", i, resp.StatusCode)
+		}
+	}
+	// Every slot was released by the 413 path, so the tunnel is still usable.
+	resp := edgeDoTimeout(t, 5*time.Second, env.edgeURL+"/v1/chat/completions", "POST",
+		`{"model":"pub-model"}`, env.key)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("after %d oversized bodies: want 200, got %d: %s",
+			fed.MaxInflight, resp.StatusCode, body)
+	}
+}
+
 func mustReq(url, body, key string) *http.Request {
 	req, _ := http.NewRequest("POST", url, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")

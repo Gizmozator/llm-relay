@@ -98,21 +98,35 @@ func (r *Registry) onEdgeReq(c *fed.Conn, backendID int64, backendName, remoteAd
 			return
 		}
 	}
-	go r.serveEdgeReq(c, handler, backendID, backendName, remoteAddr, req)
-}
-
-// serveEdgeReq rebuilds an HTTP request from the frame, runs it through
-// the relay's proxy mux, and pumps the answer back as frames.
-func (r *Registry) serveEdgeReq(c *fed.Conn, handler http.Handler, backendID int64, backendName, remoteAddr string, req *fed.Req) {
-	// Path gate: only the OpenAI surface is forwarded-client territory.
-	// The connect endpoint, healthz and MCP live on the same mux but are
-	// not for traffic arriving over a backend channel (mirrors the fed
-	// frame server's identical gate).
+	// Path gate: only the OpenAI surface is forwarded-client territory. The
+	// connect endpoint, healthz and MCP live on the same mux but are not for
+	// traffic arriving over a backend channel (mirrors the fed frame server's
+	// identical gate). It runs here, before the cancel registration below, so
+	// a rejected path never leaves a registered-but-never-cleaned entry.
 	if !strings.HasPrefix(req.Path, "/v1/") {
 		_ = c.Send(&fed.ResEnd{T: fed.TResEnd, ID: req.ID, Error: "path not served over the edge proxy"})
 		return
 	}
+	// Register the cancel func HERE, on the read pump, BEFORE spawning the
+	// serving goroutine. Cancel frames are dispatched synchronously on this
+	// same pump, so a Cancel that arrives right after this Req (the common
+	// case: the LAN client hangs up immediately and edge.go sends Cancel on
+	// r.Context().Done()) is handled here — before the spawn. If registration
+	// lived inside serveEdgeReq (a different goroutine) the Cancel lookup
+	// could run first, find nothing, and drop the cancel, letting the request
+	// run to completion and bill a client that is already gone.
 	ctx, cancel := context.WithCancel(context.Background())
+	r.edgeMu.Lock()
+	r.edgeServed[req.ID] = cancel
+	r.edgeMu.Unlock()
+	go r.serveEdgeReq(ctx, cancel, c, handler, backendID, backendName, remoteAddr, req)
+}
+
+// serveEdgeReq rebuilds an HTTP request from the frame, runs it through the
+// relay's proxy mux, and pumps the answer back as frames. ctx/cancel are made
+// by onEdgeReq on the read pump (so a Cancel can always find them) and passed
+// in; this goroutine owns their cleanup.
+func (r *Registry) serveEdgeReq(ctx context.Context, cancel context.CancelFunc, c *fed.Conn, handler http.Handler, backendID int64, backendName, remoteAddr string, req *fed.Req) {
 	// The channel dying aborts everything it was serving: a generation
 	// must not keep burning an upstream into a socket that can no longer
 	// deliver it.
@@ -124,9 +138,6 @@ func (r *Registry) serveEdgeReq(c *fed.Conn, handler http.Handler, backendID int
 		case <-watchStop:
 		}
 	}()
-	r.edgeMu.Lock()
-	r.edgeServed[req.ID] = cancel
-	r.edgeMu.Unlock()
 	defer func() {
 		close(watchStop)
 		r.edgeMu.Lock()
