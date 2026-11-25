@@ -27,6 +27,7 @@ import (
 	"github.com/coder/websocket"
 	"llm-relay/internal/fed"
 	"llm-relay/internal/tlscert"
+	buildver "llm-relay/internal/version"
 )
 
 // ClientConfig is one connector's whole configuration.
@@ -188,6 +189,16 @@ func handshakeClient(ctx context.Context, ws *websocket.Conn, o fed.Options, c C
 	}
 	if ack.Proto != fed.Protocol {
 		return fmt.Errorf("relay proto mismatch: %d", ack.Proto)
+	}
+	// Version awareness (plan 2026-11-25-version-awareness): the hub's
+	// hello_ack version tells this connector box whether IT is the old
+	// one — an error line for its operator (the hub's own dashboard shows
+	// the matching note/banner).
+	switch st := buildver.State(o.Version, ack.Version); st {
+	case buildver.Newer:
+		o.Log.Printf("VERSION WARNING: hub %q runs %s, newer than this server (%s) - update this relay", ack.Name, ack.Version, o.Version)
+	case buildver.Older:
+		o.Log.Printf("remote: hub %q runs %s, older than this server (%s)", ack.Name, ack.Version, o.Version)
 	}
 	return nil
 }

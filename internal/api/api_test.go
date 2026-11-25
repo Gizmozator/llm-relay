@@ -48,9 +48,11 @@ func newTestEnv(t *testing.T, upstream http.Handler) *testEnv {
 		t.Fatal(err)
 	}
 
-	s := &api.Server{DB: d, JWTSecret: "test-secret-0123456789abcdefghij", JWTTTL: time.Hour}
+	s := &api.Server{DB: d, JWTSecret: "test-secret-0123456789abcdefghij", JWTTTL: time.Hour,
+		Version: "v9.9.9"}
 	mux := http.NewServeMux()
 	mux.Handle("POST /api/auth/login", s.RateLimitLogin(s.Login))
+	mux.Handle("GET /api/version", s.Auth(s.ServeVersion))
 	mux.Handle("GET /api/me", s.Auth(s.Me))
 	mux.Handle("PATCH /api/me", s.Auth(s.UpdateMe))
 	mux.Handle("POST /api/auth/change_password", s.Auth(s.ChangePassword))

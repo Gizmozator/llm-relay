@@ -7,7 +7,7 @@ PORT     ?= 8080
 ADMIN_PORT ?= 8081
 BIN      ?= llm-relay
 REGISTRY ?= gitea.rantaeskola.fi/gizmoz/llm-relay
-VERSION  ?= latest
+VERSION  ?= $(GIT_DESC)
 
 # Build stamp for the binary (main.version, shown to federation peers on the
 # Federation page): git describe when this is a git checkout, "dev" otherwise
@@ -102,8 +102,10 @@ dockerx-setup: ## create the multi-arch buildx builder once (docker-container dr
 	docker buildx inspect $(BUILDER) >/dev/null 2>&1 \
 	  || docker buildx create --name $(BUILDER) --driver docker-container --bootstrap
 
-docker-release: dockerx-setup ## cross-build $(PLATFORMS) + push multi-arch manifest to the registry (VERSION=x.y.z)
-	docker buildx build --builder $(BUILDER) --platform $(PLATFORMS) -t $(REGISTRY):$(VERSION) --build-arg VERSION=$(VERSION) --push .
+docker-release: dockerx-setup ## cross-build $(PLATFORMS) + push :$(VERSION) and :latest (VERSION defaults to the git stamp)
+	docker buildx build --builder $(BUILDER) --platform $(PLATFORMS) \
+	  -t $(REGISTRY):$(VERSION) -t $(REGISTRY):latest \
+	  --build-arg VERSION=$(VERSION) --push .
 
 docker-up: ## start the stack detached
 	docker compose up -d --build

@@ -438,7 +438,7 @@ For local dev without Docker: `make web && make run`.
 | run locally | `make run` (relay `:PORT`, dashboard `:ADMIN_PORT`) |
 | build container | `make docker-build` |
 | start / stop local stack | `make docker-up` / `make docker-down` |
-| publish container image | `make docker-release VERSION=0.1.1` |
+| publish container image | `make docker-release` (tags `:<git-stamp>` + `:latest`; `VERSION=x.y.z` to name it) |
 | federation e2e (manual, localhost 18xxx) | `scripts/e2e-federation.sh` |
 
 ## Configuration
@@ -470,23 +470,39 @@ Environment (or `.env`, see `.env.example`):
 
 `deploy/` ships a sample container-compose stack. Point it at your own registry and
 data directory, set `JWT_SECRET` (+ optional bootstrap admin) in the stack `.env`,
-and publish a new image version with `make docker-release VERSION=x.y.z`. That
+and publish a new image version with `make docker-release`. That
 target cross-builds a multi-arch manifest (`linux/amd64` + `linux/arm64` by
-default, override with `PLATFORMS=…`) and pushes it in one step via BuildKit —
-the Go binary is a static cross-compile, so no emulation is needed. The first
-run auto-creates a `docker-container` buildx builder (`BUILDER=…` to name it).
-`make docker-build` remains the fast single-arch local build for development.
+default, override with `PLATFORMS=…`), tags it with the git stamp (or your
+`VERSION=…`) **and** `:latest`, and pushes both in one step via BuildKit —
+the Go binary is a static cross-compile, so no emulation is needed. The
+first run auto-creates a `docker-container` buildx builder (`BUILDER=…` to
+name it). `make docker-build` remains the fast single-arch local build for
+development.
 
 Every binary carries its build version: `make build` stamps it with
 `git describe --tags --always --dirty` (`-ldflags "-X main.version=…"`), and
 `make docker-build` / `make docker-release` pass the same stamp (or the
 release `VERSION=…`) into the image build via `--build-arg VERSION=…` — the
 `.git` dir is not in the Docker build context, so the version cannot be
-derived inside the image. An unstamped build falls back to the Go build-info
+derived inside the image. **The image tag and the version the binary reports
+are the same string**: `docker-release` tags the image `:<stamp>` and stamps
+the binary with it. An unstamped build falls back to the Go build-info
 module version, then to `dev`. The relay reports this version in the
 federation handshake (hello/hello_ack), so the admin Federation page's peer
 **Version** column and the spoke's **Hub version** card show the version each
-side actually runs.
+side actually runs, and the dashboard topbar shows the relay's own.
+
+**Version awareness.** When a connected instance (spoke, hub or remote
+backend) reports a *different* semver version at handshake, the relay logs
+one line about it and annotates the Federation page. If a connected
+instance runs **newer** than this server — this relay is the outdated one —
+the log line is a `VERSION WARNING` and every user sees a red banner under
+the topbar until an admin mutes it (Settings → *Warn when this relay is out
+of date*). Instances whose versions don't parse as semver (`dev`, bare
+shas from untagged builds) are never compared or flagged. To cut a release:
+`git tag v0.2.0 && git push origin v0.2.0 && make docker-release` — the
+image lands as `:v0.2.0` and `:latest`, and every connected relay learns
+the new stamp from the next handshake.
 
 Every non-200 request is mirrored to stdout: a one-line summary (`relay: 499
 …` with user, key, model, IP, duration and token counts) and, for streams, a

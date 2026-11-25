@@ -16,6 +16,7 @@ import (
 
 	"github.com/coder/websocket"
 	"llm-relay/internal/store"
+	"llm-relay/internal/version"
 )
 
 // ErrNotOnline is returned by Send for a peer with no live channel.
@@ -65,6 +66,26 @@ func NewHub(db *sql.DB, opts Options, name, version string) *Hub {
 	// mean nil Log or a zero HelloTimeout that rejects every peer.
 	return &Hub{db: db, opts: opts.withDefaults(), name: name, version: version,
 		entries: map[int64]*entry{}}
+}
+
+// VersionWarnings lists the live peers whose reported version differs
+// from this hub's (state older = the spoke needs the update, newer = this
+// hub does). Unparseable versions (dev builds, bare shas) are skipped —
+// they carry no ordering, so flagging them would be a guess.
+func (h *Hub) VersionWarnings() []version.Warn {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := []version.Warn{}
+	for _, e := range h.entries {
+		st := version.State(h.version, e.info.Version)
+		if st != version.Older && st != version.Newer {
+			continue
+		}
+		out = append(out, version.Warn{
+			Name: e.info.Name, Kind: "spoke", Version: e.info.Version, State: st,
+		})
+	}
+	return out
 }
 
 // Online reports whether the peer currently holds a live channel.
@@ -198,6 +219,17 @@ func (h *Hub) ServeConn(w http.ResponseWriter, r *http.Request, peer *store.Peer
 	if err != nil {
 		h.opts.Log.Printf("fed: handshake peer %d: %v", peer.ID, err)
 		return
+	}
+	// Version awareness (plan 2026-11-25-version-awareness): a spoke newer
+	// than this hub means THIS server is the old one — an operator-visible
+	// error line (the dashboard mirrors it as the red banner). A spoke
+	// older than the hub is only a Federation-page note, so it logs as a
+	// plain info line.
+	switch st := version.State(h.version, ver); st {
+	case version.Newer:
+		h.opts.Log.Printf("VERSION WARNING: spoke %q runs %s, newer than this server (%s) - update this relay", peer.Name, ver, h.version)
+	case version.Older:
+		h.opts.Log.Printf("fed: spoke %q runs %s, older than this server (%s)", peer.Name, ver, h.version)
 	}
 	// Per-connection opts: Touch is this peer's bookkeeping closure, so
 	// h.opts itself is never mutated (concurrent connects share it). It

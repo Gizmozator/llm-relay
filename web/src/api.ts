@@ -275,6 +275,28 @@ export interface Settings {
   /** usage_log retention window in days; 0 = keep forever (plan
    *  2026-11-25-usage-retention-v1). */
   retention_days: number;
+  /** Gate for the red "update this relay" dashboard banner
+   *  (plan 2026-11-25-version-awareness); default on. */
+  version_warn: boolean;
+}
+
+/** One connected instance running a different version than this server
+ *  (plan 2026-11-25-version-awareness). state is relative to THIS build:
+ *  "older" = they need the update, "newer" = this server does. */
+export interface VersionWarn {
+  name: string;
+  kind: 'spoke' | 'hub' | 'remote';
+  version: string;
+  state: 'older' | 'newer' | 'same' | 'unknown';
+}
+
+/** GET /api/version (session auth, any user): this build's stamp plus the
+ *  outdated verdict driving the red banner for all users. */
+export interface VersionInfo {
+  version: string;
+  outdated: boolean;
+  newer_than: VersionWarn[];
+  warn_enabled: boolean;
 }
 
 // ---------- federation ----------
@@ -296,6 +318,11 @@ export interface FedSettings {
   /** Spoke role only: the live channel state from the dialer's point of
    *  view, with the hub's hello_ack identity (empty while disconnected). */
   spoke?: { connected: boolean; hub_name: string; hub_version: string };
+  /** This build's stamp (plan 2026-11-25-version-awareness). */
+  version?: string;
+  /** Live-channel version mismatches, both directions and remote
+   *  backends included; drives the Federation-page notes. */
+  version_warnings?: VersionWarn[];
 }
 
 /** Instance TLS certificate view (GET/POST/DELETE /api/admin/tls). The
@@ -327,6 +354,9 @@ export interface FedPeer {
    *  backends carry (computed server-side at list time). */
   shared_models: number;
   online: boolean;
+  /** This build vs the peer's last reported version
+   *  (plan 2026-11-25-version-awareness): "older" gets a small note. */
+  version_state: 'older' | 'newer' | 'same' | 'unknown';
 }
 
 /** POST /api/peers — the raw fed- token appears exactly here (and in the
@@ -754,10 +784,13 @@ export const api = {
 
   // admin — settings
   settings: () => request<Settings>('GET', '/api/admin/settings'),
-  putSettings: (currency: string, retentionDays?: number) =>
+  putSettings: (currency: string, retentionDays?: number, versionWarn?: boolean) =>
     request<Settings>('PUT', '/api/admin/settings', {
-      body: { currency, retention_days: retentionDays },
+      body: { currency, retention_days: retentionDays, version_warn: versionWarn },
     }),
+
+  // build version (session auth, any user) — topbar chip + red banner
+  version: () => request<VersionInfo>('GET', '/api/version'),
 
   // admin — instance TLS certificate (plan 2026-11-24-remote-tls-v1). The
   // private key never comes back to the client; generate returns the cert

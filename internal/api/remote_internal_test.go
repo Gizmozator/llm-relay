@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"llm-relay/internal/store"
+	"llm-relay/internal/version"
 )
 
 // hangController stands in for a connected remote.Registry whose engine
@@ -22,6 +23,7 @@ func (hangController) ServeConn(http.ResponseWriter, *http.Request, *store.Backe
 }
 func (hangController) Kick(int64, string)               {}
 func (hangController) BackendOnline(store.Backend) bool { return true }
+func (hangController) VersionWarnings() []version.Warn  { return nil }
 func (hangController) RoundTrip(req *http.Request) (*http.Response, error) {
 	<-req.Context().Done()
 	return nil, req.Context().Err()

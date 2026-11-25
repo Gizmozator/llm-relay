@@ -12,13 +12,16 @@ export default function SettingsPage() {
   const info = useLoad(() => api.info(), []);
   const [currency, setCurrency] = useState<string | null>(null);
   const [retention, setRetention] = useState<number | null>(null);
+  const [versionWarn, setVersionWarn] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
 
   const current = currency ?? settings.data?.currency ?? '';
   const currentRetention = retention ?? settings.data?.retention_days ?? 0;
+  const currentVersionWarn = versionWarn ?? settings.data?.version_warn ?? true;
   const dirty =
     (currency !== null && currency !== (settings.data?.currency ?? '')) ||
-    (retention !== null && retention !== (settings.data?.retention_days ?? 0));
+    (retention !== null && retention !== (settings.data?.retention_days ?? 0)) ||
+    (versionWarn !== null && versionWarn !== (settings.data?.version_warn ?? true));
 
   const save = async (e: FormEvent) => {
     e.preventDefault();
@@ -29,10 +32,11 @@ export default function SettingsPage() {
     }
     setBusy(true);
     try {
-      await api.putSettings(code, currentRetention);
+      await api.putSettings(code, currentRetention, currentVersionWarn);
       toast.push('success', 'Settings saved.');
       setCurrency(null);
       setRetention(null);
+      setVersionWarn(null);
       settings.reload();
     } catch (err: unknown) {
       toast.push('error', errMsg(err));
@@ -81,6 +85,19 @@ export default function SettingsPage() {
               right after you lower it here). Keep forever never deletes anything; the
               database file keeps the space freed by purged rows for reuse.
             </p>
+            <Field label="Warn when this relay is out of date">
+              <label className="checkbox-line">
+                <input
+                  type="checkbox"
+                  checked={currentVersionWarn}
+                  onChange={(e) => setVersionWarn(e.target.checked)}
+                />
+                <span>
+                  Show a red banner to all users when a connected server runs a newer
+                  version than this relay
+                </span>
+              </label>
+            </Field>
             <div>
               <button className="btn primary" type="submit" disabled={busy || !dirty}>
                 {busy ? 'Saving…' : 'Save'}

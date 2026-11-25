@@ -317,6 +317,21 @@ export default function AdminFederationPage() {
             </section>
           )}
 
+          {/* Version notes (plan 2026-11-25-version-awareness): connected
+              instances running a different build. This server being the old
+              one is the red all-user banner (Layout); here everything is a
+              small admin note. */}
+          {curRole !== 'standalone' && cur?.version_warnings && cur.version_warnings.length > 0 && (
+            <Banner kind="info">
+              Version mismatch on live channels:{' '}
+              {cur?.version_warnings
+                .map((w) => `${w.kind} “${w.name}” ${w.version} (${w.state} than this server)`)
+                .join('; ')}
+              {cur?.version_warnings.some((w) => w.state === 'newer') &&
+                ' — this relay is the older one; update it.'}
+            </Banner>
+          )}
+
           {curRole === 'spoke' && (
             <section className="panel">
               <h3>Shared models</h3>
@@ -396,7 +411,18 @@ export default function AdminFederationPage() {
                               <td className="nowrap" title={p.last_seen ? fmtDateTime(p.last_seen) : undefined}>
                                 {p.last_seen ? fmtAgo(p.last_seen) : 'never'}
                               </td>
-                              <td className="mono">{p.version || '—'}</td>
+                              <td className="mono">
+                                {p.version || '—'}
+                                {/* Small note (plan 2026-11-25-version-awareness):
+                                    a connected peer running an older build than
+                                    this hub — the peer's owner should update. */}
+                                {p.online && p.version_state === 'older' && (
+                                  <span className="dim" title={`${p.version} is older than this server`}>
+                                    {' '}
+                                    old
+                                  </span>
+                                )}
+                              </td>
                               <td className="num">{p.shared_models}</td>
                               <td>
                                 <Toggle

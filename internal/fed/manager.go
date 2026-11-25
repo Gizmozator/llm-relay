@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"llm-relay/internal/store"
+	"llm-relay/internal/version"
 )
 
 // Manager ties the store-backed settings to every federation mechanism.
@@ -310,6 +311,36 @@ type hubIdent struct{ name, version string }
 func (m *Manager) setSpokeConn(c *Conn, hubName, hubVersion string) {
 	m.spokeID.Store(&hubIdent{name: hubName, version: hubVersion})
 	m.spoke.Store(c)
+	// Version awareness (plan 2026-11-25-version-awareness): a hub newer
+	// than this spoke means THIS server is the old one — error line for
+	// the operator (the dashboard mirrors it as the red banner for all
+	// users). An older hub is just a note on the Federation page.
+	switch st := version.State(m.opts.Version, hubVersion); st {
+	case version.Newer:
+		m.opts.Log.Printf("VERSION WARNING: hub %q runs %s, newer than this server (%s) - update this relay", hubName, hubVersion, m.opts.Version)
+	case version.Older:
+		m.opts.Log.Printf("fed: hub %q runs %s, older than this server (%s)", hubName, hubVersion, m.opts.Version)
+	}
+}
+
+// VersionWarnings reports the version mismatches on this instance's live
+// federation channels: connected spokes (hub side) or the hub (spoke
+// side). Empty on a standalone box or when every version matches (or is
+// unorderable). kind is "spoke" or "hub"; state is older|newer relative
+// to THIS build.
+func (m *Manager) VersionWarnings() []version.Warn {
+	switch m.currentRole() {
+	case store.FedRoleHub:
+		return m.hub.VersionWarnings()
+	case store.FedRoleSpoke:
+		if id := m.spokeID.Load(); id != nil && m.spokeConn() != nil {
+			st := version.State(m.opts.Version, id.version)
+			if st == version.Older || st == version.Newer {
+				return []version.Warn{{Name: id.name, Kind: "hub", Version: id.version, State: st}}
+			}
+		}
+	}
+	return nil
 }
 
 // clearSpokeConn drops the pointer only if it still names c (a replaced

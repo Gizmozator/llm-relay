@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { NavLink, Navigate, Outlet } from 'react-router-dom';
 import { useAuth } from './auth';
+import { api, errMsg } from './api';
+import type { VersionInfo } from './api';
 import { brandName } from './brand';
 import { useFedRole } from './fedrole';
 import { Loading } from './components/ui';
@@ -27,6 +29,24 @@ function navClass({ isActive }: { isActive: boolean }): string {
 export default function Layout() {
   const { user, logout } = useAuth();
   const [showAccount, setShowAccount] = useState(false);
+  // Build version (plan 2026-11-25-version-awareness): the topbar chip is
+  // informational for everyone; the red banner fires when a CONNECTED
+  // instance runs newer than this server — this relay is the old one — and
+  // an admin has not muted it (version_warn). Loaded once per session; the
+  // fleet does not change often enough to poll.
+  const [ver, setVer] = useState<VersionInfo | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .version()
+      .then((v) => {
+        if (!cancelled) setVer(v);
+      })
+      .catch((e: unknown) => console.warn('version unavailable:', errMsg(e)));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   // The setup guide only makes sense while this instance is a hub, so the nav
   // entry follows the shared federation role — the same state the Federation
   // page updates when an admin saves a new one, which is what makes the menu
@@ -101,6 +121,11 @@ export default function Layout() {
       <div className="main">
         <header className="topbar">
           <div className="topbar-user">
+            {ver && (
+              <span className="version-chip" title="This relay's build version">
+                {ver.version}
+              </span>
+            )}
             <span className="username">{user.display_name || user.username}</span>
             <span className="role-badge">{user.role}</span>
             <button className="btn small" onClick={() => setShowAccount(true)}>
@@ -111,6 +136,14 @@ export default function Layout() {
             </button>
           </div>
         </header>
+        {ver && ver.outdated && ver.warn_enabled && (
+          <div className="banner banner-error version-banner" role="alert">
+            <strong>This relay is out of date.</strong> {ver.version} is older than{' '}
+            {ver.newer_than.map((w) => `${w.name} (${w.version})`).join(', ')} —{' '}
+            {ver.newer_than.length === 1 ? 'it' : 'they'} {ver.newer_than.length === 1 ? 'runs' : 'run'} a
+            newer version. Update this server.
+          </div>
+        )}
         <div className="content">
           <Outlet />
         </div>

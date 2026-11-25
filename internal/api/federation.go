@@ -14,6 +14,7 @@ import (
 	"llm-relay/internal/auth"
 	"llm-relay/internal/ratelimit"
 	"llm-relay/internal/store"
+	"llm-relay/internal/version"
 )
 
 // PeerAuth wraps a /federation/* handler requiring a valid server token
@@ -92,6 +93,10 @@ type FedController interface {
 	// SpokeStatus reports the spoke's own channel: live? plus the hub's
 	// hello_ack identity (empty when disconnected).
 	SpokeStatus() (connected bool, hubName, hubVersion string)
+	// VersionWarnings lists the version mismatches on live federation
+	// channels (hub: its spokes; spoke: the hub), state relative to this
+	// build. Empty when unwired or everything matches.
+	VersionWarnings() []version.Warn
 }
 
 // catalogChanged tells the federation manager the shareable catalog may
@@ -145,7 +150,13 @@ func (s *Server) FederationPing(w http.ResponseWriter, r *http.Request, p *store
 // The peer shape both list endpoints return is store.Peer directly: the key
 // hash never leaves the store; the raw token appears only in create/rotate
 // responses.
-func writePeerList(w http.ResponseWriter, peers []store.Peer) {
+// writePeerList stamps each row's version_state (this build vs the peer's
+// last reported version, plan 2026-11-25-version-awareness) and writes the
+// list envelope. "older" drives the small Federation-page note.
+func (s *Server) writePeerList(w http.ResponseWriter, peers []store.Peer) {
+	for i := range peers {
+		peers[i].VersionState = version.State(s.Version, peers[i].Version)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"peers": peers})
 }
 
@@ -156,7 +167,7 @@ func (s *Server) ListPeers(w http.ResponseWriter, r *http.Request, c *auth.Claim
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	writePeerList(w, peers)
+	s.writePeerList(w, peers)
 }
 
 // CreatePeer serves POST /api/peers {name}: mint a server token, show the
@@ -264,7 +275,7 @@ func (s *Server) AdminListPeers(w http.ResponseWriter, r *http.Request, c *auth.
 			peers[i].Online = s.Fed.Online(peers[i].ID)
 		}
 	}
-	writePeerList(w, peers)
+	s.writePeerList(w, peers)
 }
 
 // AdminRotatePeer serves POST /api/admin/peers/{id}/rotate: admins may
@@ -360,7 +371,12 @@ func (s *Server) AdminGetFederation(w http.ResponseWriter, r *http.Request, c *a
 		return
 	}
 	resp := map[string]any{"role": f.Role, "hub_url": f.HubURL, "hub_token": f.HubToken,
-		"hub_pin": f.HubPin}
+		"hub_pin": f.HubPin,
+		// Version awareness (plan 2026-11-25-version-awareness): this
+		// build's stamp plus every live-channel mismatch (both directions,
+		// spokes + remote backends) so the Federation page can annotate
+		// versions without a second round-trip.
+		"version": s.Version, "version_warnings": s.versionWarnings()}
 	if f.Role == store.FedRoleSpoke {
 		connected, hubName, hubVersion := false, "", ""
 		if s.Fed != nil {

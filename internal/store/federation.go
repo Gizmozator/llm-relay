@@ -160,6 +160,11 @@ type Peer struct {
 	// rows its owner's backends carry. Computed at list time so the Servers
 	// page needs no per-peer round-trips.
 	SharedModels int `json:"shared_models"`
+	// VersionState is stamped by the API layer (not stored): this build vs
+	// the peer's last reported version — older|newer|same|unknown
+	// (plan 2026-11-25-version-awareness). The Federation page shows a
+	// small note when a connected peer is "older".
+	VersionState string `json:"version_state"`
 	// Online is the live-channel flag the API layer stamps from the hub
 	// registry (list time). False on a standalone/spoke box: peers only
 	// dial a hub, so their channels never live there.

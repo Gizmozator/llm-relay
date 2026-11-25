@@ -25,6 +25,10 @@ type Server struct {
 	JWTTTL       time.Duration
 	RelayURL     string
 	DashboardURL string
+	// Version is this build's stamp (main.buildVersion): shown in the
+	// dashboard and compared against connected instances' versions
+	// (plan 2026-11-25-version-awareness).
+	Version string
 	// Flight sees the proxy's in-flight request counts (nil = no live data).
 	Flight FlightSource
 	// Fed drives the federation channel (nil = federation endpoints 404).

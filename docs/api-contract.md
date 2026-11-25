@@ -78,15 +78,20 @@ A group pools several catalog model rows (typically the same model on different 
 - `DELETE /api/admin/groups/{id}` → `204` (members are released, not deleted)
 
 ### Admin — settings
-- `GET /api/admin/settings` → `{"currency":"EUR","retention_days":0}` —
+- `GET /api/admin/settings` → `{"currency":"EUR","retention_days":0,"version_warn":true}` —
   `retention_days` is the `usage_log` retention window in days, `0` = keep
-  forever (plan 2026-11-25-usage-retention-v1; the default).
+  forever (plan 2026-11-25-usage-retention-v1; the default). `version_warn`
+  gates the red "this relay is out of date" dashboard banner
+  (plan 2026-11-25-version-awareness); absent setting = `true`.
 - `PUT /api/admin/settings` — `{"currency":"USD"}` → same shape.
   `retention_days` is optional (absent = unchanged; `0` or `30..3650`,
   anything else → `400`). When present it is stored and a bounded purge runs
   in the request: rows older than the new cutoff go immediately, a larger
   backlog is left to the daily pass (a startup + 24 h loop enforces the
-  setting with batched short-transaction deletes).
+  setting with batched short-transaction deletes). `version_warn` is
+  optional too (absent = unchanged): `false` mutes the outdated-version
+  banner for all users; the log lines and Federation-page notes are never
+  gated.
 
 ### Federation (plan 2026-11-22-relay-federation, task 1)
 Instance role + spoke config, and the peer registry (server tokens a spoke
@@ -104,16 +109,17 @@ Self-service (JWT, any user — the **My Keys** surface):
 - `DELETE /api/peers/{id}` (own only, else `404`) → `204`; a live channel is dropped too (`1008 "deleted"`)
 
 Admin (JWT, admin — the **Servers** page):
-- `GET /api/admin/peers` → all peers, same shape plus `online` (live WS channel at this hub; always `false` on a standalone/spoke box) (owner name + `shared_models` = models visible to that peer: every `fed_visibility:"all"` model, the user-allowlist rows its owner is on, and the `"owner"` rows its owner's backends carry)
+- `GET /api/admin/peers` → all peers, same shape plus `online` (live WS channel at this hub; always `false` on a standalone/spoke box) (owner name + `shared_models` = models visible to that peer: every `fed_visibility:"all"` model, the user-allowlist rows its owner is on, and the `"owner"` rows its owner's backends carry) plus `version_state` — this build vs the peer's last reported version: `older` (the peer needs the update — the Federation page shows a small note), `newer` (this server does), `same`, `unknown` (either side unparseable: dev build, bare sha, never reported)
 - `POST /api/admin/peers/{id}/rotate` → `{"token":"fed-…"}` · `PATCH /api/admin/peers/{id}` — `{"enabled":true|false}` → peer object (disable is the incident lever: it drops the peer's live channel at once, `1008 "disabled"`) · `DELETE /api/admin/peers/{id}` → `204` (live channel dropped too) — all `404` on unknown id
 
 Federation settings (JWT, admin):
-- `GET /api/admin/federation` → `{"role":"standalone","hub_url":"","hub_token":"","hub_pin":""}` — `role` is `standalone` (default) | `hub` | `spoke`; `hub_token` is echoed back (it is the hub's token the admin pasted, not a secret this server minted). Spoke config is plaintext-at-rest like other DB secrets here; the spoke must present it verbatim. `hub_pin` (plan 2026-11-24-remote-tls-v1) is the optional hub cert fingerprint the spoke pins — public data, echoed for review. When the stored role is `spoke` the response carries `"spoke":{"connected":bool,"hub_name":"…","hub_version":"…"}` — the live channel state and the hub's `hello_ack` identity (empty strings while disconnected).
+- `GET /api/admin/federation` → `{"role":"standalone","hub_url":"","hub_token":"","hub_pin":"","version":"v0.1.0","version_warnings":[]}` — `role` is `standalone` (default) | `hub` | `spoke`; `hub_token` is echoed back (it is the hub's token the admin pasted, not a secret this server minted). Spoke config is plaintext-at-rest like other DB secrets here; the spoke must present it verbatim. `hub_pin` (plan 2026-11-24-remote-tls-v1) is the optional hub cert fingerprint the spoke pins — public data, echoed for review. When the stored role is `spoke` the response carries `"spoke":{"connected":bool,"hub_name":"…","hub_version":"…"}` — the live channel state and the hub's `hello_ack` identity (empty strings while disconnected). `version` is this build's stamp; `version_warnings` lists every live channel whose reported version differs from it: `{"name","kind":"spoke"|"hub"|"remote","version","state":"older"|"newer"}` (state relative to this build; unparseable versions never appear) (plan 2026-11-25-version-awareness).
 - `PUT /api/admin/federation` — full replacement `{"role","hub_url","hub_token","hub_pin"}` → same shape. `400` when the role is not one of the three, or a spoke lacks an **https** `hub_url` (federation requires TLS — no cleartext, no opt-out) or the `hub_token`; a malformed `hub_pin` (not `sha256:` + 64 hex, colons/case tolerated) is `400`. Leaving spoke mode clears `hub_url`/`hub_token`/`hub_pin`. Live-safe: the spoke dialer starts/stops with the role, and moving away from `hub` closes every live channel (`1008 "role changed"`) — no restart needed.
 - `GET /api/admin/tls` → the instance TLS cert view (plan 2026-11-24-remote-tls-v1): `{"configured":false}` when none, else `{"configured":true,"fingerprint":"sha256:…","sans":["relay.example.fi"],"not_after":"…","created_at":"…"}`. The private key is **never** returned.
 - `POST /api/admin/tls` — `{"hosts":["relay.example.fi","192.0.2.10"]}` mints (or regenerates) a self-signed cert for those SANs → `200 {"tls":{...view},"cert_pem":"-----BEGIN CERTIFICATE-----…"}` (`cert_pem` is shown once, for an optional install in an external proxy). `400` no valid host. Regenerating replaces the key pair: live channels survive, every peer must re-pin before reconnecting.
 - `DELETE /api/admin/tls` → removes the row → `200 {"configured":false}`. TLS handshakes fail until a new cert exists (deliberate — no silent fallback).
 - `GET /api/federation/role` (JWT, any user) → `{"role":"hub"}` — the reconciled role only; the hub-only UI (setup guide) gates on it without needing the admin settings payload.
+- `GET /api/version` (JWT, any user) → `{"version":"v0.1.0","outdated":false,"newer_than":[],"warn_enabled":true}` — this build's stamp (topbar chip) plus the outdated verdict: `outdated` is true when a connected instance (spoke, hub or remote backend) reports a **newer** version — this server is the old one — and `newer_than` names them (`{name,kind,version,state}`, plan 2026-11-25-version-awareness). `warn_enabled` carries the `version_warn` setting so the UI can hide the red all-user banner without a second round-trip.
 
 Federation stats (plan task 4; fairness scope per plan
 2026-11-25-fairness-ledger). Window: `?days=N` (default 30, `1..365` else

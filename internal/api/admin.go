@@ -1207,9 +1207,12 @@ var currencyRe = regexp.MustCompile(`^[A-Za-z]{2,5}$`)
 // settingsView is the GET/PUT payload of the settings pair.
 // RetentionDays is the usage_log retention window in days
 // (plan 2026-11-25-usage-retention-v1); 0 keeps rows forever.
+// VersionWarn gates the red "update this relay" dashboard banner
+// (plan 2026-11-25-version-awareness); default on.
 type settingsView struct {
 	Currency      string `json:"currency"`
 	RetentionDays int    `json:"retention_days"`
+	VersionWarn   bool   `json:"version_warn"`
 }
 
 func (s *Server) AdminGetSettings(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
@@ -1225,7 +1228,9 @@ func (s *Server) AdminGetSettings(w http.ResponseWriter, r *http.Request, c *aut
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	writeJSON(w, http.StatusOK, settingsView{Currency: cur, RetentionDays: days})
+	writeJSON(w, http.StatusOK, settingsView{
+		Currency: cur, RetentionDays: days, VersionWarn: versionWarnEnabled(s.DB),
+	})
 }
 
 // settingsPurgeCap bounds the synchronous purge a settings PUT may run
@@ -1239,6 +1244,9 @@ func (s *Server) AdminPutSettings(w http.ResponseWriter, r *http.Request, c *aut
 		Currency string `json:"currency"`
 		// RetentionDays is optional: absent leaves the setting alone.
 		RetentionDays *int `json:"retention_days"`
+		// VersionWarn is optional: absent leaves the setting alone
+		// (plan 2026-11-25-version-awareness).
+		VersionWarn *bool `json:"version_warn"`
 	}
 	if err := decode(r, &in); err != nil || !currencyRe.MatchString(in.Currency) {
 		writeErr(w, http.StatusBadRequest, "currency must be a 2-5 letter code")
@@ -1275,5 +1283,17 @@ func (s *Server) AdminPutSettings(w http.ResponseWriter, r *http.Request, c *aut
 			}
 		}
 	}
-	writeJSON(w, http.StatusOK, settingsView{Currency: cur, RetentionDays: days})
+	warn := versionWarnEnabled(s.DB)
+	if in.VersionWarn != nil {
+		v := "0"
+		if *in.VersionWarn {
+			v = "1"
+		}
+		if err := store.SetSetting(s.DB, "version_warn", v); err != nil {
+			writeErr(w, http.StatusInternalServerError, "settings update failed")
+			return
+		}
+		warn = *in.VersionWarn
+	}
+	writeJSON(w, http.StatusOK, settingsView{Currency: cur, RetentionDays: days, VersionWarn: warn})
 }

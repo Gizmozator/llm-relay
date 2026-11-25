@@ -16,6 +16,7 @@ import (
 	"llm-relay/internal/proxy"
 	"llm-relay/internal/ratelimit"
 	"llm-relay/internal/store"
+	"llm-relay/internal/version"
 )
 
 // RemoteController is the remote-backend channel's control surface
@@ -36,6 +37,9 @@ type RemoteController interface {
 	// (online = live channel), so the dashboard's status badge reads the
 	// registry, not a phantom HTTP probe.
 	BackendOnline(b store.Backend) bool
+	// VersionWarnings lists live remote backends running a different
+	// version than this relay, state relative to this build.
+	VersionWarnings() []version.Warn
 }
 
 // RemoteAuth resolves the rb- connect token to its backend row and hands

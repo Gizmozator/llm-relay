@@ -32,6 +32,9 @@ import (
 	"llm-relay/internal/fed"
 	"llm-relay/internal/ratelimit"
 	"llm-relay/internal/store"
+	// Aliased: NewRegistry takes a `version string` parameter that would
+	// shadow the package name inside it.
+	buildver "llm-relay/internal/version"
 )
 
 // ErrNotConnected is returned by RoundTrip for a backend with no live
@@ -133,6 +136,28 @@ func (r *Registry) Connected(backendID int64) (connected bool, name, version str
 	return true, e.name, e.version, e.connectedAt
 }
 
+// VersionWarnings lists live remote backends whose reported version
+// differs from this relay's (state older = the backend needs the update,
+// newer = this relay does). Unparseable versions are skipped.
+func (r *Registry) VersionWarnings() []buildver.Warn {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := []buildver.Warn{}
+	for _, e := range r.entries {
+		if e.conn.Closed() {
+			continue
+		}
+		st := buildver.State(r.opts.Version, e.version)
+		if st != buildver.Older && st != buildver.Newer {
+			continue
+		}
+		out = append(out, buildver.Warn{
+			Name: e.name, Kind: "remote", Version: e.version, State: st,
+		})
+	}
+	return out
+}
+
 // Kick closes a backend's live channel (delete / disable / rotate token):
 // the revocation lands now, not at the next pong timeout.
 func (r *Registry) Kick(backendID int64, reason string) {
@@ -209,6 +234,16 @@ func (r *Registry) ServeConn(w http.ResponseWriter, req *http.Request, b *store.
 	e := &entry{conn: conn, backendID: b.ID, name: b.Name, version: ver, connectedAt: time.Now()}
 	r.register(e)
 	log.Printf("remote: backend %q (#%d) connected (client %s)", b.Name, b.ID, orUnknown(ver))
+	// Version awareness (plan 2026-11-25-version-awareness): a backend
+	// newer than this relay means THIS server is the old one (error line;
+	// the dashboard shows the red banner). An older backend is a note for
+	// the Federation page only.
+	switch st := buildver.State(r.opts.Version, ver); st {
+	case buildver.Newer:
+		log.Printf("VERSION WARNING: remote backend %q runs %s, newer than this server (%s) - update this relay", b.Name, ver, r.opts.Version)
+	case buildver.Older:
+		log.Printf("remote: backend %q runs %s, older than this server (%s)", b.Name, ver, r.opts.Version)
+	}
 	// The handler returns while the channel lives: Accept hijacked the
 	// connection and the pumps run on their own context (never req.Context,
 	// which dies with the request).

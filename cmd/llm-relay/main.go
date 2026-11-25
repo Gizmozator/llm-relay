@@ -102,11 +102,12 @@ func main() {
 	// The proxy tunnels remote:// traffic through it, the health cache
 	// answers "online = live channel" from it, and the admin API mints
 	// its connect tokens.
-	remoteReg := remote.NewRegistry(d, nil, "", "")
+	remoteReg := remote.NewRegistry(d, nil, "", buildVersion())
 	defer remoteReg.CloseAll("shutdown")
 
 	apiSrv := &api.Server{DB: d, JWTSecret: cfg.JWTSecret, JWTTTL: 12 * time.Hour,
 		RelayURL: cfg.PublicRelayURL, DashboardURL: cfg.PublicDashboardURL,
+		Version:    buildVersion(),
 		TrustProxy: cfg.TrustProxyHeaders, SelfTLS: cfg.TLSPort != "0"}
 	// Abuse-protection tiers (ticket #18), resolved from env with safe
 	// non-zero defaults (0 per tier = that tier off). The api-side tiers
@@ -252,6 +253,7 @@ func main() {
 	adminMux.Handle("DELETE /api/admin/tls", apiSrv.Admin(apiSrv.AdminDeleteTLS))
 	adminMux.Handle("GET /api/federation/stats", apiSrv.Auth(apiSrv.FedStats))
 	adminMux.Handle("GET /api/federation/role", apiSrv.Auth(apiSrv.FedRole))
+	adminMux.Handle("GET /api/version", apiSrv.Auth(apiSrv.ServeVersion))
 	adminMux.Handle("GET /api/admin/usage/summary", apiSrv.Admin(apiSrv.UsageSummary))
 	adminMux.Handle("GET /api/admin/usage/detail", apiSrv.Admin(apiSrv.UsageDetail))
 	adminMux.Handle("GET /api/admin/live", apiSrv.Admin(apiSrv.Live))
@@ -445,6 +447,7 @@ func runHeadless(cfg *config.Config) {
 		Pin:         cfg.RelayPin,
 		EngineURL:   cfg.EngineURL,
 		EngineToken: cfg.EngineToken,
+		Version:     buildVersion(),
 		Edge:        edge,
 	}, log.Printf)
 	log.Println("bye")

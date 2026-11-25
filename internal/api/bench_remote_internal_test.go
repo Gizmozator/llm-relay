@@ -21,6 +21,7 @@ import (
 	"llm-relay/internal/auth"
 	"llm-relay/internal/db"
 	"llm-relay/internal/store"
+	"llm-relay/internal/version"
 )
 
 // tunnelController stands in for a connected remote.Registry: RoundTrip
@@ -33,6 +34,7 @@ func (tunnelController) ServeConn(http.ResponseWriter, *http.Request, *store.Bac
 }
 func (tunnelController) Kick(int64, string)               {}
 func (tunnelController) BackendOnline(store.Backend) bool { return true }
+func (tunnelController) VersionWarnings() []version.Warn  { return nil }
 func (t *tunnelController) RoundTrip(req *http.Request) (*http.Response, error) {
 	t.url = req.URL.String()
 	var b strings.Builder
