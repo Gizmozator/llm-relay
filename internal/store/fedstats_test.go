@@ -665,3 +665,150 @@ func TestFedLocalOnlyUsers(t *testing.T) {
 		}
 	}
 }
+
+// TestFedUserTotalsSpokeFairness pins the spoke-side passes (plan
+// 2026-11-25-spoke-fairness): a local user on a hub-hosted (synthetic)
+// model is consumed with the Federation virtual account carrying the
+// remote served side; an incoming served row with no local user charges
+// the Federation account and credits the serving backend's owner; the
+// ledger balances exactly when every serving backend has an owner.
+func TestFedUserTotalsSpokeFairness(t *testing.T) {
+	d := migratedDB(t)
+	host := fedUser(t, d, "host")   // owns the engine the hub borrows
+	alice := fedUser(t, d, "alice") // local user on the hub-hosted model
+	owned, err := store.CreateBackendWithOwner(d, "gpu", "http://gpu:8080", "", &host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mOwned, err := store.CreateModel(d, owned.ID, "up", "local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hubBe, err := store.CreateBackend(d, "hub-fed", store.FedHubBaseURL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mHub, err := store.CreateModel(d, hubBe.ID, "hub-up", "shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := store.CreateBackend(d, "shared", "http://shared:8080", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mPlain, err := store.CreateModel(d, plain.ID, "up2", "unowned")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Outgoing: alice spends on the hub-hosted model (unstamped row on a
+	// synthetic backend — the spoke's normal metering shape).
+	insertFed(t, d, &store.UsageEvent{UserID: alice, ModelID: mHub.ID,
+		Prompt: 30, Completion: 10, CostTotal: 300})
+	// Incoming: the hub borrows the host's engine (served row, no local user).
+	insertFed(t, d, &store.UsageEvent{UserID: 0, ModelID: mOwned.ID,
+		FedDirection: "served", FedUser: "hub-alice", Prompt: 12, CostTotal: 90})
+	// Incoming on an UNOWNED backend: consumed with no served counterparty —
+	// the one gap that keeps the ledger from balancing.
+	insertFed(t, d, &store.UsageEvent{UserID: 0, ModelID: mPlain.ID,
+		FedDirection: "served", FedUser: "hub-bob", Prompt: 5})
+	// alice on an unowned LOCAL backend: neither federation nor cross-user —
+	// must not leak into the ledger at all.
+	insertFed(t, d, &store.UsageEvent{UserID: alice, ModelID: mPlain.ID, Prompt: 777})
+
+	since := ago(30 * 24 * time.Hour)
+	all, err := store.FedUserTotals(d, since, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]store.FedUserTotal{}
+	for _, e := range all {
+		byName[e.User] = e
+	}
+	if len(all) != 3 {
+		t.Fatalf("entries = %d, want 3 (alice, host, Federation): %+v", len(all), all)
+	}
+	a := byName["alice"]
+	if a.UserID != alice || a.Consumed.Prompt != 30 || a.Consumed.Completion != 10 ||
+		a.Served.Prompt != 0 {
+		t.Errorf("alice = %+v; want consumed 30/10, served 0", a)
+	}
+	h := byName["host"]
+	if h.UserID != host || h.Served.Prompt != 12 || h.Consumed.Prompt != 0 {
+		t.Errorf("host = %+v; want served 12 (incoming on owned backend)", h)
+	}
+	f := byName[store.FedVirtualUser]
+	if f.UserID != store.FedVirtualUserID {
+		t.Errorf("Federation id = %d, want %d", f.UserID, store.FedVirtualUserID)
+	}
+	// served = what the hub served to alice (30/10); consumed = what the
+	// hub took from this box (12 owned + 5 unowned).
+	if f.Served.Prompt != 30 || f.Served.Completion != 10 || f.Consumed.Prompt != 17 {
+		t.Errorf("Federation = %+v; want served 30/10, consumed 17", f)
+	}
+	// Balance: every fold is a pair, so the only gap is the unowned
+	// incoming row (5 prompt tokens served by nobody's backend).
+	var served, consumed int64
+	for _, e := range all {
+		served += e.Served.Prompt
+		consumed += e.Consumed.Prompt
+	}
+	if served-consumed != -5 {
+		t.Errorf("balance gap = %d, want -5 (the unowned incoming row)", served-consumed)
+	}
+
+	// Scoped views: only the caller's own side, never the box-level
+	// Federation entry.
+	aliceView, err := store.FedUserTotals(d, since, "", alice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(aliceView) != 1 || aliceView[0].User != "alice" || aliceView[0].Consumed.Prompt != 30 {
+		t.Errorf("scoped alice = %+v", aliceView)
+	}
+	hostView, err := store.FedUserTotals(d, since, "", host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hostView) != 1 || hostView[0].User != "host" || hostView[0].Served.Prompt != 12 {
+		t.Errorf("scoped host = %+v", hostView)
+	}
+}
+
+// TestFedUserTotalsOwnedSyntheticBackend pins the pass 3/4 disjointness
+// (review round 1): a synthetic backend CAN carry an owner (the API and
+// the Backends page allow it), but its owner's hardware never served the
+// traffic — the remote side did. The row must fold exactly once: alice
+// consumed + Federation served, with no phantom owner.served credit.
+func TestFedUserTotalsOwnedSyntheticBackend(t *testing.T) {
+	d := migratedDB(t)
+	host := fedUser(t, d, "host")
+	alice := fedUser(t, d, "alice")
+	hubBe, err := store.CreateBackendWithOwner(d, "hub-fed", store.FedHubBaseURL, "", &host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mHub, err := store.CreateModel(d, hubBe.ID, "hub-up", "shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertFed(t, d, &store.UsageEvent{UserID: alice, ModelID: mHub.ID, Prompt: 30})
+
+	all, err := store.FedUserTotals(d, ago(30*24*time.Hour), "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]store.FedUserTotal{}
+	for _, e := range all {
+		byName[e.User] = e
+	}
+	if len(all) != 2 {
+		t.Fatalf("entries = %d, want 2 (alice + Federation, no host): %+v", len(all), all)
+	}
+	if a := byName["alice"]; a.Consumed.Prompt != 30 {
+		t.Errorf("alice consumed = %d, want 30 (folded exactly once)", a.Consumed.Prompt)
+	}
+	if f := byName[store.FedVirtualUser]; f.Served.Prompt != 30 || f.Consumed.Prompt != 0 {
+		t.Errorf("Federation = %+v, want served 30 / consumed 0", f)
+	}
+}

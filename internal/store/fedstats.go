@@ -54,6 +54,19 @@ type FedCounts struct {
 const fedCountAggs = `COUNT(*), COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0),
 		COALESCE(SUM(cached_tokens),0), COALESCE(SUM(cache_write_tokens),0), COALESCE(SUM(cost_total),0)`
 
+// FedVirtualUser is the ledger identity of "the other side" — the remote
+// cluster as seen from this box (plan 2026-11-25-spoke-fairness). It is a
+// display identity, never a users row: no login, no key, no id collision
+// (negative sentinel). Its entries make the ledger balance: every
+// consumed has a served, and on a spoke the Federation row is the exact
+// mirror of the spoke-owner account on the hub (what the hub served to
+// this box's users == what this box's owner account is charged as
+// consumed there, and vice versa — same traffic, recorded on both sides).
+const (
+	FedVirtualUser   = "Federation"
+	FedVirtualUserID = int64(-1)
+)
+
 // untilBound appends the exclusive upper bound of a bounded window to a
 // WHERE clause. "" leaves it open (the rolling "last N days" shape); the
 // calendar-month presets pass the first instant of the next month.
@@ -85,13 +98,31 @@ type FedUserTotal struct {
 	Consumed FedCounts `json:"consumed"`
 }
 
-// FedUserTotals is one user's served/consumed rollup (hub fairness view):
-// the cross-peer passes plus the local cross-user pass below. userID 0 =
-// every user; otherwise only that user's entry is returned. UserID is the
-// aggregation key: deleted users share the '(deleted user)' label but
-// stay distinct entries (consumers disambiguate by id).
+// FedUserTotals is the served/consumed fairness rollup, role-agnostic:
+// it runs on a hub DB and a spoke DB alike (plan 2026-11-25-spoke-fairness).
+// Five passes feed the per-user map, each double-entering (a served and a
+// consumed fold), so the table balances whenever every serving backend has
+// a fairness owner:
+//
+//   - cross-peer flows (stamped rows; hub-side traffic)
+//   - hub/spoke hardware serving credited through the backend owner (#12)
+//   - local cross-user traffic (plain rows on an owned backend)
+//   - federation consumption (unstamped rows on synthetic backends —
+//     the spoke's users on hub-hosted models; the Federation virtual
+//     account carries the remote served side)
+//   - incoming federation (spoke served rows with no local user — the
+//     Federation account is charged consumed)
+//
+// userID 0 = every user; otherwise only that user's entry is returned
+// (the Federation virtual account is box-level and never appears scoped).
+// UserID is the aggregation key: deleted users share the '(deleted user)'
+// label but stay distinct entries (consumers disambiguate by id).
 func FedUserTotals(db *sql.DB, since, until string, userID int64) ([]FedUserTotal, error) {
-	where := `u.fed_direction != '' AND u.ts >= ?`
+	// Rows with no local user (user_id 0/NULL) are the spoke's incoming
+	// served rows — box-level traffic handled by the incoming pass below,
+	// not a user's. Folding them here would mint a "(deleted user)" entry
+	// out of a user id that never existed.
+	where := `u.fed_direction != '' AND u.user_id IS NOT NULL AND u.user_id > 0 AND u.ts >= ?`
 	args := []any{since}
 	uClause, uArgs := untilBound("u.ts", until)
 	where += uClause
@@ -187,11 +218,17 @@ func FedUserTotals(db *sql.DB, since, until string, userID int64) ([]FedUserTota
 	// and it would cancel on the Net column anyway).
 	//
 	// Disjoint from the fed passes by construction (they require
-	// fed_direction != ''), so no row is ever counted twice. One range
-	// scan + join + GROUP BY — the same shape as the hub-owner pass, no
-	// per-row subquery (see the FedLocalOnlyUsers comment for why).
+	// fed_direction != ''), so no row is ever counted twice. Synthetic
+	// (federation) backends are excluded even when they carry an owner:
+	// their owner's hardware never served the traffic — the remote side
+	// did — so pass 4's Federation fold is the only correct credit, and
+	// excluding them here keeps passes 3 and 4 disjoint by construction
+	// however ownership is set. One range scan + join + GROUP BY — the
+	// same shape as the hub-owner pass, no per-row subquery (see the
+	// FedLocalOnlyUsers comment for why).
 	localWhere := `u.fed_direction = '' AND u.ts >= ? AND b.owner_user_id IS NOT NULL
-			AND u.user_id IS NOT NULL AND u.user_id > 0 AND u.user_id != b.owner_user_id`
+			AND u.user_id IS NOT NULL AND u.user_id > 0 AND u.user_id != b.owner_user_id
+			AND NOT (` + syntheticWhereB + `)`
 	localArgs := []any{since}
 	luClause, luArgs := untilBound("u.ts", until)
 	localWhere += luClause
@@ -233,6 +270,83 @@ func FedUserTotals(db *sql.DB, since, until string, userID int64) ([]FedUserTota
 	}
 	if err := loc.Err(); err != nil {
 		return nil, err
+	}
+
+	// Federation consumption (plan 2026-11-25-spoke-fairness): an unstamped
+	// row whose model lives on a synthetic backend (peer://… or hub://…) is
+	// this box spending the remote cluster's capacity — on a spoke that is
+	// a local user on a hub-hosted model (spoke consumption rows are
+	// deliberately unstamped); on a hub it would be a local user on a
+	// spoke-hosted model, but the hub stamps those rows, so this pass is a
+	// no-op there. Double-entry: the spender is charged consumed, the
+	// Federation virtual account carries the served side (the remote side
+	// has no local identity here — on the hub the counterpart is a real
+	// peer-owner row instead, credited by the fed pass). Scoped: only the
+	// caller's consumed side is folded; the virtual account is box-level
+	// and never appears in a personal view.
+	fedWhere := `u.fed_direction = '' AND u.ts >= ? AND u.user_id IS NOT NULL AND u.user_id > 0
+			AND (` + syntheticWhereB + `)`
+	fedArgs := []any{since}
+	fuClause, fuArgs := untilBound("u.ts", until)
+	fedWhere += fuClause
+	fedArgs = append(fedArgs, fuArgs...)
+	if userID != 0 {
+		fedWhere += ` AND u.user_id = ?`
+		fedArgs = append(fedArgs, userID)
+	}
+	fcn, err := db.Query(`SELECT u.user_id, COALESCE(us.username,'(deleted user)'), `+fedCountAggs+`
+		FROM usage_log u
+		JOIN models m ON m.id = u.model_id
+		JOIN backends b ON b.id = m.backend_id
+		LEFT JOIN users us ON us.id = u.user_id
+		WHERE `+fedWhere+`
+		GROUP BY u.user_id, us.username`, fedArgs...)
+	if err != nil {
+		return nil, err
+	}
+	defer fcn.Close()
+	for fcn.Next() {
+		var id int64
+		var user string
+		var c FedCounts
+		if err := fcn.Scan(&id, &user, &c.Requests, &c.Prompt, &c.Completion,
+			&c.Cached, &c.CacheWrite, &c.CostMicro); err != nil {
+			return nil, err
+		}
+		foldFedUser(byUser, id, user, "consumed", c)
+		if userID == 0 {
+			foldFedUser(byUser, FedVirtualUserID, FedVirtualUser, "served", c)
+		}
+	}
+	if err := fcn.Err(); err != nil {
+		return nil, err
+	}
+
+	// Incoming federation (plan 2026-11-25-spoke-fairness): a served row
+	// with no local user is the remote side using THIS box's engines (the
+	// spoke's mirror of the hub's peer-owner consumed rows). The Federation
+	// virtual account is charged consumed; the served side is already
+	// folded by the hub-owner pass above (a spoke served row has
+	// fed_peer_id NULL, so an owned serving backend credits its owner —
+	// "my engine served the hub"). Unowned serving backends leave that
+	// side uncredited: the ledger balances exactly when every serving
+	// backend has a fairness owner. Box-level, so a scoped query skips it.
+	if userID == 0 {
+		inWhere := `u.fed_direction = 'served' AND (u.user_id IS NULL OR u.user_id = 0) AND u.ts >= ?`
+		inArgs := []any{since}
+		iuClause, iuArgs := untilBound("u.ts", until)
+		inWhere += iuClause
+		inArgs = append(inArgs, iuArgs...)
+		var c FedCounts
+		err := db.QueryRow(`SELECT `+fedCountAggs+`
+			FROM usage_log u WHERE `+inWhere, inArgs...).
+			Scan(&c.Requests, &c.Prompt, &c.Completion, &c.Cached, &c.CacheWrite, &c.CostMicro)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+		if c.Requests > 0 {
+			foldFedUser(byUser, FedVirtualUserID, FedVirtualUser, "consumed", c)
+		}
 	}
 
 	out := make([]FedUserTotal, 0, len(byUser))
@@ -510,7 +624,7 @@ type FedConsumedEntry struct {
 // no fed columns by design (the spoke meters its own users normally);
 // the backend scheme identifies the slice. userID 0 = every user.
 func FedConsumedSlice(db *sql.DB, since, until string, userID int64) ([]FedConsumedEntry, error) {
-	where := `(b.base_url LIKE 'peer://%' OR b.base_url LIKE 'hub://%') AND u.ts >= ?`
+	where := `(` + syntheticWhereB + `) AND u.ts >= ?`
 	args := []any{since}
 	uClause, uArgs := untilBound("u.ts", until)
 	where += uClause

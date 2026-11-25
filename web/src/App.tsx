@@ -6,6 +6,7 @@ import Layout, { RequireAdmin, RequireAuth } from './Layout';
 import LoginPage from './pages/Login';
 import DashboardPage from './pages/Dashboard';
 import UsagePage from './pages/Usage';
+import FairnessPage from './pages/Fairness';
 import KeysPage from './pages/Keys';
 import AgentGuidePage from './pages/AgentGuide';
 import SetupGuidePage from './pages/SetupGuide';
@@ -32,6 +33,7 @@ export default function App() {
             >
               <Route index element={<DashboardPage />} />
               <Route path="usage" element={<UsagePage admin={false} />} />
+              <Route path="fairness" element={<FairnessPage />} />
               <Route path="keys" element={<KeysPage />} />
               <Route path="agents" element={<AgentGuidePage />} />
               <Route path="setup" element={<SetupGuidePage />} />

@@ -390,12 +390,12 @@ export interface FedLocalOnlyEntry {
 
 export type FedAdminStats =
   | { role: 'hub'; since: string; until: string; users: FedUserTotals[]; peers: FedPeerTotals[]; local_only: FedLocalOnlyEntry[] }
-  | { role: 'spoke'; since: string; until: string; served_by_source: FedSourceEntry[]; consumed: FedConsumedEntry[] }
+  | { role: 'spoke'; since: string; until: string; users: FedUserTotals[]; local_only: FedLocalOnlyEntry[]; served_by_source: FedSourceEntry[]; consumed: FedConsumedEntry[] }
   | { role: 'standalone' };
 
 export type FedMyStats =
-  | { role: 'hub'; since: string; until: string; totals: FedUserTotals[]; local_only: FedLocalOnlyEntry[] }
-  | { role: 'spoke'; since: string; until: string; consumed: FedConsumedEntry[] }
+  | { role: 'hub'; since: string; until: string; totals: FedUserTotals[]; local_only: FedLocalOnlyEntry[]; currency: string }
+  | { role: 'spoke'; since: string; until: string; totals: FedUserTotals[]; local_only: FedLocalOnlyEntry[]; consumed: FedConsumedEntry[]; currency: string }
   | { role: 'standalone' };
 
 /** Per-model federation sharing switch; mirrors the store CHECK: 'off'

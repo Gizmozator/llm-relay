@@ -153,12 +153,16 @@ func TestFedStatsEndpoints(t *testing.T) {
 		Role      string         `json:"role"`
 		Totals    []fedUserJSON  `json:"totals"`
 		LocalOnly []fedLocalJSON `json:"local_only"`
+		Currency  string         `json:"currency"`
 	}
 	if code := getJSON(t, e, "/api/federation/stats", alice, &mine); code != 200 {
 		t.Fatalf("alice stats = %d", code)
 	}
 	if mine.Role != "hub" || len(mine.Totals) != 0 {
 		t.Errorf("alice totals = %+v, want empty", mine)
+	}
+	if mine.Currency == "" {
+		t.Errorf("personal payload must carry the display currency (personal page): %+v", mine)
 	}
 	if len(mine.LocalOnly) != 1 || mine.LocalOnly[0].User != "alice" ||
 		mine.LocalOnly[0].Counts.Requests != 1 {
@@ -208,6 +212,15 @@ func TestFedStatsEndpoints(t *testing.T) {
 			User   string        `json:"user"`
 			Counts fedCountsJSON `json:"counts"`
 		} `json:"consumed"`
+		Users []struct {
+			UserID   int64         `json:"user_id"`
+			User     string        `json:"user"`
+			Served   fedCountsJSON `json:"served"`
+			Consumed fedCountsJSON `json:"consumed"`
+		} `json:"users"`
+		LocalOnly []struct {
+			UserID int64 `json:"user_id"`
+		} `json:"local_only"`
 	}
 	if code := getJSON(t, e, "/api/admin/federation/stats", tok, &spoke); code != 200 {
 		t.Fatalf("admin stats spoke = %d", code)
@@ -224,13 +237,47 @@ func TestFedStatsEndpoints(t *testing.T) {
 		spoke.Consumed[0].Counts.Prompt != 4 {
 		t.Errorf("spoke payload = %+v", spoke)
 	}
-	// Personal spoke view: the caller's consumed slice only.
+	// The spoke's own fairness ledger (plan 2026-11-25-spoke-fairness):
+	// alice consumed the hub-hosted model (4p) and the Federation virtual
+	// account carries both sides of the box-level traffic — served to
+	// alice (4p), consumed from this box (the 12p served row).
+	fedRow, aliceRow := 0, 0
+	for _, u := range spoke.Users {
+		switch u.UserID {
+		case -1:
+			fedRow++
+			if u.User != "Federation" || u.Served.Prompt != 4 || u.Consumed.Prompt != 12 {
+				t.Errorf("Federation row = %+v; want served 4, consumed 12", u)
+			}
+		case aliceID:
+			aliceRow++
+			if u.Consumed.Prompt != 4 || u.Served.Prompt != 0 {
+				t.Errorf("alice fairness row = %+v", u)
+			}
+		}
+	}
+	if fedRow != 1 || aliceRow != 1 {
+		t.Errorf("spoke users = %+v; want alice + Federation", spoke.Users)
+	}
+	for _, lo := range spoke.LocalOnly {
+		if lo.UserID == aliceID {
+			t.Errorf("alice is in the ledger and must be dropped from local_only")
+		}
+	}
+	// Personal spoke view: the caller's consumed slice plus their own
+	// fairness entry (never the box-level Federation row).
 	var mineSpoke struct {
 		Role     string `json:"role"`
+		Currency string `json:"currency"`
 		Consumed []struct {
 			User   string        `json:"user"`
 			Counts fedCountsJSON `json:"counts"`
 		} `json:"consumed"`
+		Totals []struct {
+			UserID   int64         `json:"user_id"`
+			User     string        `json:"user"`
+			Consumed fedCountsJSON `json:"consumed"`
+		} `json:"totals"`
 	}
 	if code := getJSON(t, e, "/api/federation/stats", alice, &mineSpoke); code != 200 {
 		t.Fatalf("alice spoke stats = %d", code)
@@ -239,11 +286,25 @@ func TestFedStatsEndpoints(t *testing.T) {
 		mineSpoke.Consumed[0].User != "alice" {
 		t.Errorf("alice spoke slice = %+v", mineSpoke)
 	}
+	if mineSpoke.Currency == "" {
+		t.Errorf("spoke personal payload must carry the display currency: %+v", mineSpoke)
+	}
+	// Alice's personal fairness entry: her hub-model spending (4p consumed),
+	// and never the box-level Federation row.
+	if len(mineSpoke.Totals) != 1 || mineSpoke.Totals[0].User != "alice" ||
+		mineSpoke.Totals[0].Consumed.Prompt != 4 {
+		t.Errorf("alice spoke totals = %+v; want her own entry (consumed 4p)", mineSpoke.Totals)
+	}
 	if code := getJSON(t, e, "/api/federation/stats", tok, &mineSpoke); code != 200 {
 		t.Fatalf("admin spoke stats = %d", code)
 	}
 	if len(mineSpoke.Consumed) != 0 {
 		t.Errorf("admin spoke slice = %+v, want empty", mineSpoke)
+	}
+	for _, t2 := range mineSpoke.Totals {
+		if t2.UserID == -1 {
+			t.Errorf("Federation row leaked into a personal view: %+v", t2)
+		}
 	}
 }
 

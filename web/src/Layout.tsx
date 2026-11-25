@@ -54,6 +54,11 @@ export default function Layout() {
           <NavLink to="/usage" className={navClass}>
             My usage
           </NavLink>
+          {(fed.role === 'hub' || fed.role === 'spoke') && (
+            <NavLink to="/fairness" className={navClass}>
+              My fairness
+            </NavLink>
+          )}
           <NavLink to="/keys" className={navClass}>
             My keys
           </NavLink>

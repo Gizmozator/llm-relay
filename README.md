@@ -206,6 +206,20 @@ that user's *served* total — the hub-side mirror of a spoke's capacity crediti
 its peer owner. A backend with no owner behaves exactly as before (hub-hardware
 usage stays uncredited), and a spoke's own crediting is unchanged.
 
+**The spoke sees its own fairness too**: a spoke's Federation page carries the
+same per-user fairness table. Your users' spending on hub-hosted models counts
+as *consumed* (the virtual **Federation** account carries the remote serving
+side), incoming hub traffic on backends you own counts as *served* for their
+owner, and the Federation row mirrors this box's account on the hub — seen from
+the other side. Summed over the table, served equals consumed: the ledger
+balances exactly when every serving backend has a fairness owner.
+
+**Everyone sees their own fairness**: every user gets a **My fairness** page —
+their own ledger row (what their hosted models and owned backends served to
+other accounts vs what they spent on hardware owned by others, local and
+federated alike). The other users' rows and the Federation account are
+admin-only views.
+
 **Security**: server tokens (`fed-…`) authenticate only the federation
 channel, never `/v1/*` (and API keys never the channel); they are hashed,
 shown once, rotatable, and disabling a peer drops its live channel at once.

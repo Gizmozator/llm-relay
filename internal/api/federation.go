@@ -464,10 +464,16 @@ func fedWindow(r *http.Request) (since, until string, err error) {
 //	       ownerless backends only — present on the Usage page, absent from
 //	       the ledger by design, so the UI can say "nothing to attribute"
 //	       instead of showing a blank. until is "" for rolling windows.)
-//	spoke: {"role":"spoke","since":…,"until":…,"served_by_source":[FedSourceTotals…],
+//	spoke: {"role":"spoke","since":…,"until":…,"users":[FedUserTotal…],
+//	       "local_only":[FedLocalOnlyEntry…],"served_by_source":[FedSourceTotals…],
 //	       "consumed":[FedConsumedEntry…]}
-//	       (what this box served to which hub-stamped identity, and what
-//	       local users spent on federated models)
+//	       (the spoke's own fairness ledger (plan 2026-11-25-spoke-fairness):
+//	       per local user served/consumed — local cross-user traffic, their
+//	       hub-model spending as consumed, incoming hub traffic credited to
+//	       their owned backends — plus the Federation virtual account (user_id
+//	       -1) mirroring this box's hub-side owner account. The two box-level
+//	       panels stay: what this box served to which hub-stamped identity,
+//	       and what local users spent on federated models)
 //	other: {"role":"standalone"}
 func (s *Server) AdminFedStats(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
 	since, until, err := fedWindow(r)
@@ -496,6 +502,18 @@ func (s *Server) AdminFedStats(w http.ResponseWriter, r *http.Request, c *auth.C
 			"peers": peers, "local_only": local,
 		})
 	case store.FedRoleSpoke:
+		// The spoke's own fairness ledger (plan 2026-11-25-spoke-fairness):
+		// per local user served/consumed (local cross-user traffic, their
+		// spending on hub-hosted models as consumed, incoming hub traffic
+		// credited to their owned backends) plus the Federation virtual
+		// account — the mirror of this box's hub-side owner account. The
+		// two box-level panels stay: served_by_source (who on the hub we
+		// served) and consumed (the raw federated-model slice per user).
+		users, local, err := store.FedLedger(s.DB, since, until, 0)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "internal error")
+			return
+		}
 		served, err := store.FedServedBySource(s.DB, since, until, "")
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, "internal error")
@@ -508,6 +526,7 @@ func (s *Server) AdminFedStats(w http.ResponseWriter, r *http.Request, c *auth.C
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"role": role, "since": since, "until": until,
+			"users": users, "local_only": local,
 			"served_by_source": served, "consumed": consumed,
 		})
 	default:
@@ -516,7 +535,9 @@ func (s *Server) AdminFedStats(w http.ResponseWriter, r *http.Request, c *auth.C
 }
 
 // FedStats serves GET /api/federation/stats?days=N|month=YYYY-MM — the
-// caller's own fairness totals (session auth, always scoped to the caller):
+// caller's own fairness totals (session auth, always scoped to the caller).
+// Both role payloads carry "currency" (the display currency, EUR default)
+// so the personal page needs no admin endpoint:
 //
 //	hub:   {"role":"hub","since":…,"until":…,"totals":[FedUserTotal],"local_only":[…]}
 //	       — the caller's served/consumed entry: what their hosted models
@@ -525,10 +546,12 @@ func (s *Server) AdminFedStats(w http.ResponseWriter, r *http.Request, c *auth.C
 //	       attributable to them; local_only then carries their own
 //	       unattributable usage, so "no fairness activity" stays
 //	       distinguishable from "no data at all").
-//	spoke: {"role":"spoke","since":…,"until":…,"consumed":[FedConsumedEntry]} —
-//	       what the caller spent on federated models. Served rows belong to
-//	       the box, not to a session user, so they only appear on the admin
-//	       view.
+//	spoke: {"role":"spoke","since":…,"until":…,"totals":[one FedUserTotal],
+//	       "local_only":[caller's entry or empty],"consumed":[caller's slice]} —
+//	       the caller's own fairness entry (their owned backends serving others
+//	       vs their spending, local cross-user and hub-model alike) plus the
+//	       raw federated-model slice. Served rows to the hub belong to the box,
+//	       not to a session user, so they only appear on the admin view.
 //	other: {"role":"standalone"}
 func (s *Server) FedStats(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
 	since, until, err := fedWindow(r)
@@ -547,17 +570,39 @@ func (s *Server) FedStats(w http.ResponseWriter, r *http.Request, c *auth.Claims
 			writeErr(w, http.StatusInternalServerError, "internal error")
 			return
 		}
+		cur, ok := s.currencySetting()
+		if !ok {
+			writeErr(w, http.StatusInternalServerError, "internal error")
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"role": role, "since": since, "until": until, "totals": totals, "local_only": local,
+			"role": role, "since": since, "until": until, "totals": totals,
+			"local_only": local, "currency": cur,
 		})
 	case store.FedRoleSpoke:
+		// The caller's own fairness entry (scoped): their served (owned
+		// backends serving other local accounts or the hub) and consumed
+		// (local cross-user + their spending on hub-hosted models). The
+		// Federation virtual account is box-level and stays on the admin
+		// view. The consumed slice (raw federated-model spending) stays.
+		totals, local, err := store.FedLedger(s.DB, since, until, c.UserID)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "internal error")
+			return
+		}
 		consumed, err := store.FedConsumedSlice(s.DB, since, until, c.UserID)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, "internal error")
 			return
 		}
+		cur, ok := s.currencySetting()
+		if !ok {
+			writeErr(w, http.StatusInternalServerError, "internal error")
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"role": role, "since": since, "until": until, "consumed": consumed,
+			"role": role, "since": since, "until": until,
+			"totals": totals, "local_only": local, "consumed": consumed, "currency": cur,
 		})
 	default:
 		writeJSON(w, http.StatusOK, map[string]any{"role": role})

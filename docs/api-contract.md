@@ -159,24 +159,40 @@ Federation stats (plan task 4; fairness scope per plan
     dropped from it. An empty `users` **and** empty `local_only` means there
     was no usage at all. The UI uses this to say "nothing to attribute
     between accounts" instead of showing a blank that reads as missing data.
-  - spoke: `{"role":"spoke","since":"…","until":…,"served_by_source":[{"fed_user":
-    "hub-alice","counts":{…}}],"consumed":[{"user_id":4,"user":"alice",
-    "counts":{…}}]}` — what this box served to which hub-stamped
-    identity, and what local users spent on federated
-    (synthetic-backend) models.
+  - spoke: `{"role":"spoke","since":"…","until":…,"users":[{"user_id":-1,"user":
+    "Federation","served":{…},"consumed":{…}},…],"local_only":[…],"served_by_source":
+    [{"fed_user":"hub-alice","counts":{…}}],"consumed":[{"user_id":4,"user":"alice",
+    "counts":{…}}]}` — the spoke's own fairness ledger (plan
+    2026-11-25-spoke-fairness): per local user, `consumed` is their local
+    cross-user spending **plus** their spending on hub-hosted (synthetic
+    backend) models, `served` is their owned backends serving other local
+    accounts or the incoming hub traffic they host. The **Federation**
+    virtual account (`user_id -1`, never a real user) carries the remote
+    side: its `served` is what the hub served to this box's users, its
+    `consumed` is what the hub took from this box — the exact mirror of
+    this box's owner account on the hub. The ledger balances exactly when
+    every serving backend has a fairness owner. The two box-level panels
+    stay: what this box served to which hub-stamped identity
+    (`served_by_source`), and what local users spent on federated models
+    (`consumed`).
   - standalone: `{"role":"standalone"}`.
   - Every `{…}` counts bucket is `{"requests","prompt_tokens",
     "completion_tokens","cached_tokens","cache_write_tokens","cost_micro"}`.
 - `GET /api/federation/stats` (JWT, any user) — the caller's own fairness
-  totals, always scoped to the caller (admins included): hub → `{"role":"hub",
+  totals, always scoped to the caller (admins included). Both role payloads carry
+  `"currency"` (the display currency, EUR default) so the personal **My
+  fairness** page needs no admin endpoint: hub → `{"role":"hub",
   "since":…,"until":…,"totals":[one FedUserTotal],"local_only":[caller's entry
-  or empty]}` — the caller's served (their hosted models serving other
+  or empty],"currency":"EUR"}` — the caller's served (their hosted models serving other
   accounts, local and federated alike) and consumed (their spending on others'
   hardware); `local_only` carries their unattributable usage when the ledger
   has no entry for them (the personal "nothing to attribute" signal,
   ticket #13); spoke → `{"role":"spoke",
-  "since":…,"until":…,"consumed":[caller's slice]}` (served rows belong to the box,
-  not to a session user); standalone → `{"role":"standalone"}`.
+  "since":…,"until":…,"totals":[one FedUserTotal],"local_only":[…],"consumed":[caller's
+  slice],"currency":"EUR"}` — the caller's own fairness entry (their owned backends serving others vs
+  their spending, local and hub-model alike; the box-level Federation row never
+  appears in a personal view) plus the raw federated-model slice (served rows to
+  the hub belong to the box, not to a session user); standalone → `{"role":"standalone"}`.
 
 Per-model sharing switch (rides the model object everywhere the admin API
 returns models): `PATCH /api/admin/models/{id}` gains `fed_visibility`
