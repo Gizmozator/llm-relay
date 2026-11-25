@@ -542,8 +542,13 @@ function Ledger({
                       <th rowSpan={2}>User</th>
                       <th colSpan={4} className="num">Served</th>
                       <th colSpan={4} className="num">Consumed</th>
+                      <th colSpan={4} className="num">Net (served − consumed)</th>
                     </tr>
                     <tr>
+                      <th className="num">Req</th>
+                      <th className="num">In new</th>
+                      <th className="num">Out</th>
+                      <th className="num">Cost</th>
                       <th className="num">Req</th>
                       <th className="num">In new</th>
                       <th className="num">Out</th>
@@ -566,6 +571,7 @@ function Ledger({
                         <td className="num">{fmtInt(inNewTokens(u.consumed))}</td>
                         <td className="num">{fmtInt(u.consumed.completion_tokens)}</td>
                         <td className="num money">{fmtMoney(u.consumed.cost_micro, currency)}</td>
+                        <NetCells served={u.served} consumed={u.consumed} currency={currency} />
                       </tr>
                     ))}
                   </tbody>
@@ -674,6 +680,39 @@ function Ledger({
     <section className="panel">
       <Empty label="This instance is standalone — no federation ledger." />
     </section>
+  );
+}
+
+/** Sign class for a served−consumed delta: green when the row gave more than
+ *  it took (net provider), red when it took more (net consumer), plain at 0. */
+function netClass(n: number): string {
+  return n > 0 ? 'net-pos' : n < 0 ? 'net-neg' : '';
+}
+
+/** The served−consumed delta across the same four columns as the Served and
+ *  Consumed groups, so the fairness balance reads at a glance instead of
+ *  being subtracted by hand. Positive = this account's hardware served more
+ *  than it consumed (a net contributor to the federation). */
+function NetCells({
+  served,
+  consumed,
+  currency,
+}: {
+  served: FedCounts;
+  consumed: FedCounts;
+  currency: string;
+}) {
+  const req = served.requests - consumed.requests;
+  const inNew = inNewTokens(served) - inNewTokens(consumed);
+  const out = served.completion_tokens - consumed.completion_tokens;
+  const cost = served.cost_micro - consumed.cost_micro;
+  return (
+    <>
+      <td className={`num ${netClass(req)}`}>{fmtInt(req)}</td>
+      <td className={`num ${netClass(inNew)}`}>{fmtInt(inNew)}</td>
+      <td className={`num ${netClass(out)}`}>{fmtInt(out)}</td>
+      <td className={`num money ${netClass(cost)}`}>{fmtMoney(cost, currency)}</td>
+    </>
   );
 }
 

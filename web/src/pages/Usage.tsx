@@ -161,7 +161,7 @@ export default function UsagePage({ admin }: { admin: boolean }) {
   return (
     <div className="page">
       <div className="page-head">
-        <h2>{admin ? 'Usage — all users' : 'Usage'}</h2>
+        <h2>{admin ? 'Usage — all users' : 'My usage'}</h2>
       </div>
 
       <div className="filter-bar">

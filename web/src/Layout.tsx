@@ -52,7 +52,7 @@ export default function Layout() {
             Dashboard
           </NavLink>
           <NavLink to="/usage" className={navClass}>
-            Usage
+            My usage
           </NavLink>
           <NavLink to="/keys" className={navClass}>
             My keys
@@ -75,7 +75,7 @@ export default function Layout() {
                 Backends
               </NavLink>
               <NavLink to="/admin/models" className={navClass}>
-                Models
+                Model catalog
               </NavLink>
               <NavLink to="/admin/users" className={navClass}>
                 Users

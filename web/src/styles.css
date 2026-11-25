@@ -474,6 +474,16 @@ td.money {
   white-space: nowrap;
 }
 
+/* Federation ledger: served − consumed delta. Green = net provider (gave
+   more than it took), red = net consumer. */
+td.net-pos {
+  color: var(--green);
+}
+
+td.net-neg {
+  color: var(--red);
+}
+
 .mono {
   font-family: var(--mono);
   font-size: 12.5px;
