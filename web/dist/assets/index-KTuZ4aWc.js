@@ -37,10 +37,13 @@ services:
     image: gitea.rantaeskola.fi/gizmoz/llm-relay:latest
     restart: unless-stopped
     env_file: .env
-    # The connector dials out only — it binds no ports. Host networking lets
-    # ENGINE_URL=http://localhost:PORT reach the engine on this machine; if
-    # your engine runs on a shared docker network, drop this and use the
-    # service name in ENGINE_URL instead.
+    # The connector dials out only — it binds no ports (unless PROXY_LISTEN
+    # is set in .env: the edge proxy listener then binds that address on
+    # this host; with host networking, 127.0.0.1 is the box's loopback and
+    # a LAN-facing listener needs an explicit host, see .env.example).
+    # Host networking lets ENGINE_URL=http://localhost:PORT reach the engine
+    # on this machine; if your engine runs on a shared docker network, drop
+    # this and use the service name in ENGINE_URL instead.
     network_mode: host
 `,Im=`# llm-relay — remote-backend connector env. Copy to .env, fill in, restart
 # to change. No JWT_SECRET needed: a connector never serves the dashboard.
@@ -62,6 +65,15 @@ RELAY_TOKEN=rb-
 # Your local OpenAI-compatible engine, exposed through the relay. REQUIRED.
 ENGINE_URL=http://localhost:8080
 # ENGINE_TOKEN=             # bearer token for the engine, if it needs one
+
+# EDGE PROXY MODE (optional, ticket #17): bind a local /v1 listener that
+# forwards this box's LAN clients over the channel to the relay. The relay
+# authenticates each client's sk- key itself — no keys live on this box.
+# EMPTY (default) = this box binds nothing. A bare port or :port binds
+# 127.0.0.1; only an explicit host (0.0.0.0:8080, a LAN address) binds
+# elsewhere — the relay cannot defend a public connector box, keep it on
+# the LAN. Clients then point their OpenAI base URL at http://THIS-BOX:8080/v1.
+# PROXY_LISTEN=8080
 `,Lm=`# llm-relay — full relay server: dashboard + admin API, several models, users.
 # Copy this file and .env.example (as .env) onto your server, fill in .env,
 # then:  docker compose up -d   — open the dashboard at http://<host>:8081.
