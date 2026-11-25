@@ -369,34 +369,42 @@ func TestFederationAuthMatrix(t *testing.T) {
 func TestModelFedVisibilityPATCH(t *testing.T) {
 	e := newTestEnv(t, http.NotFoundHandler())
 	tok := login(t, e)
-	alice := userToken(t, e, "alice")
+	userToken(t, e, "alice")
+	au, _, err := store.UserByName(e.db, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	userToken(t, e, "bob")
+	bu, _, err := store.UserByName(e.db, "bob")
+	if err != nil {
+		t.Fatal(err)
+	}
 	m := newCatalogModel(t, e, "node-a", "qwen")
-	pid, _ := createPeer(t, e, alice, "spoke")
-	ids := strconv.FormatInt(pid, 10)
+	ids := strconv.FormatInt(au.ID, 10)
 
 	// Default off on the admin row.
 	if m.FedVisibility != "off" {
 		t.Fatalf("fresh model fed_visibility = %q", m.FedVisibility)
 	}
 
-	// Set allowlist with the peer; the row surfaces both fields.
+	// Set allowlist with the user; the row surfaces both fields.
 	resp := e.do(t, "PATCH", pathf("/api/admin/models/%d", m.ID),
-		`{"fed_visibility":"allowlist","fed_peer_ids":[`+ids+`]}`, tok)
+		`{"fed_visibility":"allowlist","fed_user_ids":[`+ids+`]}`, tok)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("allowlist PATCH = %d %s", resp.StatusCode, bodyString(t, resp))
 	}
 	var got store.Model
 	json.NewDecoder(resp.Body).Decode(&got)
 	resp.Body.Close()
-	if got.FedVisibility != "allowlist" || len(got.FedPeerIDs) != 1 || got.FedPeerIDs[0] != pid {
-		t.Errorf("model = %q/%v", got.FedVisibility, got.FedPeerIDs)
+	if got.FedVisibility != "allowlist" || len(got.FedUserIDs) != 1 || got.FedUserIDs[0] != au.ID {
+		t.Errorf("model = %q/%v", got.FedVisibility, got.FedUserIDs)
 	}
 
-	// fed_peer_ids without allowlist mode -> 400; unknown peer -> 400;
+	// fed_user_ids without allowlist mode -> 400; unknown user -> 400;
 	// bad visibility -> 400.
 	for _, body := range []string{
-		`{"fed_peer_ids":[1]}`,
-		`{"fed_visibility":"allowlist","fed_peer_ids":[9999]}`,
+		`{"fed_user_ids":[1]}`,
+		`{"fed_visibility":"allowlist","fed_user_ids":[9999]}`,
 		`{"fed_visibility":"yes"}`,
 	} {
 		if resp := e.do(t, "PATCH", pathf("/api/admin/models/%d", m.ID), body, tok); resp.StatusCode != http.StatusBadRequest {
@@ -407,12 +415,20 @@ func TestModelFedVisibilityPATCH(t *testing.T) {
 		}
 	}
 
+	// 'owner' mode (ticket #21) is accepted and carries no list.
+	if resp := e.do(t, "PATCH", pathf("/api/admin/models/%d", m.ID),
+		`{"fed_visibility":"owner"}`, tok); resp.StatusCode != http.StatusOK {
+		t.Fatalf("owner PATCH = %d %s", resp.StatusCode, bodyString(t, resp))
+	} else {
+		resp.Body.Close()
+	}
+
 	// Back to off clears the allowlist.
 	resp = e.do(t, "PATCH", pathf("/api/admin/models/%d", m.ID), `{"fed_visibility":"off"}`, tok)
 	json.NewDecoder(resp.Body).Decode(&got)
 	resp.Body.Close()
-	if got.FedVisibility != "off" || len(got.FedPeerIDs) != 0 {
-		t.Errorf("after off = %q/%v", got.FedVisibility, got.FedPeerIDs)
+	if got.FedVisibility != "off" || len(got.FedUserIDs) != 0 {
+		t.Errorf("after off = %q/%v", got.FedVisibility, got.FedUserIDs)
 	}
 
 	// Validation runs before any mutation: a bogus fed_visibility must not
@@ -428,13 +444,12 @@ func TestModelFedVisibilityPATCH(t *testing.T) {
 		t.Errorf("rename committed despite 400: %+v, %v", mm, err)
 	}
 
-	// PATCH semantics: switching to allowlist without naming fed_peer_ids
+	// PATCH semantics: switching to allowlist without naming fed_user_ids
 	// keeps the stored list (unmentioned fields do not change); switching
 	// to all/off clears it on purpose (those modes share with
 	// everybody/nobody — a stale list would be a lie).
-	pid2, _ := createPeer(t, e, alice, "spoke2")
 	if resp := e.do(t, "PATCH", pathf("/api/admin/models/%d", m.ID),
-		`{"fed_visibility":"allowlist","fed_peer_ids":[`+ids+`,`+strconv.FormatInt(pid2, 10)+`]}`, tok); resp.StatusCode != http.StatusOK {
+		`{"fed_visibility":"allowlist","fed_user_ids":[`+ids+`,`+strconv.FormatInt(bu.ID, 10)+`]}`, tok); resp.StatusCode != http.StatusOK {
 		t.Fatalf("seed allowlist = %s", bodyString(t, resp))
 	} else {
 		resp.Body.Close()
@@ -442,14 +457,14 @@ func TestModelFedVisibilityPATCH(t *testing.T) {
 	resp = e.do(t, "PATCH", pathf("/api/admin/models/%d", m.ID), `{"fed_visibility":"allowlist"}`, tok)
 	json.NewDecoder(resp.Body).Decode(&got)
 	resp.Body.Close()
-	if got.FedVisibility != "allowlist" || len(got.FedPeerIDs) != 2 {
-		t.Errorf("allowlist-only PATCH wiped the list: %q/%v", got.FedVisibility, got.FedPeerIDs)
+	if got.FedVisibility != "allowlist" || len(got.FedUserIDs) != 2 {
+		t.Errorf("allowlist-only PATCH wiped the list: %q/%v", got.FedVisibility, got.FedUserIDs)
 	}
 	resp = e.do(t, "PATCH", pathf("/api/admin/models/%d", m.ID), `{"fed_visibility":"all"}`, tok)
 	json.NewDecoder(resp.Body).Decode(&got)
 	resp.Body.Close()
-	if got.FedVisibility != "all" || len(got.FedPeerIDs) != 0 {
-		t.Errorf("switch to all should clear the list: %q/%v", got.FedVisibility, got.FedPeerIDs)
+	if got.FedVisibility != "all" || len(got.FedUserIDs) != 0 {
+		t.Errorf("switch to all should clear the list: %q/%v", got.FedVisibility, got.FedUserIDs)
 	}
 }
 

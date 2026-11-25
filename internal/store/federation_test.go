@@ -204,7 +204,8 @@ func TestPeerLifecycle(t *testing.T) {
 		t.Errorf("admin list = %d peers, want 2", len(all))
 	}
 
-	// Delete drops it (and cascades the allowlist — see sharing test).
+	// Delete drops it. Allowlist rows name users (ticket #21), so nothing
+	// cascades here anymore — see the sharing test.
 	if err := store.DeletePeer(d, p.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -232,14 +233,18 @@ func TestModelFedVisibility(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p2, _, err := store.CreatePeer(d, "two", owner.ID)
+	bob, err := store.CreateUser(d, "bob", "", hash, "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p2, _, err := store.CreatePeer(d, "two", bob.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Fresh model rows: off, empty allowlist.
-	if m.FedVisibility != "off" || len(m.FedPeerIDs) != 0 {
-		t.Errorf("fresh model = %q/%v, want off/[]", m.FedVisibility, m.FedPeerIDs)
+	if m.FedVisibility != "off" || len(m.FedUserIDs) != 0 {
+		t.Errorf("fresh model = %q/%v, want off/[]", m.FedVisibility, m.FedUserIDs)
 	}
 
 	// Invalid visibility rejected.
@@ -252,31 +257,33 @@ func TestModelFedVisibility(t *testing.T) {
 	}
 
 	// Allowlist round-trip (dupes collapse), surfaced on the model row.
-	if err := store.SetModelFedVisibility(d, m.ID, "allowlist", []int64{p2.ID, p1.ID, p1.ID}); err != nil {
+	// The list names USERS (ticket #21): a spoke passes it through its owner.
+	if err := store.SetModelFedVisibility(d, m.ID, "allowlist", []int64{bob.ID, owner.ID, owner.ID}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := store.ModelByID(d, m.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.FedVisibility != "allowlist" || len(got.FedPeerIDs) != 2 {
-		t.Errorf("model = %q/%v, want allowlist/2 peers", got.FedVisibility, got.FedPeerIDs)
+	if got.FedVisibility != "allowlist" || len(got.FedUserIDs) != 2 {
+		t.Errorf("model = %q/%v, want allowlist/2 users", got.FedVisibility, got.FedUserIDs)
 	}
 	ids, err := store.ModelFedAllowlist(d, m.ID)
 	if err != nil || len(ids) != 2 {
 		t.Errorf("allowlist = %v, %v", ids, err)
 	}
 
-	// Allowlist must reference existing peers.
+	// Allowlist must reference existing users.
 	if err := store.SetModelFedVisibility(d, m.ID, "allowlist", []int64{9999}); !errors.Is(err, store.ErrNotFound) {
-		t.Errorf("unknown peer = %v, want ErrNotFound", err)
+		t.Errorf("unknown user = %v, want ErrNotFound", err)
 	}
 	// The failed call left the previous list intact (one tx).
 	if ids, _ := store.ModelFedAllowlist(d, m.ID); len(ids) != 2 {
 		t.Errorf("failed call mutated the list: %v", ids)
 	}
 
-	// SharedWithPeer matrix.
+	// SharedWithPeer matrix (ticket #21): the allowlist names users and a
+	// peer passes it through its OWNER — p1 is alice's, p2 is bob's.
 	for _, tc := range []struct {
 		vis  string
 		peer int64
@@ -284,13 +291,13 @@ func TestModelFedVisibility(t *testing.T) {
 	}{
 		{"all", p1.ID, true}, {"all", p2.ID, true},
 		{"off", p1.ID, false},
-		{"allowlist", p1.ID, true}, {"allowlist", p2.ID, true},
+		{"allowlist", p1.ID, true}, {"allowlist", p2.ID, false},
 	} {
 		if err := store.SetModelFedVisibility(d, m.ID, tc.vis, nil); err != nil {
 			t.Fatal(err)
 		}
 		if tc.vis == "allowlist" {
-			if err := store.SetModelFedVisibility(d, m.ID, "allowlist", []int64{p1.ID, p2.ID}); err != nil {
+			if err := store.SetModelFedVisibility(d, m.ID, "allowlist", []int64{owner.ID}); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -298,6 +305,29 @@ func TestModelFedVisibility(t *testing.T) {
 		if err != nil || ok != tc.want {
 			t.Errorf("vis=%s peer=%d: %v %v, want %v", tc.vis, tc.peer, ok, err, tc.want)
 		}
+	}
+	// 'owner' mode follows the backend's fairness owner: unowned shares
+	// with nobody (fail-closed, same direction as 'off'), owned shares with
+	// that user's peers only.
+	if err := store.SetModelFedVisibility(d, m.ID, "owner", nil); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := store.SharedWithPeer(d, m.ID, p1.ID); ok {
+		t.Error("'owner' on an unowned backend shares with someone")
+	}
+	if _, err := store.SetBackendOwner(d, b.ID, &owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := store.SharedWithPeer(d, m.ID, p1.ID); !ok {
+		t.Error("'owner' hides the model from the owner's own peer")
+	}
+	if ok, _ := store.SharedWithPeer(d, m.ID, p2.ID); ok {
+		t.Error("'owner' shares with a foreign peer")
+	}
+	// The spoke-side LocalOnly gate reuses this call with peer id 0 (no
+	// peers row exists for 0): both list modes and 'owner' are false there.
+	if ok, _ := store.SharedWithPeer(d, m.ID, 0); ok {
+		t.Error("peer 0 passed the sharing gate")
 	}
 	// allowlist with an empty list shares with nobody.
 	if err := store.SetModelFedVisibility(d, m.ID, "allowlist", nil); err != nil {
@@ -307,7 +337,8 @@ func TestModelFedVisibility(t *testing.T) {
 		t.Error("empty allowlist shares with someone")
 	}
 
-	// SharedModels count on the peer list: 'all' models + own allowlist rows.
+	// SharedModels count on the peer list: 'all' models + the user-allowlist
+	// rows the peer's owner is on + 'owner' rows its owner's backends carry.
 	if err := store.SetModelFedVisibility(d, m.ID, "all", nil); err != nil {
 		t.Fatal(err)
 	}
@@ -315,7 +346,16 @@ func TestModelFedVisibility(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SetModelFedVisibility(d, m2.ID, "allowlist", []int64{p1.ID}); err != nil {
+	if err := store.SetModelFedVisibility(d, m2.ID, "allowlist", []int64{owner.ID}); err != nil {
+		t.Fatal(err)
+	}
+	// m3: 'owner' on backend b, which alice owns (set above) — counts for
+	// her peer only.
+	m3, err := store.CreateModel(d, b.ID, "up3", "mistral")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetModelFedVisibility(d, m3.ID, "owner", nil); err != nil {
 		t.Fatal(err)
 	}
 	peers, err := store.ListPeers(d)
@@ -323,9 +363,9 @@ func TestModelFedVisibility(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, p := range peers {
-		want := 2 // both models: one 'all', one allowlisted to p1
-		if p.ID == p2.ID {
-			want = 1 // only the 'all' model
+		want := 1 // only the 'all' model
+		if p.ID == p1.ID {
+			want = 3 // + alice's allowlist row + her owned 'owner' row
 		}
 		if p.SharedModels != want {
 			t.Errorf("peer %d shared_models = %d, want %d", p.ID, p.SharedModels, want)
@@ -339,18 +379,16 @@ func TestModelFedVisibility(t *testing.T) {
 	if ids, err := store.ModelFedAllowlist(d, m2.ID); err != nil || len(ids) != 0 {
 		t.Errorf("after model delete = %v, %v", ids, err)
 	}
-	// Deleting a peer cascades its allowlist rows.
+	// Deleting a peer does NOT prune the allowlist: rows name users, so a
+	// share survives deleting and re-adding the spoke (ticket #21).
+	if err := store.SetModelFedVisibility(d, m.ID, "allowlist", []int64{owner.ID}); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.DeletePeer(d, p1.ID); err != nil {
 		t.Fatal(err)
 	}
-	if ids, err := store.ModelFedAllowlist(d, m.ID); err != nil {
-		t.Fatal(err)
-	} else {
-		for _, id := range ids {
-			if id == p1.ID {
-				t.Errorf("peer delete left allowlist row: %v", ids)
-			}
-		}
+	if ids, err := store.ModelFedAllowlist(d, m.ID); err != nil || len(ids) != 1 || ids[0] != owner.ID {
+		t.Errorf("peer delete pruned the user allowlist: %v, %v", ids, err)
 	}
 }
 
@@ -371,8 +409,9 @@ func TestSharedModelsEnabledFilter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, _, err := store.CreatePeer(d, "spoke", owner.ID)
-	if err != nil {
+	// The peer row itself is what count() reads (shared_models rides the
+	// peer list); its id no longer appears in the allowlist (ticket #21).
+	if _, _, err := store.CreatePeer(d, "spoke", owner.ID); err != nil {
 		t.Fatal(err)
 	}
 	count := func() int {
@@ -387,7 +426,7 @@ func TestSharedModelsEnabledFilter(t *testing.T) {
 	}
 
 	// Allowlist term: disable drops, enable restores.
-	if err := store.SetModelFedVisibility(d, m.ID, "allowlist", []int64{p.ID}); err != nil {
+	if err := store.SetModelFedVisibility(d, m.ID, "allowlist", []int64{owner.ID}); err != nil {
 		t.Fatal(err)
 	}
 	if n := count(); n != 1 {

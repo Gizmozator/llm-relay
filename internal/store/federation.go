@@ -156,8 +156,9 @@ type Peer struct {
 	Version     string `json:"version"`
 	CreatedAt   string `json:"created_at"`
 	// SharedModels counts the models this peer may see: every fed_visibility
-	// 'all' model plus its allowlist rows. Computed at list time so the
-	// Servers page needs no per-peer round-trips.
+	// 'all' model, the user-allowlist rows its owner is on, and the 'owner'
+	// rows its owner's backends carry. Computed at list time so the Servers
+	// page needs no per-peer round-trips.
 	SharedModels int `json:"shared_models"`
 	// Online is the live-channel flag the API layer stamps from the hub
 	// registry (list time). False on a standalone/spoke box: peers only
@@ -184,15 +185,22 @@ func scanPeer(row interface{ Scan(...any) error }, extra ...any) (*Peer, error) 
 
 // sharedModelsExpr counts what a peer may see; 'all' models are global, so
 // the same constant term rides every row — fine at homelab scale and it
-// keeps the count honest for both visibility modes. Both terms require the
-// servable filter (model AND backend enabled, cf. ListPublicModels): a
-// disabled model is not shareable, so counting it would overstate the
-// Servers page. Draining still counts — draining models stay servable.
+// keeps the count honest for every visibility mode. The allowlist term
+// resolves through the peer's OWNER user (ticket #21), and the 'owner' term
+// counts models whose backend fairness owner is the peer's owner. Both
+// terms require the servable filter (model AND backend enabled, cf.
+// ListPublicModels): a disabled model is not shareable, so counting it
+// would overstate the Servers page. Draining still counts — draining models
+// stay servable.
 const sharedModelsExpr = `(SELECT COUNT(*) FROM models m JOIN backends b ON b.id=m.backend_id
 		WHERE m.fed_visibility='all' AND m.enabled=1 AND b.enabled=1) +
 	(SELECT COUNT(*) FROM fed_allowlist fa JOIN models m ON m.id=fa.model_id
 		JOIN backends b ON b.id=m.backend_id
-		WHERE fa.peer_id = p.id AND m.enabled=1 AND b.enabled=1)`
+		WHERE fa.user_id = p.owner_user_id AND m.fed_visibility='allowlist'
+			AND m.enabled=1 AND b.enabled=1) +
+	(SELECT COUNT(*) FROM models m JOIN backends b ON b.id=m.backend_id
+		WHERE m.fed_visibility='owner' AND m.enabled=1 AND b.enabled=1
+			AND b.owner_user_id IS NOT NULL AND b.owner_user_id = p.owner_user_id)`
 
 func CreatePeer(db *sql.DB, name string, ownerUserID int64) (*Peer, string, error) {
 	plain, hash, err := auth.GenerateServerToken()
@@ -374,35 +382,39 @@ func TouchPeer(db *sql.DB, id int64, lastSeen, version string) error {
 // ---------------------------------------------------------------- model sharing
 
 // FedVisibility values: off shares nothing (default), all shares with every
-// peer, allowlist shares with the fed_allowlist peers only.
+// peer, allowlist shares with the fed_allowlist USERS' peers (a spoke may
+// use the model iff its owner user is listed — ticket #21), owner shares
+// only with the backend's fairness owner (ticket #12): that account's
+// relays may pull the model, nobody else.
 const (
 	FedVisOff       = "off"
 	FedVisAll       = "all"
 	FedVisAllowlist = "allowlist"
+	FedVisOwner     = "owner"
 )
 
 // SetModelFedVisibility writes the per-model sharing switch and, for
-// 'allowlist', replaces the peer allowlist wholesale. peerIDs must be
-// existing peers (the whole call is one tx, so a bad id leaves nothing
+// 'allowlist', replaces the user allowlist wholesale. userIDs must be
+// existing users (the whole call is one tx, so a bad id leaves nothing
 // half-written). Passing a non-allowlist visibility clears the list.
-func SetModelFedVisibility(db *sql.DB, modelID int64, visibility string, peerIDs []int64) error {
+func SetModelFedVisibility(db *sql.DB, modelID int64, visibility string, userIDs []int64) error {
 	switch visibility {
-	case FedVisOff, FedVisAll, FedVisAllowlist:
+	case FedVisOff, FedVisAll, FedVisAllowlist, FedVisOwner:
 	default:
-		return fmt.Errorf("%w: fed_visibility must be off, all or allowlist", ErrFedConfig)
+		return fmt.Errorf("%w: fed_visibility must be off, all, allowlist or owner", ErrFedConfig)
 	}
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if err := setModelFedVisibilityTx(tx, modelID, visibility, peerIDs); err != nil {
+	if err := setModelFedVisibilityTx(tx, modelID, visibility, userIDs); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
-func setModelFedVisibilityTx(tx *sql.Tx, modelID int64, visibility string, peerIDs []int64) error {
+func setModelFedVisibilityTx(tx *sql.Tx, modelID int64, visibility string, userIDs []int64) error {
 	res, err := tx.Exec(`UPDATE models SET fed_visibility=? WHERE id=?`, visibility, modelID)
 	if err != nil {
 		return err
@@ -414,18 +426,18 @@ func setModelFedVisibilityTx(tx *sql.Tx, modelID int64, visibility string, peerI
 		return err
 	}
 	if visibility == FedVisAllowlist {
-		uniq := slices.Clone(peerIDs)
+		uniq := slices.Clone(userIDs)
 		slices.Sort(uniq)
 		uniq = slices.Compact(uniq)
-		for _, pid := range uniq {
+		for _, uid := range uniq {
 			var one int
-			if err := tx.QueryRow(`SELECT 1 FROM peers WHERE id=?`, pid).Scan(&one); errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("%w: peer %d does not exist", ErrNotFound, pid)
+			if err := tx.QueryRow(`SELECT 1 FROM users WHERE id=?`, uid).Scan(&one); errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("%w: user %d does not exist", ErrNotFound, uid)
 			} else if err != nil {
 				return err
 			}
-			if _, err := tx.Exec(`INSERT INTO fed_allowlist(model_id, peer_id) VALUES(?,?)`,
-				modelID, pid); err != nil {
+			if _, err := tx.Exec(`INSERT INTO fed_allowlist(model_id, user_id) VALUES(?,?)`,
+				modelID, uid); err != nil {
 				return err
 			}
 		}
@@ -433,8 +445,8 @@ func setModelFedVisibilityTx(tx *sql.Tx, modelID int64, visibility string, peerI
 	return nil
 }
 
-// ModelFedAllowlist returns the peer ids a model is shared with (the
-// allowlist side; empty for 'off'/'all').
+// ModelFedAllowlist returns the user ids a model is shared with (the
+// allowlist side; empty for 'off'/'all'/'owner').
 func ModelFedAllowlist(db *sql.DB, modelID int64) ([]int64, error) {
 	return modelFedAllowlistTx(db, modelID)
 }
@@ -444,7 +456,7 @@ func ModelFedAllowlist(db *sql.DB, modelID int64) ([]int64, error) {
 func modelFedAllowlistTx(q interface {
 	Query(string, ...any) (*sql.Rows, error)
 }, modelID int64) ([]int64, error) {
-	rows, err := q.Query(`SELECT peer_id FROM fed_allowlist WHERE model_id=? ORDER BY peer_id`, modelID)
+	rows, err := q.Query(`SELECT user_id FROM fed_allowlist WHERE model_id=? ORDER BY user_id`, modelID)
 	if err != nil {
 		return nil, err
 	}
@@ -461,7 +473,15 @@ func modelFedAllowlistTx(q interface {
 }
 
 // SharedWithPeer reports whether peerID may use modelID under the sharing
-// rules — the check task 2's hub side runs before serving a peer request.
+// rules — the check task 2's hub side runs before serving a peer request,
+// and the spoke's LocalOnly gate reuses it with peer id 0 (no peers row
+// exists for 0, so both list modes are false there — a forged 'off' or
+// allowlist request from the hub cannot sneak through).
+//
+// Ticket #21: the allowlist names USERS, and a peer passes it through its
+// owner ('share with these accounts' relays'); 'owner' shares only with
+// the backend's fairness owner — a backend without one shares with nobody
+// (fail-closed, same direction as 'off').
 func SharedWithPeer(db *sql.DB, modelID, peerID int64) (bool, error) {
 	var vis string
 	err := db.QueryRow(`SELECT fed_visibility FROM models WHERE id=?`, modelID).Scan(&vis)
@@ -476,8 +496,20 @@ func SharedWithPeer(db *sql.DB, modelID, peerID int64) (bool, error) {
 		return true, nil
 	case FedVisAllowlist:
 		var one int
-		err := db.QueryRow(`SELECT 1 FROM fed_allowlist WHERE model_id=? AND peer_id=?`,
-			modelID, peerID).Scan(&one)
+		err := db.QueryRow(`SELECT 1 FROM fed_allowlist fa
+			JOIN peers p ON p.owner_user_id = fa.user_id
+			WHERE fa.model_id=? AND p.id=?`, modelID, peerID).Scan(&one)
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return err == nil, err
+	case FedVisOwner:
+		var one int
+		err := db.QueryRow(`SELECT 1 FROM models m
+			JOIN backends b ON b.id = m.backend_id
+			JOIN peers p ON p.id = ?
+			WHERE m.id = ? AND b.owner_user_id IS NOT NULL
+				AND b.owner_user_id = p.owner_user_id`, peerID, modelID).Scan(&one)
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, nil
 		}

@@ -663,9 +663,9 @@ tr.sub-row > td {
   margin-left: 6px;
 }
 
-/* Peer allowlist picker in the model metrics row: compact, sits where an
+/* User allowlist picker in the model metrics row: compact, sits where an
    inline editor would. */
-.fed-peer-select {
+.fed-user-select {
   min-width: 170px;
   font-size: 12px;
   padding: 2px 4px;

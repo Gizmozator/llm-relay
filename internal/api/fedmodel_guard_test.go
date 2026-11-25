@@ -79,7 +79,7 @@ func TestFederatedModelEditGuard(t *testing.T) {
 		`{"bench_tok_per_s":10}`,
 		`{"bench_pp_tok_per_s":100}`,
 		`{"fed_visibility":"all"}`,
-		`{"fed_visibility":"allowlist","fed_peer_ids":[1]}`,
+		`{"fed_visibility":"allowlist","fed_user_ids":[1]}`,
 		// enabled does not license the rest of the patch.
 		`{"enabled":false,"name":"renamed"}`,
 		// A bogus value on a federated row is still the federated refusal.

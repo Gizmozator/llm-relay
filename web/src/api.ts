@@ -166,7 +166,7 @@ export type ModelPatch = Partial<{
   fed_visibility: FedVisibility;
   /** Replaces the allowlist wholesale; only accepted together with
    *  fed_visibility 'allowlist' (server rule). */
-  fed_peer_ids: number[];
+  fed_user_ids: number[];
 }>;
 
 export interface CatalogModel {
@@ -189,11 +189,11 @@ export interface CatalogModel {
   bench_tok_per_s: number;
   bench_pp_tok_per_s: number;
   bench_at: string;
-  /** Federation sharing switch ('off' | 'all' | 'allowlist'); fed_peer_ids
-   *  is the allowlist side (peer ids, empty unless fed_visibility is
-   *  'allowlist'). */
+  /** Federation sharing switch ('off' | 'all' | 'allowlist' | 'owner');
+   *  fed_user_ids is the allowlist side (user ids, empty unless
+   *  fed_visibility is 'allowlist'). */
   fed_visibility: FedVisibility;
-  fed_peer_ids: number[];
+  fed_user_ids: number[];
 }
 
 /** Result of POST /api/admin/models/{id}/benchmark. The prefill pass can
@@ -322,8 +322,9 @@ export interface FedPeer {
   last_seen: string;
   version: string;
   created_at: string;
-  /** Models this peer may see: every fed_visibility 'all' model + its
-   *  allowlist rows (computed server-side at list time). */
+  /** Models this peer may see: every fed_visibility 'all' model, the
+   *  user-allowlist rows its owner is on, and the 'owner' rows its owner's
+   *  backends carry (computed server-side at list time). */
   shared_models: number;
   online: boolean;
 }
@@ -399,10 +400,12 @@ export type FedMyStats =
   | { role: 'standalone' };
 
 /** Per-model federation sharing switch; mirrors the store CHECK: 'off'
- *  (default) | 'all' | 'allowlist' (fed_peer_ids names this instance's
- *  peers; on a spoke allowlist is effectively off — a spoke shares only
- *  'all', it has no peer table of its own). */
-export const FED_VISIBILITIES = ['off', 'all', 'allowlist'] as const;
+ *  (default) | 'all' | 'allowlist' (fed_user_ids names USERS; a spoke may
+ *  use the model when its OWNER user is listed — ticket #21) | 'owner'
+ *  (shared only with the backend's fairness owner: that account's relays
+ *  may pull it). On a spoke allowlist and owner are effectively off — a
+ *  spoke shares only 'all', it has no peer table of its own. */
+export const FED_VISIBILITIES = ['off', 'all', 'allowlist', 'owner'] as const;
 export type FedVisibility = (typeof FED_VISIBILITIES)[number];
 
 /** Canonical synthetic-backend predicate: mirrors the store's SQL rule

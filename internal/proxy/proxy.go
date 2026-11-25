@@ -242,9 +242,9 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request, endpoint string
 	// requesting peer's id; the spoke keys on LocalOnly with peer id 0 —
 	// the hub's own traffic arrives with OriginPeer=0 (a spoke has no peer
 	// rows), and SharedWithPeer(model, 0) is exactly the spoke's semantics:
-	// 'all' → true, 'allowlist' → no rows for peer 0 → false, 'off' →
-	// false. Without the LocalOnly arm a compromised hub could name an
-	// 'off' model in a req frame and get it served. Not shared → 403 with
+	// 'all' → true, 'allowlist'/'owner' → no peers row for peer 0 → false,
+	// 'off' → false. Without the LocalOnly arm a compromised hub could name
+	// an 'off' model in a req frame and get it served. Not shared → 403 with
 	// a clear body; for a group, invisible members are dropped before
 	// ranking (the catalog only advertises visible ones, so an invisible
 	// pick means a stale or forged request).

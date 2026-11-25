@@ -341,6 +341,10 @@ type FedGroupMember struct {
 	ModelID       int64
 	BaseURL       string
 	FedVisibility string
+	// BackendOwner is the member's backend fairness owner (ticket #12),
+	// nil when unowned — the 'owner' sharing mode compares it against the
+	// peer's owner (ticket #21).
+	BackendOwner *int64
 }
 
 // ResolveFedMember maps a group member name to a model row id: local
@@ -583,18 +587,25 @@ func ListSpokeShareable(db *sql.DB) ([]CatalogShareableModel, error) {
 	return out, rows.Err()
 }
 
-// ListHubShareable lists the hub's own models visible to one peer: 'all'
-// plus this peer's allowlist rows. Internal (group-member) rows count: the
-// group carries them to the spoke, and the spoke maps members by name.
+// ListHubShareable lists the hub's own models visible to one peer: 'all',
+// plus the peer's allowlist rows (the peer passes the list through its
+// OWNER user — ticket #21), plus 'owner' rows whose backend is owned by
+// the peer's owner. Internal (group-member) rows count: the group carries
+// them to the spoke, and the spoke maps members by name.
 // Synthetic backends are excluded — the hub relays spoke catalogs from
 // memory, never re-materializes them into its own push.
 func ListHubShareable(db *sql.DB, peerID int64) ([]CatalogShareableModel, error) {
 	rows, err := db.Query(`SELECT `+catalogModelCols+` FROM models m
 		JOIN backends b ON b.id=m.backend_id
 		WHERE m.enabled=1 AND b.enabled=1 AND NOT (`+syntheticWhereB+`) AND (
-			m.fed_visibility='all' OR (m.fed_visibility='allowlist' AND
-				EXISTS (SELECT 1 FROM fed_allowlist fa WHERE fa.model_id=m.id AND fa.peer_id=?)))
-		ORDER BY m.name`, peerID)
+			m.fed_visibility='all'
+			OR (m.fed_visibility='allowlist' AND EXISTS (
+				SELECT 1 FROM fed_allowlist fa JOIN peers p ON p.owner_user_id=fa.user_id
+				WHERE fa.model_id=m.id AND p.id=?))
+			OR (m.fed_visibility='owner' AND EXISTS (
+				SELECT 1 FROM peers p WHERE p.id=? AND p.owner_user_id IS NOT NULL
+					AND p.owner_user_id=b.owner_user_id)))
+		ORDER BY m.name`, peerID, peerID)
 	if err != nil {
 		return nil, err
 	}
@@ -624,7 +635,7 @@ type CatalogGroup struct {
 // groups are excluded: this instance is a hub, any federated rows are
 // stale leftovers.
 func ListHubGroups(db *sql.DB) ([]CatalogGroup, error) {
-	rows, err := db.Query(`SELECT g.name, m.name, gm.weight, m.id, b.base_url, m.fed_visibility
+	rows, err := db.Query(`SELECT g.name, m.name, gm.weight, m.id, b.base_url, m.fed_visibility, b.owner_user_id
 		FROM model_groups g
 		JOIN model_group_members gm ON gm.group_id=g.id
 		JOIN models m ON m.id=gm.model_id
@@ -641,7 +652,8 @@ func ListHubGroups(db *sql.DB) ([]CatalogGroup, error) {
 		var gname, mname, burl, vis string
 		var w float64
 		var modelID int64
-		if err := rows.Scan(&gname, &mname, &w, &modelID, &burl, &vis); err != nil {
+		var owner sql.NullInt64
+		if err := rows.Scan(&gname, &mname, &w, &modelID, &burl, &vis, &owner); err != nil {
 			return nil, err
 		}
 		i, ok := idx[gname]
@@ -650,19 +662,36 @@ func ListHubGroups(db *sql.DB) ([]CatalogGroup, error) {
 			out = append(out, CatalogGroup{Name: gname})
 			i = idx[gname]
 		}
+		var ownerPtr *int64
+		if owner.Valid {
+			ownerPtr = &owner.Int64
+		}
 		out[i].Members = append(out[i].Members, FedGroupMember{
 			ModelName: mname, Weight: w, ModelID: modelID,
-			BaseURL: burl, FedVisibility: vis,
+			BaseURL: burl, FedVisibility: vis, BackendOwner: ownerPtr,
 		})
 	}
 	return out, rows.Err()
 }
 
-// AllowlistModelIDs lists the model ids on peerID's allowlist in one query
-// (the in-memory group-visibility filter's only DB need besides
-// ListHubGroups).
-func AllowlistModelIDs(db *sql.DB, peerID int64) (map[int64]bool, error) {
-	rows, err := db.Query(`SELECT model_id FROM fed_allowlist WHERE peer_id=?`, peerID)
+// PeerSharedModelIDs lists, in one query, the model ids a peer may use
+// beyond the unconditional 'all' set: allowlist rows matching the peer's
+// OWNER user plus 'owner' rows whose backend owner is the peer's owner
+// (ticket #21). This is the in-memory group-visibility filter's only DB
+// need besides ListHubGroups. A peer id with no peers row (the spoke-side
+// LocalOnly check uses 0) matches nothing.
+func PeerSharedModelIDs(db *sql.DB, peerID int64) (map[int64]bool, error) {
+	rows, err := db.Query(`
+		SELECT m.id FROM models m
+		JOIN peers p ON p.id=?
+		JOIN fed_allowlist fa ON fa.user_id = p.owner_user_id AND fa.model_id = m.id
+		WHERE m.fed_visibility='allowlist'
+		UNION
+		SELECT m.id FROM models m
+		JOIN backends b ON b.id=m.backend_id
+		JOIN peers p ON p.id=?
+		WHERE m.fed_visibility='owner' AND b.owner_user_id IS NOT NULL
+			AND b.owner_user_id = p.owner_user_id`, peerID, peerID)
 	if err != nil {
 		return nil, err
 	}

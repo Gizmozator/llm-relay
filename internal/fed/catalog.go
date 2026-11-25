@@ -138,12 +138,13 @@ func (cc *catalogCtl) pushHubCatalog(peerID int64) {
 }
 
 // groupVisibility preloads what the group filter needs for one peer (the
-// allowlist membership set) so member visibility is evaluated in memory:
-// the per-member query version was O(peers×groups×members) queries per
-// push, ListHubGroups already carries each member's backend and
-// fed_visibility for exactly this reason.
+// models shared to it beyond 'all': user-allowlist matches through the
+// peer's owner plus 'owner' rows it owns — ticket #21) so member
+// visibility is evaluated in memory: the per-member query version was
+// O(peers×groups×members) queries per push, ListHubGroups already carries
+// each member's backend and fed_visibility for exactly this reason.
 func (cc *catalogCtl) groupVisibility(peerID int64) (map[int64]bool, error) {
-	return store.AllowlistModelIDs(cc.db, peerID)
+	return store.PeerSharedModelIDs(cc.db, peerID)
 }
 
 // visibleGroups filters a hub group down to the members peerID may see
@@ -170,7 +171,9 @@ func visibleGroups(groups []store.CatalogGroup, peerID int64, allow map[int64]bo
 // memberVisible answers whether the group member is visible to peerID from
 // the data ListHubGroups already carried: a materialized row (synthetic
 // backend) is visible to everyone but its origin; a local row needs the
-// sharing rules, allowlist membership resolved from the preloaded set.
+// sharing rules, with the allowlist and owner resolutions preloaded in the
+// shared set (both were resolved by PeerSharedModelIDs through the peer's
+// owner).
 func memberVisible(mem store.FedGroupMember, peerID int64, allow map[int64]bool) bool {
 	if kind, origin, syn := store.SyntheticBaseURL(mem.BaseURL); syn {
 		return kind == store.FedSchemePeer && origin != peerID
@@ -178,7 +181,7 @@ func memberVisible(mem store.FedGroupMember, peerID int64, allow map[int64]bool)
 	switch mem.FedVisibility {
 	case store.FedVisAll:
 		return true
-	case store.FedVisAllowlist:
+	case store.FedVisAllowlist, store.FedVisOwner:
 		return allow[mem.ModelID]
 	}
 	return false

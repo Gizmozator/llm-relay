@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"llm-relay/internal/auth"
 	"llm-relay/internal/fed"
 	"llm-relay/internal/store"
 
@@ -108,19 +109,26 @@ func chatBody(model string) []byte {
 // A1 (HIGH): OriginPeer is receiver-derived. A spoke (peer C) that claims
 // another peer's id on a Req frame must NOT inherit that peer's sharing
 // rights: the hub re-labels the frame with C, and the model shared only
-// with B stays forbidden.
+// with B's OWNER user (ticket #21 allowlist semantics) stays forbidden.
+// C is enrolled under a different user so the deny is about the forged
+// origin, not a shared owner.
 func TestForgedOriginPeerDenied(t *testing.T) {
 	hub := newRelay(t, "hub")
 	hub.becomeHub()
 	_, tokB := hub.enroll("spoke-b")
-	_, tokC := hub.enroll("spoke-c")
+	hash, _ := auth.HashPassword("x")
+	mallory, err := store.CreateUser(hub.db, "mallory", "", hash, "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, tokC := hub.enrollAs("spoke-c", mallory.ID)
 	_ = tokB
 	hub.serveConnect()
 	peerB := mustPeerID(t, hub.db, "spoke-b")
 
 	hub.shareLocal("b-only", "hub")
 	if err := store.SetModelFedVisibility(hub.db, mustModelID(t, hub.db, "b-only"),
-		store.FedVisAllowlist, []int64{peerB}); err != nil {
+		store.FedVisAllowlist, []int64{hub.uid}); err != nil {
 		t.Fatal(err)
 	}
 	hub.shareLocal("open", "hub")

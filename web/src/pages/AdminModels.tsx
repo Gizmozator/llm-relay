@@ -26,14 +26,15 @@ const PRICE_FIELDS = [
 ] as const;
 
 // Display labels for the Share dropdown. The stored/wire value stays 'off'
-// (the store CHECK-constrains fed_visibility to off|all|allowlist), but the
-// UI shows 'local' so the option reads as a sharing scope (local / allowlist
-// / all) instead of an on/off toggle. Display only — the <option value> and
-// every PATCH payload still carry the raw enum.
+// (the store CHECK-constrains fed_visibility to off|all|allowlist|owner),
+// but the UI shows 'local' so the option reads as a sharing scope (local /
+// allowlist / owner only / all) instead of an on/off toggle. Display only —
+// the <option value> and every PATCH payload still carry the raw enum.
 const FED_VISIBILITY_LABELS: Record<FedVisibility, string> = {
   off: 'local',
   all: 'all',
   allowlist: 'allowlist',
+  owner: 'owner only',
 };
 
 export default function AdminModelsPage() {
@@ -65,7 +66,9 @@ export default function AdminModelsPage() {
   // in the Servers section.
   const backends = useLoad(() => api.backends().then((r) => r.backends), []);
   const fedRole = useLoad(() => api.fedRole(), []);
-  const peers = useLoad(() => api.adminPeers().then((r) => r.peers), []);
+  // The allowlist picker names USERS (ticket #21): a spoke may use a model
+  // when its owner is listed, so the list is accounts, not spokes.
+  const users = useLoad(() => api.users().then((r) => r.users), []);
   const syntheticBackends = useMemo(
     () => (backends.data ?? []).filter((b) => isSyntheticBackendUrl(b.base_url)),
     [backends.data],
@@ -82,15 +85,15 @@ export default function AdminModelsPage() {
   // row is treated as synthetic-locked — rendering editable controls on a
   // possibly-materialized row is worse than locking a local one for a beat.
   const isSynthetic = (m: CatalogModel) => backends.data === null || syntheticBackendIds.has(m.backend_id);
-  // On a spoke an allowlist shares nothing (a spoke has no peer table of its
-  // own — the catalog rule), so the option needs an honest tooltip there.
-  // Framed as “who can use it in the federation” to contrast with the
-  // Visibility column (“who can see it on this relay”) — the two dropdowns
-  // must not read as duplicates.
+  // On a spoke an allowlist or owner-only share sends nothing (a spoke has
+  // no peer table of its own — the catalog rule), so the option needs an
+  // honest tooltip there. Framed as “who can use it in the federation” to
+  // contrast with the Visibility column (“who can see it on this relay”) —
+  // the two dropdowns must not read as duplicates.
   const fedShareTitle =
     fedRole.data?.role === 'spoke'
-      ? 'Who can use it in the federation — local: not shared; all: shared with the hub; allowlist: effectively local on a spoke (only “all” is pushed)'
-      : 'Who can use it in the federation — local: not shared; all: every peer; allowlist: the selected peers only';
+      ? 'Who can use it in the federation — local: not shared; all: shared with the hub; allowlist / owner only: effectively local on a spoke (only “all” is pushed)'
+      : 'Who can use it in the federation — local: not shared; all: every peer; allowlist: the selected users’ relays; owner only: the backend owner’s relays';
   const [showGroupAdd, setShowGroupAdd] = useState(false);
   // Id of the group whose member editor is open; the group itself is looked
   // up from the fresh list so a reload never edits a stale copy.
@@ -228,13 +231,13 @@ export default function AdminModelsPage() {
         model <em>on this relay</em> (<code>public</code> = listed on <code>/v1/models</code>{' '}
         and the dashboard; <code>internal</code> = hidden from the catalog but still directly
         requestable); Share is who can use it <em>in the federation</em> (<code>local</code> =
-        not shared; <code>allowlist</code> = the selected peers; <code>all</code> = the hub and
-        every peer).
+        not shared; <code>allowlist</code> = the selected users’ relays; <code>owner only</code>
+        = the backend owner’s relays; <code>all</code> = the hub and every peer).
       </p>
 
       {/* Auxiliary loads fail visibly, and each degrades honestly: no
           backend list → every row stays synthetic-locked; no role → Share
-          controls hidden; no peers → the allowlist picker shows the error
+          controls hidden; no users → the allowlist picker shows the error
           instead of an empty list. */}
       {backends.error && (
         <Banner>Backend list unavailable — model rows stay locked (federation state unknown): {backends.error}</Banner>
@@ -242,8 +245,8 @@ export default function AdminModelsPage() {
       {fedRole.error && (
         <Banner>Federation role unavailable — Share controls hidden: {fedRole.error}</Banner>
       )}
-      {peers.error && (
-        <Banner>Peer list unavailable — allowlist editing disabled: {peers.error}</Banner>
+      {users.error && (
+        <Banner>User list unavailable — allowlist editing disabled: {users.error}</Banner>
       )}
 
       {models.loading && !models.data ? (
@@ -462,27 +465,27 @@ export default function AdminModelsPage() {
                             </span>
                           )}
                           {!isSynthetic(m) && m.fed_visibility === 'allowlist' && (
-                            <span className="metric" title="Ctrl/⌘-click to select the peers this model is shared with">
-                              <span className="metric-label">Peers</span>
-                              {peers.error ? (
-                                <span className="tag err" title={peers.error}>peers unavailable</span>
-                              ) : (peers.data ?? []).length === 0 ? (
-                                <span className="dim">no peers enrolled</span>
+                            <span className="metric" title="Ctrl/⌘-click to select the users whose relays may use this model">
+                              <span className="metric-label">Users</span>
+                              {users.error ? (
+                                <span className="tag err" title={users.error}>users unavailable</span>
+                              ) : (users.data ?? []).length === 0 ? (
+                                <span className="dim">no users</span>
                               ) : (
                                 <select
-                                  className="input fed-peer-select"
+                                  className="input fed-user-select"
                                   multiple
                                   size={3}
-                                  aria-label={`Peer allowlist of ${m.name}`}
-                                  value={m.fed_peer_ids.map(String)}
+                                  aria-label={`User allowlist of ${m.name}`}
+                                  value={m.fed_user_ids.map(String)}
                                   onChange={(e) => {
                                     const ids = Array.from(e.target.selectedOptions).map((o) => Number(o.value));
-                                    void patch(m.id, { fed_visibility: 'allowlist', fed_peer_ids: ids });
+                                    void patch(m.id, { fed_visibility: 'allowlist', fed_user_ids: ids });
                                   }}
                                 >
-                                  {(peers.data ?? []).map((p) => (
-                                    <option key={p.id} value={String(p.id)}>
-                                      {p.name} ({p.owner_name})
+                                  {(users.data ?? []).map((u) => (
+                                    <option key={u.id} value={String(u.id)}>
+                                      {u.display_name || u.username}
                                     </option>
                                   ))}
                                 </select>

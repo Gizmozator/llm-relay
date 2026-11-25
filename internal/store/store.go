@@ -555,18 +555,19 @@ type Model struct {
 	BenchTokPerS     float64 `json:"bench_tok_per_s"`
 	BenchPPTokPerS   float64 `json:"bench_pp_tok_per_s"`
 	BenchAt          string  `json:"bench_at"`
-	// FedVisibility: 'off' | 'all' | 'allowlist' (federation sharing switch,
-	// plan 2026-11-22-relay-federation). FedPeerIDs is the allowlist side:
-	// peer ids when FedVisibility=="allowlist", empty otherwise.
+	// FedVisibility: 'off' | 'all' | 'allowlist' | 'owner' (federation sharing
+	// switch, plan 2026-11-22-relay-federation; ticket #21 widened it).
+	// FedUserIDs is the allowlist side: user ids when FedVisibility==
+	// "allowlist", empty otherwise (a spoke passes the list through its owner).
 	FedVisibility string  `json:"fed_visibility"`
-	FedPeerIDs    []int64 `json:"fed_peer_ids"`
+	FedUserIDs    []int64 `json:"fed_user_ids"`
 }
 
 const modelCols = `m.id, m.backend_id, b.name, m.name, m.upstream_model, m.visibility, m.enabled,
 	m.price_in, m.price_out, m.price_cache_read, m.price_cache_write,
 	m.context_length, m.concurrency_limit, m.busy_threshold_pct, m.bench_tok_per_s,
 	m.bench_pp_tok_per_s, COALESCE(m.bench_at,''), m.fed_visibility,
-	COALESCE((SELECT GROUP_CONCAT(fa.peer_id) FROM fed_allowlist fa WHERE fa.model_id=m.id), '')`
+	COALESCE((SELECT GROUP_CONCAT(fa.user_id) FROM fed_allowlist fa WHERE fa.model_id=m.id), '')`
 
 // backendJoinCols is backendCols qualified for joins where backends is b.
 const backendJoinCols = `b.id, b.name, b.base_url, COALESCE(b.api_key,''), b.enabled, b.draining,
@@ -588,16 +589,16 @@ func scanModel(row interface{ Scan(...any) error }) (*Model, error) {
 // other. finalize applies the int→bool conversions after a successful Scan.
 func modelScanTargets(m *Model) (targets []any, finalize func()) {
 	var en int
-	var fedPeers string
+	var fedUsers string
 	targets = []any{
 		&m.ID, &m.BackendID, &m.BackendName, &m.Name, &m.UpstreamModel, &m.Visibility, &en,
 		&m.PriceIn, &m.PriceOut, &m.PriceCacheRead, &m.PriceCacheWrite,
 		&m.ContextLength, &m.ConcurrencyLimit, &m.BusyThresholdPct, &m.BenchTokPerS,
-		&m.BenchPPTokPerS, &m.BenchAt, &m.FedVisibility, &fedPeers,
+		&m.BenchPPTokPerS, &m.BenchAt, &m.FedVisibility, &fedUsers,
 	}
 	finalize = func() {
 		m.Enabled = en != 0
-		m.FedPeerIDs = parseIDList(fedPeers)
+		m.FedUserIDs = parseIDList(fedUsers)
 	}
 	return targets, finalize
 }
@@ -1005,7 +1006,7 @@ type ModelPatch struct {
 	BenchTokPerS     *float64
 	BenchPPTokPerS   *float64
 	FedVisibility    string
-	FedPeerIDs       *[]int64
+	FedUserIDs       *[]int64
 }
 
 // UpdateModelPatch applies a whole admin PATCH in ONE transaction: the
@@ -1037,13 +1038,13 @@ func UpdateModelPatch(db *sql.DB, id int64, p ModelPatch) (*Model, error) {
 		// PATCH semantics for the allowlist pair: an unmentioned list does
 		// not change, so switching to allowlist without naming one keeps the
 		// stored list (it may still hold the previous allowlist). Switching
-		// to off/all clears it on purpose: those modes share with
-		// nobody/everybody, so a stale list would be a lie the UI could
-		// later re-apply.
+		// to off/all/owner clears it on purpose: those modes share with
+		// nobody/everybody/the backend owner, so a stale list would be a lie
+		// the UI could later re-apply.
 		var ids []int64
 		switch {
-		case p.FedPeerIDs != nil:
-			ids = *p.FedPeerIDs
+		case p.FedUserIDs != nil:
+			ids = *p.FedUserIDs
 		case p.FedVisibility == FedVisAllowlist:
 			if ids, err = modelFedAllowlistTx(tx, id); err != nil {
 				return nil, err

@@ -174,7 +174,10 @@ is a hub). **Share** is a per-model switch on the admin **Models** page and is
 about *who can use the model in the federation* — a different question from
 **Visibility** (who can see it on *this* relay): `local` (stored `off`) shares
 nothing, `all` shares it with the hub and every peer, `allowlist` shares it with
-the selected peers only (on a spoke, effectively local — only `all` is pushed).
+the relays owned by the selected **users** (a spoke may use the model when its
+owner is listed), and `owner only` shares it with the backend owner's relays
+only (see the backend Owner field). On a spoke, `allowlist` and `owner only` are
+effectively local — only `all` is pushed.
 Nothing leaves the box until you opt a model in. Quickstart: hub → *My keys →
 Server token* → spoke → *Admin → Federation → spoke + hub URL + token* → spoke
 *Models* → set the models to share to `all`.

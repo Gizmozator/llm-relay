@@ -64,8 +64,8 @@ Proxy requests may carry `X-Session-Id: <string>`; without it the relay derives 
 - `POST /api/admin/backends/{id}/models` — `{"model_ids":["halogen-qwen3.8-flash-next"]}` → `201 {"created":[{"id":3,"name":"halogen-qwen3.8-flash-next","upstream_model":"halogen-qwen3.8-flash-next"}]}` (skips already-present ids)
 
 ### Admin — models (public catalog)
-- `GET /api/admin/models` → `{"models":[{"id":1,"name":"halogen","backend_id":1,"backend_name":"halogen","upstream_model":"halogen-qwen3.8-flash-next","visibility":"public","enabled":true,"price_in":100,"price_out":200,"price_cache_read":10,"price_cache_write":0,"context_length":262144,"concurrency_limit":4,"busy_threshold_pct":80,"bench_tok_per_s":41.2,"bench_pp_tok_per_s":1850.4,"bench_at":"...|","fed_visibility":"off","fed_peer_ids":[]}]}`
-- `PATCH /api/admin/models/{id}` — any of `{"name","enabled","visibility","price_in","price_out","price_cache_read","price_cache_write","context_length","concurrency_limit","busy_threshold_pct","bench_tok_per_s","bench_pp_tok_per_s","fed_visibility","fed_peer_ids"}` → model object. `visibility` is `"public"` (listed on `/v1/models`) or `"internal"` (hidden from the catalog but still directly requestable); group members are forced `internal` by the store on every membership edit. `bench_tok_per_s`/`bench_pp_tok_per_s` (float ≥0) set the generation/prompt-processing speed manually and clear `bench_at` (configured value, not a measured benchmark). `busy_threshold_pct` (0–10000, else `400`) is the mean-busy % at which the agent surfaces report `busy`; `0` = default 80, values over 100 require that many parallel streams (300 = busy from 3 concurrent). New models are created with `80`. **Federated (materialized) rows** — models on a synthetic `peer://`/`hub://` backend, mirroring a peer's catalog — are **read-only**: any PATCH body is refused with `400 "cannot edit a federated model's settings - managed by the peer"` and nothing is written — including `{"enabled":…}` (a per-model disable would not survive the next catalog push, which re-enables the row) and even `{}` (there is no writable field to mention). The durable kill switches are the peer/backend disable in the Servers section.
+- `GET /api/admin/models` → `{"models":[{"id":1,"name":"halogen","backend_id":1,"backend_name":"halogen","upstream_model":"halogen-qwen3.8-flash-next","visibility":"public","enabled":true,"price_in":100,"price_out":200,"price_cache_read":10,"price_cache_write":0,"context_length":262144,"concurrency_limit":4,"busy_threshold_pct":80,"bench_tok_per_s":41.2,"bench_pp_tok_per_s":1850.4,"bench_at":"...|","fed_visibility":"off","fed_user_ids":[]}]}`
+- `PATCH /api/admin/models/{id}` — any of `{"name","enabled","visibility","price_in","price_out","price_cache_read","price_cache_write","context_length","concurrency_limit","busy_threshold_pct","bench_tok_per_s","bench_pp_tok_per_s","fed_visibility","fed_user_ids"}` → model object. `visibility` is `"public"` (listed on `/v1/models`) or `"internal"` (hidden from the catalog but still directly requestable); group members are forced `internal` by the store on every membership edit. `bench_tok_per_s`/`bench_pp_tok_per_s` (float ≥0) set the generation/prompt-processing speed manually and clear `bench_at` (configured value, not a measured benchmark). `busy_threshold_pct` (0–10000, else `400`) is the mean-busy % at which the agent surfaces report `busy`; `0` = default 80, values over 100 require that many parallel streams (300 = busy from 3 concurrent). New models are created with `80`. **Federated (materialized) rows** — models on a synthetic `peer://`/`hub://` backend, mirroring a peer's catalog — are **read-only**: any PATCH body is refused with `400 "cannot edit a federated model's settings - managed by the peer"` and nothing is written — including `{"enabled":…}` (a per-model disable would not survive the next catalog push, which re-enables the row) and even `{}` (there is no writable field to mention). The durable kill switches are the peer/backend disable in the Servers section.
 - `POST /api/admin/models/{id}/benchmark` — runs two timed **streaming** calls against the upstream. Decode pass (TG): natural-prose prompt; speed = completion tokens over first→last token, so speculative/MTP decoding is measured at realistic acceptance rates. Prefill pass (PP): ~10k-token randomized filler prompt (shrunk to ¾ of `context_length` when that is smaller), `max_tokens=1`; speed = `prompt_tokens` over request→first token (prefill completes before the first token is emitted). May take minutes; `409` while another benchmark runs; `400` for a federated (materialized) model — its "upstream" is a peer relay, not an engine. → `{"bench_tok_per_s":41.2,"completion_tokens":700,"seconds":17.0,"bench_pp_tok_per_s":1850.4,"prompt_tokens":9876,"pp_seconds":5.3,"bench_at":"..."}`. A failed prefill pass never voids the decode result: TG is stored, the previous PP value is kept, and the response carries `"pp_error":"..."` instead of the `bench_pp_tok_per_s`/`prompt_tokens`/`pp_seconds` fields.
 - `DELETE /api/admin/models/{id}` → `204`; a federated (materialized) row is refused with `400 "cannot delete a federated model - remove the peer that shares it"` — the row is the peer's mirror, so removal means dropping the peer (Servers page), not deleting the row here.
 
@@ -104,7 +104,7 @@ Self-service (JWT, any user — the **My Keys** surface):
 - `DELETE /api/peers/{id}` (own only, else `404`) → `204`; a live channel is dropped too (`1008 "deleted"`)
 
 Admin (JWT, admin — the **Servers** page):
-- `GET /api/admin/peers` → all peers, same shape plus `online` (live WS channel at this hub; always `false` on a standalone/spoke box) (owner name + `shared_models` = models visible to that peer: every `fed_visibility:"all"` model + its allowlist rows)
+- `GET /api/admin/peers` → all peers, same shape plus `online` (live WS channel at this hub; always `false` on a standalone/spoke box) (owner name + `shared_models` = models visible to that peer: every `fed_visibility:"all"` model, the user-allowlist rows its owner is on, and the `"owner"` rows its owner's backends carry)
 - `POST /api/admin/peers/{id}/rotate` → `{"token":"fed-…"}` · `PATCH /api/admin/peers/{id}` — `{"enabled":true|false}` → peer object (disable is the incident lever: it drops the peer's live channel at once, `1008 "disabled"`) · `DELETE /api/admin/peers/{id}` → `204` (live channel dropped too) — all `404` on unknown id
 
 Federation settings (JWT, admin):
@@ -196,15 +196,18 @@ Federation stats (plan task 4; fairness scope per plan
 
 Per-model sharing switch (rides the model object everywhere the admin API
 returns models): `PATCH /api/admin/models/{id}` gains `fed_visibility`
-(`"off"` default | `"all"` | `"allowlist"`, else `400`) and `fed_peer_ids`
-(replaces the peer allowlist wholesale; only accepted together with
-`fed_visibility:"allowlist"`, unknown peer id → `400`); on a federated
-(materialized) row the pair is peer-owned, so mentioning it is a `400` (see the
-`PATCH /api/admin/models/{id}` line). PATCH semantics:
-switching to `"allowlist"` without `fed_peer_ids` keeps the stored list;
-switching to `"off"`/`"all"` clears it (those modes share with
-nobody/everybody). The model row surfaces both as `fed_visibility` +
-`fed_peer_ids`.
+(`"off"` default | `"all"` | `"allowlist"` | `"owner"`, else `400`) and
+`fed_user_ids` (replaces the **user** allowlist wholesale — a spoke may use
+the model when its *owner user* is listed; only accepted together with
+`fed_visibility:"allowlist"`, unknown user id → `400`). `"owner"` shares the
+model only with its backend's fairness owner: that account's relays may pull
+it, nobody else (a backend without an owner shares with nobody). On a
+federated (materialized) row the pair is peer-owned, so mentioning it is a
+`400` (see the `PATCH /api/admin/models/{id}` line). PATCH semantics:
+switching to `"allowlist"` without `fed_user_ids` keeps the stored list;
+switching to `"off"`/`"all"`/`"owner"` clears it (those modes share with
+nobody/everybody/the backend owner). The model row surfaces both as
+`fed_visibility` + `fed_user_ids`.
 
 **TLS gate (both channels, plan 2026-11-24-remote-tls-v1):** the three
 machine-channel endpoints — `/federation/v1/connect`, `/federation/v1/ping`
@@ -285,7 +288,9 @@ Remote-backend channel (relay port, `rb-` tokens, plan
   debounced (**500 ms**) local change to model sharing/enabled, backend
   enabled or groups. Only `fed_visibility='all'` models are shared from a
   spoke: `allowlist` names rows of *this* instance's peer table, which a
-  spoke does not have — it shares nobody.
+  spoke does not have, and `owner` resolves against the hub's view of the
+  spoke owner — neither means anything at the hub, so the spoke shares
+  nobody by name.
 - The hub answers each spoke with the **merged catalog**: every other
   spoke's relayed entries (one frame per origin, `origin=<peer id>`)
   first, then its own frame (`origin:0`) — its `SharedWithPeer`-filtered
@@ -369,8 +374,9 @@ a role transition just purged.
   the hub uses local engines only (never re-forwards), applies its own
   stored backend keys, meters the request as a `served` row (see Metering
   below), and enforces **its own** sharing rules on the hub's requests
-  too: a model with `fed_visibility='off'` (or `allowlist` — a spoke shares
-  nobody by name) answers the same `403`, so a compromised hub cannot name
+  too: a model with `fed_visibility='off'` (or `allowlist`/`owner` — neither
+  resolves on a spoke, which shares nobody by name) answers the same `403`,
+  so a compromised hub cannot name
   a private spoke model into serving. Only `/v1/*` paths are
   served over the tunnel.
 

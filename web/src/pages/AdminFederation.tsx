@@ -185,8 +185,10 @@ export default function AdminFederationPage() {
 
   // Mirror the server's SharedModels SQL (store.sharedModelsExpr): servable
   // (model AND backend enabled) and never a synthetic backend — the hub does
-  // not re-share materialized peer rows. Keeps the expanded list honest
-  // against the Shared count.
+  // not re-share materialized peer rows. The allowlist names users and the
+  // peer passes it through its owner; 'owner' rows need the backend's
+  // fairness owner to be the peer's owner (ticket #21). Keeps the expanded
+  // list honest against the Shared count.
   const sharedNames = (p: FedPeer, list: CatalogModel[]) =>
     list.filter((m) => {
       const b = backendById.get(m.backend_id);
@@ -195,7 +197,8 @@ export default function AdminFederationPage() {
         !!b?.enabled &&
         !isSyntheticBackendUrl(b.base_url) &&
         (m.fed_visibility === 'all' ||
-          (m.fed_visibility === 'allowlist' && m.fed_peer_ids.includes(p.id)))
+          (m.fed_visibility === 'allowlist' && m.fed_user_ids.includes(p.owner_user_id)) ||
+          (m.fed_visibility === 'owner' && b.owner_user_id === p.owner_user_id))
       );
     });
 

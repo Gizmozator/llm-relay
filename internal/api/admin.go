@@ -492,11 +492,12 @@ func (s *Server) AdminUpdateModel(w http.ResponseWriter, r *http.Request, c *aut
 		BusyThresholdPct *int64   `json:"busy_threshold_pct"`
 		BenchTokPerS     *float64 `json:"bench_tok_per_s"`
 		BenchPPTokPerS   *float64 `json:"bench_pp_tok_per_s"`
-		// Federation sharing (plan 2026-11-22-relay-federation): the
-		// per-model switch + allowlist. fed_peer_ids replaces the allowlist
-		// wholesale and must ride together with fed_visibility="allowlist".
+		// Federation sharing (plan 2026-11-22-relay-federation; ticket #21):
+		// the per-model switch + user allowlist. fed_user_ids replaces the
+		// allowlist wholesale and must ride together with
+		// fed_visibility="allowlist".
 		FedVisibility *string  `json:"fed_visibility"`
-		FedPeerIDs    *[]int64 `json:"fed_peer_ids"`
+		FedUserIDs    *[]int64 `json:"fed_user_ids"`
 	}
 	if err := decode(r, &in); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON")
@@ -563,8 +564,9 @@ func (s *Server) AdminUpdateModel(w http.ResponseWriter, r *http.Request, c *aut
 	fedVis := ""
 	if in.FedVisibility != nil {
 		fedVis = *in.FedVisibility
-		if fedVis != store.FedVisOff && fedVis != store.FedVisAll && fedVis != store.FedVisAllowlist {
-			writeErr(w, http.StatusBadRequest, "fed_visibility must be off, all or allowlist")
+		if fedVis != store.FedVisOff && fedVis != store.FedVisAll &&
+			fedVis != store.FedVisAllowlist && fedVis != store.FedVisOwner {
+			writeErr(w, http.StatusBadRequest, "fed_visibility must be off, all, allowlist or owner")
 			return
 		}
 	}
@@ -572,18 +574,18 @@ func (s *Server) AdminUpdateModel(w http.ResponseWriter, r *http.Request, c *aut
 	// mode; requiring both in one call keeps the pair unambiguous (an
 	// id-only PATCH could silently retarget a list the model no longer
 	// uses).
-	if in.FedPeerIDs != nil && fedVis != store.FedVisAllowlist {
-		writeErr(w, http.StatusBadRequest, "fed_peer_ids requires fed_visibility=allowlist")
+	if in.FedUserIDs != nil && fedVis != store.FedVisAllowlist {
+		writeErr(w, http.StatusBadRequest, "fed_user_ids requires fed_visibility=allowlist")
 		return
 	}
-	// Unknown peer ids are a client mistake, not a 404 about the model:
+	// Unknown user ids are a client mistake, not a 404 about the model:
 	// check them here so the store's ErrNotFound stays model-only.
-	if in.FedPeerIDs != nil {
-		for _, pid := range *in.FedPeerIDs {
-			if _, perr := store.PeerByID(s.DB, pid); errors.Is(perr, store.ErrNotFound) {
-				writeErr(w, http.StatusBadRequest, "fed_peer_ids contains an unknown peer")
+	if in.FedUserIDs != nil {
+		for _, uid := range *in.FedUserIDs {
+			if _, uerr := store.UserByID(s.DB, uid); errors.Is(uerr, store.ErrNotFound) {
+				writeErr(w, http.StatusBadRequest, "fed_user_ids contains an unknown user")
 				return
-			} else if perr != nil {
+			} else if uerr != nil {
 				writeErr(w, http.StatusInternalServerError, "internal error")
 				return
 			}
@@ -607,10 +609,10 @@ func (s *Server) AdminUpdateModel(w http.ResponseWriter, r *http.Request, c *aut
 		BenchPPTokPerS:   in.BenchPPTokPerS,
 		// The fed pair was validated up front; the store keeps the PATCH
 		// semantics: an unmentioned list does not change (switching to
-		// allowlist keeps the stored one), switching to off/all clears it
-		// on purpose.
+		// allowlist keeps the stored one), switching to off/all/owner
+		// clears it on purpose.
 		FedVisibility: fedVis,
-		FedPeerIDs:    in.FedPeerIDs,
+		FedUserIDs:    in.FedUserIDs,
 	})
 	switch {
 	case errors.Is(err, store.ErrNotFound):
@@ -622,7 +624,7 @@ func (s *Server) AdminUpdateModel(w http.ResponseWriter, r *http.Request, c *aut
 		// string: the store error text is an internal detail.
 		writeErr(w, http.StatusConflict, "model name already in use")
 	case errors.Is(err, store.ErrFedConfig):
-		writeErr(w, http.StatusBadRequest, "fed_visibility must be off, all or allowlist")
+		writeErr(w, http.StatusBadRequest, "fed_visibility must be off, all, allowlist or owner")
 	case err != nil:
 		writeErr(w, http.StatusInternalServerError, "model update failed")
 	default:
