@@ -48,3 +48,44 @@ func TestComputeHostileTokensNeverNegative(t *testing.T) {
 		t.Errorf("total overflowed: %+v", c)
 	}
 }
+
+// ApplyMultiplier must not undo mulDiv's saturation invariant. A raw
+// int64(float64(v)*mult) is implementation-defined once the product leaves
+// int64 range (amd64 → MinInt64, a large negative cost), and NaN slips past a
+// `mult <= 0 || mult == 1` guard. The admin API allows multipliers up to 1000,
+// so a saturated component × a big multiplier is reachable with the same
+// hostile token counts mulDiv guards against.
+func TestApplyMultiplierNeverNegative(t *testing.T) {
+	// Saturated components × the max admin multiplier.
+	c := Costs{In: maxComponent, Out: maxComponent, Cache: maxComponent, Write: maxComponent}
+	c.Total = c.In + c.Out + c.Cache + c.Write
+	ApplyMultiplier(&c, 1000)
+	for name, v := range map[string]int64{"In": c.In, "Out": c.Out, "Cache": c.Cache, "Write": c.Write} {
+		if v < 0 {
+			t.Errorf("mult=1000 produced negative %s: %d", name, v)
+		}
+		if v > maxComponent {
+			t.Errorf("mult=1000 %s=%d exceeds maxComponent %d", name, v, maxComponent)
+		}
+	}
+	if c.Total < 0 || c.Total > 4*maxComponent {
+		t.Errorf("mult=1000 total out of range: %d", c.Total)
+	}
+
+	// A large-but-in-range component must saturate, not wrap.
+	d := Costs{In: maxComponent, Total: maxComponent}
+	ApplyMultiplier(&d, 8)
+	if d.In != maxComponent {
+		t.Errorf("saturated component × 8 = %d, want maxComponent %d", d.In, maxComponent)
+	}
+
+	// Non-finite multipliers leave the cost untouched (NaN would otherwise
+	// pass the <=0/==1 guard and int64(NaN) is garbage).
+	for _, bad := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		e := Costs{In: 100, Out: 200, Cache: 300, Write: 400, Total: 1000}
+		ApplyMultiplier(&e, bad)
+		if e.In != 100 || e.Out != 200 || e.Cache != 300 || e.Write != 400 || e.Total != 1000 {
+			t.Errorf("non-finite mult %v mutated cost: %+v", bad, e)
+		}
+	}
+}

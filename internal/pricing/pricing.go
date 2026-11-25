@@ -98,10 +98,32 @@ func Compute(m *store.Model, tok Tokens) Costs {
 // ApplyMultiplier scales a cost snapshot by a user's price multiplier
 // (round-half-up per component). Multiplier 1 — the default — changes nothing.
 func ApplyMultiplier(c *Costs, mult float64) {
-	if mult <= 0 || mult == 1 {
+	if math.IsNaN(mult) || math.IsInf(mult, 0) || mult <= 0 || mult == 1 {
 		return // 0 = unset (partial user rows); never zero out a cost
 	}
-	scale := func(v *int64) { *v = int64(float64(*v)*mult + 0.5) }
+	// Scale in the float domain and clamp each component to maxComponent
+	// (mulDiv's saturation ceiling) BEFORE converting back to int64. A raw
+	// int64(float64(v)*mult) is implementation-defined once the product
+	// leaves int64 range — on amd64 it yields MinInt64, a large NEGATIVE
+	// cost, exactly the corrupted-ledger outcome mulDiv guards against. The
+	// admin API allows multipliers up to 1000, so a saturated (or merely
+	// large) component times a big multiplier is reachable with the same
+	// hostile token counts mulDiv was written for. NaN is rejected above:
+	// `mult <= 0 || mult == 1` is false for NaN, so it would otherwise slip
+	// through and int64(NaN) is garbage. Four components each clamped to
+	// maxComponent still sum into Total without overflow (maxComponent is
+	// MaxInt64/4 by construction), so Total needs no clamp.
+	scale := func(v *int64) {
+		f := float64(*v) * mult
+		switch {
+		case !(f > 0): // NaN or underflow to 0
+			*v = 0
+		case f >= maxComponent:
+			*v = maxComponent
+		default:
+			*v = int64(f + 0.5)
+		}
+	}
 	scale(&c.In)
 	scale(&c.Out)
 	scale(&c.Cache)
