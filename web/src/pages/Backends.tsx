@@ -209,6 +209,7 @@ export default function BackendsPage() {
       {remoteEditTarget && (
         <RemoteEditModal
           backend={remoteEditTarget}
+          users={users.data ?? []}
           onClose={() => setRemoteEditTarget(null)}
           onRenamed={() => {
             setRemoteEditTarget(null);
@@ -485,14 +486,20 @@ function RemoteCreateModal({
 
 function RemoteEditModal({
   backend,
+  users,
   onClose,
   onRenamed,
 }: {
   backend: Backend;
+  users: AdminUser[];
   onClose: () => void;
   onRenamed: () => void;
 }) {
   const [name, setName] = useState(backend.name);
+  // Fairness-credit owner (ticket #19): the plain modal's selector, same
+  // semantics — '' = no owner, else the user id. The API already accepts
+  // owner_user_id on remote rows; only base_url edits are refused there.
+  const [owner, setOwner] = useState<string>(backend.owner_user_id != null ? String(backend.owner_user_id) : '');
   const [token, setToken] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -502,7 +509,13 @@ function RemoteEditModal({
     setBusy(true);
     setError(null);
     try {
-      await api.patchBackend(backend.id, { name: name.trim() });
+      // Always send the owner so the selector is authoritative: a number
+      // sets it, null clears it (0 on the wire) — same contract as the
+      // plain modal.
+      await api.patchBackend(backend.id, {
+        name: name.trim(),
+        owner_user_id: owner === '' ? 0 : Number(owner),
+      });
       onRenamed();
     } catch (err: unknown) {
       setError(errMsg(err));
@@ -532,6 +545,21 @@ function RemoteEditModal({
         <Field label="Name">
           <input className="input" value={name} onChange={(e) => setName(e.target.value)} />
         </Field>
+        <Field label="Owner">
+          <select className="input" value={owner} onChange={(e) => setOwner(e.target.value)}>
+            <option value="">No owner (usage uncredited)</option>
+            {users.map((u) => (
+              <option key={u.id} value={u.id}>
+                {u.display_name || u.username}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <p className="dim">
+          The owner is credited in the federation fairness ledger when this remote box’s own
+          hardware serves a peer — the hub-side mirror of a spoke’s capacity crediting its
+          peer owner.
+        </p>
         <div className="modal-actions">
           <button
             type="button"
@@ -546,7 +574,7 @@ function RemoteEditModal({
             Close
           </button>
           <button type="submit" className="btn primary" disabled={busy || !name.trim()}>
-            {busy ? 'Saving…' : 'Save name'}
+            {busy ? 'Saving…' : 'Save'}
           </button>
         </div>
       </form>
