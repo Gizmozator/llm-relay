@@ -131,6 +131,17 @@ export default function Layout() {
                 {ver.version}
               </span>
             )}
+            {/* Server mode at a glance (hub / spoke / standalone) — the same
+                shared role state the sidebar uses, so it updates live when an
+                admin saves a new role on the Federation page. */}
+            {fed.role && (
+              <span
+                className={`fed-chip fed-chip-${fed.role}`}
+                title="Federation role — set on the admin Federation page"
+              >
+                {fed.role}
+              </span>
+            )}
             <span className="username">{user.display_name || user.username}</span>
             <span className="role-badge">{user.role}</span>
             <button className="btn small" onClick={() => setShowAccount(true)}>

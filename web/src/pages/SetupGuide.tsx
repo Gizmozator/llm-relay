@@ -129,19 +129,23 @@ export default function SetupGuidePage() {
         <h3>3. Choose what to share</h3>
         <p className="dim">
           Nothing is shared until you opt in: on your relay’s{' '}
-          <code className="mono">Admin → Models</code> page set each model’s
-          federation switch to <code className="mono">all</code>. Paid or
-          private backends simply stay <code className="mono">local</code> and
-          never appear on the hub.
+          <code className="mono">Admin → Models</code> page set each model’s{' '}
+          <b>Share</b> to <code className="mono">all</code>. Paid or private
+          models simply stay <code className="mono">local</code> and never
+          appear on the hub. (The <code className="mono">allowlist</code> and{' '}
+          <code className="mono">owner only</code> choices share with selected
+          relays only — on a spoke they are effectively local: only{' '}
+          <code className="mono">all</code> is pushed to the hub.)
         </p>
       </section>
 
       <section className="panel">
-        <h3>Or: start a full relay server (dashboard, many models)</h3>
+        <h3>No relay on that machine yet? Option A — full relay server</h3>
         <p className="dim">
-          If that machine does not run a relay yet and you want the full server
-          — a dashboard, several models, your own users and keys — start it with
-          these two files. Fill in <code className="mono">.env</code>, run{' '}
+          Steps 1–3 assume the machine already runs its own relay. If it does
+          not and you want the full server — a dashboard, several models, your
+          own users and keys — start it with these two files. Fill in{' '}
+          <code className="mono">.env</code>, run{' '}
           <code className="mono">docker compose up -d</code>, open the dashboard
           on port 8081, then come back to steps 2–3 above to point it at this
           hub.
@@ -151,16 +155,30 @@ export default function SetupGuidePage() {
       </section>
 
       <section className="panel">
-        <h3>Or: connect a bare engine box (no relay, no dashboard)</h3>
+        <h3>Option B — bare engine box (remote backend, no dashboard)</h3>
         <p className="dim">
-          If that machine does not run a relay yet and you only want to expose a
-          single engine to <b>this</b> relay: have an admin create a{' '}
+          If that machine runs just one engine and you only want to expose it to{' '}
+          <b>this</b> relay: have an admin create a{' '}
           <b>remote backend</b> on the <Link to="/admin/backends">Backends</Link>{' '}
           page — the <code className="mono">rb-…</code> connect token is shown
           once. Put these two files next to each other, fill in the engine and
           that token, then <code className="mono">docker compose up -d</code>.
           The box dials in over one outbound channel (no inbound ports), shows up
           as a backend here, and its models arrive via <b>Sync models</b>.
+        </p>
+        <p className="dim">
+          The connector is the same <code className="mono">llm-relay</code>{' '}
+          binary in connector mode (<code className="mono">HEADLESS=true</code>):
+          it owns no state and serves no dashboard — everything it exposes
+          belongs to its relay. By default it binds no ports at all; to let this
+          box also act as its LAN’s gateway to the relay, uncomment{' '}
+          <code className="mono">PROXY_LISTEN=8080</code> in the{' '}
+          <code className="mono">.env</code> below — the connector then serves
+          a local <code className="mono">/v1</code> listener and forwards
+          clients over the channel (the relay authenticates each client’s{' '}
+          <code className="mono">sk-</code> key itself — no keys live on the
+          box). It is <b>not</b> a relay itself and cannot join the federation
+          as a spoke; for that, use option A.
         </p>
         <CodeBlock title="docker-compose.yml" text={composeRaw} />
         <CodeBlock title=".env" text={connectorEnv} />

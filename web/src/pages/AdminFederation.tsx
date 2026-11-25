@@ -340,7 +340,7 @@ export default function AdminFederationPage() {
               ) : models.error && !models.data ? (
                 <Banner>Could not load the model catalog: {models.error}</Banner>
               ) : shared.length === 0 ? (
-                <Empty label="Nothing shared yet — set a model’s federation switch to “all” on the Models page." />
+                <Empty label="Nothing shared yet — set a model’s Share to “all” on the Models page." />
               ) : (
                 <div>
                   {shared.map((m) => (

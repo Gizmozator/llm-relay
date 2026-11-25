@@ -386,7 +386,7 @@ on its own.
 
 | var | default | meaning |
 |---|---|---|
-| `HEADLESS` | `false` | connector mode: binds nothing, owns no state; when true the three vars below are **required** (missing = boot error) |
+| `HEADLESS` | `false` | connector mode: binds nothing (except the optional `PROXY_LISTEN` listener below), owns no state; when true the three vars below are **required** (missing = boot error) |
 | `RELAY_URL` | — **required** | the relay to dial in to (server root); **must be `https://`** — remote connections require TLS |
 | `RELAY_TOKEN` | — **required** | the `rb-…` connect token minted on the Backends page |
 | `RELAY_PIN` | — | the relay cert fingerprint (`sha256:…`) to pin when the relay uses a self-signed cert; empty verifies against the system CA store (a TLS-terminating proxy with a real cert) |
