@@ -311,7 +311,18 @@ func (m *Manager) transitFrame(fromPeer, origin int64, req *Req) {
 	// hub), so OriginPeer on the wire is decorative — cleared, not
 	// trusted. Attribution rides FedUser instead: the origin peer's owner
 	// name, which only the hub can stamp.
+	//
+	// Clear the spoke-supplied FedUser FIRST. fwd is a copy of the inbound
+	// frame, so if peerOwnerName fails (peer row deleted, transient DB
+	// error) leaving the field set would forward the requesting spoke's own
+	// string verbatim to the target — which stamps it as the consumer it
+	// bills/audits (serveFrame's spoke branch: fs.FedUser = req.FedUser).
+	// That lets a spoke forge the identity it is metered under. Clearing
+	// first means a failed lookup transits with an empty (honest "unknown")
+	// attribution rather than a forged one; we do not fail the request
+	// closed so a transient lookup blip cannot deny legitimate transit.
 	fwd.OriginPeer = 0
+	fwd.FedUser = ""
 	if name, err := m.peerOwnerName(fromPeer); err == nil {
 		fwd.FedUser = name
 	} else {
