@@ -82,6 +82,28 @@ func TestStoreEvictionBound(t *testing.T) {
 	}
 }
 
+// Eviction must leave headroom, not just one slot below the cap. If a sweep
+// freed only one slot, Allow would re-run the O(N) scan + O(N log N) sort on
+// EVERY new-key insert while the store sits pinned at the cap — the flood
+// latency collapse the package exists to prevent. Proof: the (cap+1)-th
+// distinct key trips a sweep that drops the store well below the cap (to the
+// ~90% low-water mark plus the new bucket), not to cap-1.
+func TestStoreEvictionHeadroom(t *testing.T) {
+	const cap = 100
+	s := NewStore(Rate{Rate: 1000, Burst: 1000}, cap)
+	now := time.Now()
+	for i := 0; i <= cap; i++ { // cap+1 distinct keys, same clock (none expire)
+		s.Allow(fmt.Sprintf("k%d", i), now)
+	}
+	n := s.Len()
+	if n > cap {
+		t.Fatalf("hard cap violated: %d > %d", n, cap)
+	}
+	if n >= cap {
+		t.Errorf("after over-cap insert size = %d; eviction must leave headroom well below cap %d", n, cap)
+	}
+}
+
 // Idle buckets (idle past the full-refill window, so they can no longer
 // hold credits) are swept on the next over-cap event.
 func TestStoreTTLExpiry(t *testing.T) {

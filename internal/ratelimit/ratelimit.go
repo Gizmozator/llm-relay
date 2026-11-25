@@ -70,8 +70,14 @@ type Store struct {
 }
 
 // NewStore builds a store for one tier's Rate. rate/burst <= 0 yields a
-// disabled store whose Allow always passes (tier off).
+// disabled store whose Allow always passes (tier off). A non-positive max
+// falls back to StoreMax: a zero/negative cap would make the eviction sweep
+// fire on the first insert and could panic the LRU slice bound (target < 0),
+// so an enabled store always has a sane hard bound. Mirrors NewFailureTracker.
 func NewStore(r Rate, max int) *Store {
+	if max <= 0 {
+		max = StoreMax
+	}
 	s := &Store{buckets: make(map[string]*bucket), rate: r.Rate, burst: r.Burst, max: max, on: r.enabled()}
 	if s.on {
 		// Full refill time: after this much idle a bucket is back at burst,
@@ -132,16 +138,33 @@ func (s *Store) Len() int {
 	return len(s.buckets)
 }
 
-// evictLocked sweeps expired buckets, then LRU-evicts down to max-1 so the
-// bucket the current call is about to create still fits: max stays a hard
-// bound. Caller holds s.mu.
+// evictLocked sweeps expired buckets, then LRU-evicts down to a low-water
+// mark so the bucket the current call is about to create still fits AND the
+// sweep amortizes. Caller holds s.mu.
 func (s *Store) evictLocked(now time.Time) {
 	for k, b := range s.buckets {
 		if now.Sub(b.last) > s.ttl {
 			delete(s.buckets, k)
 		}
 	}
-	if over := len(s.buckets) - s.max + 1; over > 0 {
+	if len(s.buckets) < s.max {
+		return // the TTL sweep already left room for the new bucket
+	}
+	// Still at/over cap after the TTL sweep: LRU-evict down to ~90% of max,
+	// NOT just one slot below it. Evicting a single slot would make Allow
+	// re-sweep on EVERY subsequent new-key insert while the store sits pinned
+	// at the cap — an O(N) map scan plus an O(N log N) sort of ~StoreMax keys
+	// under the mutex per request — so a unique-key flood (spoofed XFF, or
+	// many valid keys) collapses latency even though memory stays bounded:
+	// the "limiter that grows with the attack" the package doc forbids.
+	// Dropping ~10% amortizes one sweep across the next ~max/10 inserts.
+	// The target is capped at max-1 so the hard bound still holds for small
+	// max (where max/10 rounds to 0).
+	target := s.max - s.max/10
+	if target >= s.max {
+		target = s.max - 1
+	}
+	if over := len(s.buckets) - target; over > 0 {
 		all := make([]string, 0, len(s.buckets))
 		for k := range s.buckets {
 			all = append(all, k)
