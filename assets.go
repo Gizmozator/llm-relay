@@ -6,7 +6,10 @@ import "embed"
 
 // Web holds web/dist as built by `make web` (see Makefile). The built output
 // is committed (see the `!web/dist/` exception in .gitignore) so a fresh
-// clone can `go build` without a node toolchain.
+// clone can `go build` without a node toolchain. `all:` includes any
+// dotfile/underscore file the build may emit (see web/.gitignore, which
+// documents this pattern as `go:embed all:web/dist`); without it go:embed
+// silently skips them.
 //
-//go:embed web/dist
+//go:embed all:web/dist
 var Web embed.FS

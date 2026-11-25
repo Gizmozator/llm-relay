@@ -264,6 +264,14 @@ a {
   border-color: var(--accent);
 }
 
+/* Keyboard focus must be visible (WCAG 2.4.7): the border-colour change above
+   is nearly imperceptible on --bg, so :focus-visible adds a real outline.
+   Pointer focus keeps the border-only treatment. */
+.input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 .input:disabled {
   opacity: 0.5;
 }
@@ -341,6 +349,14 @@ select.input {
   padding: 7px 13px;
   font: inherit;
   cursor: pointer;
+}
+
+/* base.css's .btn sets `outline: none` and this block does not override it, so
+   every dashboard button (.btn/.primary/.danger/.small) inherited no focus
+   ring. Restore a keyboard-visible outline (WCAG 2.4.7). */
+.btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .btn:hover:not(:disabled) {
