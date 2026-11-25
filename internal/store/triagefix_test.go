@@ -188,6 +188,44 @@ func TestGroupDepartureRestoresPrevVisibility(t *testing.T) {
 	}
 }
 
+// PurgeSynthetic (the startup / role-transition sweep) must restore a
+// federated group member's recorded pre-join visibility, NOT blanket-set
+// 'public'. A spoke's genuinely-internal local model absorbed by a federated
+// group must come back internal — a blanket 'public' would expose it to API
+// keys that could never see it, unrecoverably (the sibling restore paths,
+// DeleteFederatedGroupsNotIn and UpdateGroup, already honour prev_visibility).
+func TestPurgeSyntheticRestoresPrevVisibility(t *testing.T) {
+	d := migratedDB(t)
+	b, err := store.CreateBackend(d, "node-a", "http://127.0.0.1:1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hidden, err := store.CreateModel(d, b.ID, "up", "hidden-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateModelPatch(d, hidden.ID, store.ModelPatch{Visibility: ptr("internal")}); err != nil {
+		t.Fatal(err)
+	}
+	// Absorb the internal model into a federated group: prev_visibility is
+	// recorded as 'internal' and the model is (already) internal.
+	if err := store.UpsertFederatedGroup(d, "fed-grp", []int64{hidden.ID}, []float64{1}); err != nil {
+		t.Fatal(err)
+	}
+	// Leaving the federation must restore the recorded pre-join state.
+	if err := store.PurgeSynthetic(d); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.ModelByID(d, hidden.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Visibility != "internal" {
+		t.Errorf("PurgeSynthetic left an internal model as %q, want internal (visibility leak)",
+			got.Visibility)
+	}
+}
+
 // Item 28: enabling a group requires at least one ELIGIBLE member (model
 // and backend both enabled) — a group of disabled rows would be advertised
 // yet serve nothing.

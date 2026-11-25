@@ -165,12 +165,20 @@ func PurgeSynthetic(db *sql.DB) error {
 		return err
 	}
 	defer tx.Rollback()
-	// Members of federated groups return to public (mirror of
-	// DeleteFederatedGroupsNotIn): a spoke's local model absorbed by a
-	// federated group was flipped internal — leaving the federation must
-	// undo that, or the model stays invisible forever.
-	if _, err := tx.Exec(`UPDATE models SET visibility='public' WHERE id IN
-		(SELECT model_id FROM model_group_members WHERE group_id IN
+	// Members of federated groups get their recorded pre-join visibility back
+	// (the DeleteFederatedGroupsNotIn / UpdateGroup rule), NOT a blanket
+	// 'public'. A spoke's local model absorbed by a federated group was
+	// flipped internal with its prior state recorded in prev_visibility; a
+	// blanket 'public' here would expose a model that was originally internal
+	// to keys that could never see it, unrecoverably. prev_visibility is
+	// NOT NULL DEFAULT 'public', so members with no recorded prior state still
+	// return to public (the old behaviour) while genuinely-internal ones do
+	// not leak.
+	if _, err := tx.Exec(`UPDATE models SET visibility=(
+			SELECT gm.prev_visibility FROM model_group_members gm
+			WHERE gm.model_id=models.id AND gm.group_id IN
+				(SELECT id FROM model_groups WHERE federated=1))
+		WHERE id IN (SELECT model_id FROM model_group_members WHERE group_id IN
 			(SELECT id FROM model_groups WHERE federated=1))`); err != nil {
 		return err
 	}
