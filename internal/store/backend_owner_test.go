@@ -105,3 +105,57 @@ func TestBackendOwnerInvalidUser(t *testing.T) {
 		t.Errorf("SetBackendOwner(unknown backend) = %v, want ErrNotFound", err)
 	}
 }
+
+// A synthetic peer://<id> backend carries no owner_user_id of its own —
+// the ownership of federated hardware lives on the peers row. ListBackends
+// resolves the effective owner through it so the admin Backends Owner
+// column names the peer's owner instead of "—". A hub:// row (a spoke's
+// view of the hub) has no peers row and stays unowned.
+func TestListBackendsSyntheticOwner(t *testing.T) {
+	d := migratedDB(t)
+	alice, err := store.CreateUser(d, "alice", "", "hash", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _, err := store.CreatePeer(d, "spoke-a", alice.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateBackend(d, "federation: spoke-a", store.PeerBackendURL(p.ID), ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateBackend(d, "hub-side", store.FedHubBaseURL, ""); err != nil {
+		t.Fatal(err)
+	}
+	// An explicit owner still wins over the peer resolution (COALESCE order).
+	p2, _, err := store.CreatePeer(d, "spoke-b", alice.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob, err := store.CreateUser(d, "bob", "", "hash", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateBackendWithOwner(d, "federation: spoke-b",
+		store.PeerBackendURL(p2.ID), "", &bob.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	list, err := store.ListBackends(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]*store.Backend{}
+	for i := range list {
+		byName[list[i].Name] = &list[i]
+	}
+	if o := byName["federation: spoke-a"].OwnerUserID; o == nil || *o != alice.ID {
+		t.Errorf("synthetic backend owner = %v, want alice(%d) via the peer", o, alice.ID)
+	}
+	if o := byName["federation: spoke-b"].OwnerUserID; o == nil || *o != bob.ID {
+		t.Errorf("explicit owner overridden: %v, want bob(%d)", o, bob.ID)
+	}
+	if o := byName["hub-side"].OwnerUserID; o != nil {
+		t.Errorf("hub:// backend owner = %v, want nil (no peers row)", *o)
+	}
+}

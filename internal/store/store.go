@@ -433,8 +433,19 @@ func BackendByID(db *sql.DB, id int64) (*Backend, error) {
 }
 
 func ListBackends(db *sql.DB) ([]Backend, error) {
+	// The trailing column is the EFFECTIVE fairness owner: the explicit
+	// owner_user_id, or for a synthetic peer://<id> backend the peer's
+	// OWNER. Materialization never writes owner_user_id on the row — the
+	// ownership of federated hardware lives on the peers row (that is what
+	// the fairness ledger credits through) — so the admin Backends Owner
+	// column would otherwise show "—" for every federation backend.
+	// Display resolution only: no logic reads OwnerUserID off these rows
+	// (the fairness SQL resolves owners itself). hub:// rows (a spoke's
+	// view of the hub) have no peers row and stay unowned.
 	rows, err := db.Query(`SELECT ` + backendCols + `,
-		(SELECT COUNT(*) FROM models m WHERE m.backend_id = backends.id)
+		(SELECT COUNT(*) FROM models m WHERE m.backend_id = backends.id),
+		COALESCE(backends.owner_user_id,
+			(SELECT p.owner_user_id FROM peers p WHERE 'peer://'||p.id = backends.base_url))
 		FROM backends ORDER BY name`)
 	if err != nil {
 		return nil, err
@@ -444,11 +455,15 @@ func ListBackends(db *sql.DB) ([]Backend, error) {
 	for rows.Next() {
 		b := &Backend{}
 		targets, finalize := backendScanTargets(b)
-		// backendCols plus the trailing ModelCount subquery.
-		if err := rows.Scan(append(targets, &b.ModelCount)...); err != nil {
+		// backendCols plus the trailing ModelCount and effective-owner columns.
+		var effOwner sql.NullInt64
+		if err := rows.Scan(append(targets, &b.ModelCount, &effOwner)...); err != nil {
 			return nil, err
 		}
 		finalize()
+		if effOwner.Valid {
+			b.OwnerUserID = &effOwner.Int64
+		}
 		out = append(out, *b)
 	}
 	return out, rows.Err()
