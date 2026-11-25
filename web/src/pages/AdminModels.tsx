@@ -256,7 +256,7 @@ export default function AdminModelsPage() {
         </section>
       ) : (
         <section className="panel">
-          <div className="table-scroll">
+          <div className="table-scroll table-wrap">
             <table>
               <thead>
                 <tr>

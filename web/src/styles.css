@@ -433,6 +433,26 @@ select.input {
   min-width: 100%;
 }
 
+/* Reflow variant (ticket #20): the table fits its container at any width —
+   long cells (model names, upstream ids, badges, action buttons) wrap onto
+   multiple lines instead of forcing a horizontal scrollbar. Inline-edit
+   inputs may shrink below their intrinsic size (the size attribute only
+   sets the preferred width). */
+.table-scroll.table-wrap > table {
+  width: 100%;
+}
+
+.table-wrap th,
+.table-wrap td {
+  white-space: normal;
+  overflow-wrap: break-word;
+}
+
+.table-wrap .input-inline {
+  min-width: 0;
+  max-width: 100%;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
