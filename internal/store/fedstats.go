@@ -195,22 +195,41 @@ type FedLocalOnlyEntry struct {
 // or the ledger has entries. userID 0 = every user; otherwise only that
 // user's entry (empty whenever they have any federation row).
 func FedLocalOnlyUsers(db *sql.DB, since string, userID int64) ([]FedLocalOnlyEntry, error) {
-	// `f.user_id IS u.user_id` is the NULL-safe comparison (SQLite IS):
-	// usage_log.user_id is nullable, and = would silently match nothing
-	// against NULL and leak a fed-less orphan into the list while a fed
-	// row for the same unknown user exists.
-	where := `u.fed_direction = '' AND u.ts >= ? AND NOT EXISTS (
-			SELECT 1 FROM usage_log f
-			WHERE f.user_id IS u.user_id AND f.fed_direction != '' AND f.ts >= ?)`
-	args := []any{since, since}
+	// One pass over the window, grouped by account, keeping accounts that
+	// have local (unstamped) usage but NO federation rows. The "has local /
+	// has fed" decision is made inside the GROUP BY with conditional
+	// aggregation (HAVING), NOT a per-row correlated NOT EXISTS: the old
+	// shape ran the subquery once per local usage row, which on a real
+	// usage_log (tens of thousands of local rows) took ~30s and timed out
+	// the dashboard's stats call at the reverse proxy (504), while holding a
+	// connection from the 4-slot pool and stalling every other admin read.
+	//
+	// Grouping by COALESCE(user_id,0) keeps the NULL-safe semantics the old
+	// `f.user_id IS u.user_id` gave: anonymous (NULL user_id) local rows
+	// group together and are excluded together if any fed row also carries a
+	// NULL user_id. Safe against collision because users.id is AUTOINCREMENT
+	// (starts at 1, never 0), so the 0 bucket is exclusively the anonymous
+	// group. The sums count local rows only (CASE WHEN fed_direction
+	// = ''), matching the old outer WHERE fed_direction = '' filter.
+	where := `u.ts >= ?`
+	args := []any{since}
 	if userID != 0 {
 		where += ` AND u.user_id = ?`
 		args = append(args, userID)
 	}
-	rows, err := db.Query(`SELECT COALESCE(u.user_id,0), COALESCE(us.username,'(deleted user)'), `+fedCountAggs+`
+	rows, err := db.Query(`SELECT COALESCE(u.user_id,0), COALESCE(us.username,'(deleted user)'),
+			SUM(CASE WHEN u.fed_direction = '' THEN 1 ELSE 0 END),
+			COALESCE(SUM(CASE WHEN u.fed_direction = '' THEN prompt_tokens END),0),
+			COALESCE(SUM(CASE WHEN u.fed_direction = '' THEN completion_tokens END),0),
+			COALESCE(SUM(CASE WHEN u.fed_direction = '' THEN cached_tokens END),0),
+			COALESCE(SUM(CASE WHEN u.fed_direction = '' THEN cache_write_tokens END),0),
+			COALESCE(SUM(CASE WHEN u.fed_direction = '' THEN cost_total END),0)
 		FROM usage_log u LEFT JOIN users us ON us.id = u.user_id
 		WHERE `+where+`
-		GROUP BY COALESCE(u.user_id,0), us.username ORDER BY 2, 1`, args...)
+		GROUP BY COALESCE(u.user_id,0), us.username
+		HAVING SUM(CASE WHEN u.fed_direction = '' THEN 1 ELSE 0 END) > 0
+			AND SUM(CASE WHEN u.fed_direction != '' THEN 1 ELSE 0 END) = 0
+		ORDER BY 2, 1`, args...)
 	if err != nil {
 		return nil, err
 	}
