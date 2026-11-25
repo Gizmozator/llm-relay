@@ -42,7 +42,8 @@ Env reference: README **Remote backends** section + `.env.example`.
 4. **Back on the relay**: the Backends page shows the row **online** (health
    = the live connection). Use **Sync models** to discover what the engine
    serves — the probe rides the tunnel — then price and enable the models
-   as with any backend.
+   as with any backend. **Benchmark** rides it too: the timed streams
+   travel over the channel to the engine and back.
 
 Changing anything = edit the env, restart the connector. Rotating the token
 (*Edit → Rotate token*) kills the live connection immediately; put the new

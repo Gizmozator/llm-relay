@@ -385,7 +385,9 @@ with the key as bearer token.
 For self-hosted engines, the admin Models page has a **Benchmark** button per model:
 it measures generation speed (TG — decode of a natural prose prompt) and prompt-
 processing speed (PP — a ~10k-token randomized prompt, time to first token) against
-the upstream. The **Calc prices** calculator prefills both speeds from the last run;
+the upstream. A **remote backend** is benchmarked through its live channel, exactly
+like the probe — the tunnel carries the timed stream, so the numbers measure the
+engine, not a refused `remote://` dial. The **Calc prices** calculator prefills both speeds from the last run;
 enter the machine's power draw for generation and prompt processing plus the
 electricity price, and it derives cost-recovery prices (rounded up to 1 cent per 1M
 tokens, editable before applying).

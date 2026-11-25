@@ -683,9 +683,17 @@ type benchRun struct {
 	prompt, completion            int64
 }
 
+// errRemoteNotWired is the local wiring state (no remote registry attached),
+// distinct from an upstream failure: the handler maps it to 503, matching
+// AdminCreateRemoteBackend's answer for the same condition.
+var errRemoteNotWired = errors.New("remote backend support not wired")
+
 // benchStreamRun POSTs one streaming chat completion (the caller's body must
 // set stream and stream_options.include_usage) and times its token stream.
-func benchStreamRun(ctx context.Context, b *store.Backend, body map[string]any) (*benchRun, error) {
+// A remote:// backend has no dialable address: the run rides its live channel
+// through the same RoundTripper the tunneled probe uses, so the timer covers
+// the engine's stream exactly as an HTTP upstream's would.
+func (s *Server) benchStreamRun(ctx context.Context, b *store.Backend, body map[string]any) (*benchRun, error) {
 	buf, _ := json.Marshal(body)
 	r := &benchRun{start: time.Now()}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
@@ -697,7 +705,14 @@ func benchStreamRun(ctx context.Context, b *store.Backend, body map[string]any) 
 	if b.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+b.APIKey)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	client := http.DefaultClient
+	if _, isRemote := store.RemoteBackendID(b.BaseURL); isRemote {
+		if s.Remote == nil {
+			return nil, errRemoteNotWired
+		}
+		client = &http.Client{Transport: s.Remote}
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, errors.New("upstream request failed")
 	}
@@ -795,7 +810,7 @@ func (s *Server) AdminBenchmarkModel(w http.ResponseWriter, r *http.Request, c *
 	// accept nearly every draft token, inflating the measurement well past
 	// real-traffic speed. The request streams so the timer covers only
 	// first-token → last-token (decode time), not prefill.
-	tg, err := benchStreamRun(ctx, b, map[string]any{
+	tg, err := s.benchStreamRun(ctx, b, map[string]any{
 		"model": m.UpstreamModel,
 		"messages": []map[string]string{
 			{"role": "user", "content": "Write a detailed, original essay about how harbor cities changed when steam shipping replaced sailing ships. Discuss trade, migration, shipyard work and daily life, with concrete examples. Write in flowing prose without lists."},
@@ -806,6 +821,10 @@ func (s *Server) AdminBenchmarkModel(w http.ResponseWriter, r *http.Request, c *
 		"stream_options": map[string]any{"include_usage": true},
 	})
 	if err != nil {
+		if errors.Is(err, errRemoteNotWired) {
+			writeErr(w, http.StatusServiceUnavailable, err.Error())
+			return
+		}
 		writeErr(w, http.StatusBadGateway, err.Error())
 		return
 	}
@@ -831,7 +850,7 @@ func (s *Server) AdminBenchmarkModel(w http.ResponseWriter, r *http.Request, c *
 	if m.ContextLength > 0 && m.ContextLength < target*4/3 {
 		target = m.ContextLength * 3 / 4
 	}
-	pp, ppErr := benchStreamRun(ctx, b, map[string]any{
+	pp, ppErr := s.benchStreamRun(ctx, b, map[string]any{
 		"model":          m.UpstreamModel,
 		"messages":       []map[string]string{{"role": "user", "content": benchFillerWords(target)}},
 		"max_tokens":     1,
