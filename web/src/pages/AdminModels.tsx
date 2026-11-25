@@ -56,6 +56,18 @@ export default function AdminModelsPage() {
   const [benching, setBenching] = useState<number | null>(null);
   // Model whose price calculator dialog is open.
   const [calcFor, setCalcFor] = useState<CatalogModel | null>(null);
+  // Rows whose metrics line is expanded into editable inputs (ticket #20
+  // follow-up: the always-editable wall of number fields is hard to read;
+  // collapsed rows show a compact read-only summary instead). Synthetic
+  // rows have nothing to edit and never expand.
+  const [openRows, setOpenRows] = useState<Set<number>>(new Set());
+  const toggleRow = (id: number) =>
+    setOpenRows((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   // Model groups: the list drives the groups section AND the per-row group
   // badge (a model belongs to at most one group — the store rejects a
   // second membership with 409).
@@ -385,64 +397,77 @@ export default function AdminModelsPage() {
                     <tr className="sub-row">
                       <td colSpan={8}>
                         <div className="model-metrics">
-                          {PRICE_FIELDS.map((p) => (
-                            <span className="metric" key={p.key}>
-                              <span className="metric-label">
-                                {p.label} <span className="dim">{currency ? `${currency}/1M` : 'per 1M'}</span>
-                              </span>
-                              {isSynthetic(m) ? (
-                                <span className="mono">{microToPerM(m[p.key])}</span>
-                              ) : (
-                                <EditableNumber
-                                  display={microToPerM(m[p.key])}
-                                  ariaLabel={`${p.label} price of ${m.name}`}
-                                  onCommit={(n) => patch(m.id, { [p.key]: Math.round(n * 1e6) } as ModelPatch)}
-                                />
-                              )}
+                          {/* Details toggle (readability follow-up to #20):
+                              collapsed, the row shows one compact read-only
+                              summary; expanded, the editable inputs appear.
+                              Synthetic rows have nothing editable, so they
+                              never get the toggle and stay summarized. */}
+                          {!isSynthetic(m) && (
+                            <button
+                              className="btn small metrics-toggle"
+                              aria-expanded={openRows.has(m.id)}
+                              title={openRows.has(m.id) ? 'Hide the editable values' : 'Edit prices, context and speeds'}
+                              onClick={() => toggleRow(m.id)}
+                            >
+                              {openRows.has(m.id) ? '▾' : '▸'} details
+                            </button>
+                          )}
+                          {isSynthetic(m) || !openRows.has(m.id) ? (
+                            <span
+                              className="model-summary"
+                              title={`${currency ? `${currency}/1M` : 'Prices per 1M'} · context in tokens · speeds in tok/s · ${m.bench_at ? `benchmarked ${fmtDateTime(m.bench_at)}` : 'speeds set manually'}`}
+                            >
+                              in {microToPerM(m.price_in)} · out {microToPerM(m.price_out)} · cache{' '}
+                              {microToPerM(m.price_cache_read)}/{microToPerM(m.price_cache_write)} · ctx {m.context_length} · tg{' '}
+                              {m.bench_tok_per_s ? m.bench_tok_per_s.toFixed(1) : '0'} · pp{' '}
+                              {m.bench_pp_tok_per_s ? m.bench_pp_tok_per_s.toFixed(0) : '0'} tok/s
                             </span>
-                          ))}
-                          <span className="metric">
-                            <span className="metric-label">Context</span>
-                            {isSynthetic(m) ? (
-                              <span className="mono">{m.context_length}</span>
-                            ) : (
-                              <EditableNumber
-                                display={String(m.context_length)}
-                                ariaLabel={`Context length of ${m.name}`}
-                                onCommit={(n) => patch(m.id, { context_length: Math.round(n) })}
-                              />
-                            )}
-                          </span>
-                          <span
-                            className="metric"
-                            title={m.bench_at ? `Benchmarked ${fmtDateTime(m.bench_at)}` : 'Manual value'}
-                          >
-                            <span className="metric-label">TG tok/s</span>
-                            {isSynthetic(m) ? (
-                              <span className="mono">{m.bench_tok_per_s ? m.bench_tok_per_s.toFixed(1) : '0'}</span>
-                            ) : (
-                              <EditableNumber
-                                display={m.bench_tok_per_s ? m.bench_tok_per_s.toFixed(1) : '0'}
-                                ariaLabel={`Generation speed (tok/s) of ${m.name}`}
-                                onCommit={(n) => patch(m.id, { bench_tok_per_s: n })}
-                              />
-                            )}
-                          </span>
-                          <span
-                            className="metric"
-                            title={m.bench_at ? `Benchmarked ${fmtDateTime(m.bench_at)}` : 'Manual value'}
-                          >
-                            <span className="metric-label">PP tok/s</span>
-                            {isSynthetic(m) ? (
-                              <span className="mono">{m.bench_pp_tok_per_s ? m.bench_pp_tok_per_s.toFixed(0) : '0'}</span>
-                            ) : (
-                              <EditableNumber
-                                display={m.bench_pp_tok_per_s ? m.bench_pp_tok_per_s.toFixed(0) : '0'}
-                                ariaLabel={`Prompt-processing speed (tok/s) of ${m.name}`}
-                                onCommit={(n) => patch(m.id, { bench_pp_tok_per_s: n })}
-                              />
-                            )}
-                          </span>
+                          ) : (
+                            <>
+                              {PRICE_FIELDS.map((p) => (
+                                <span className="metric" key={p.key}>
+                                  <span className="metric-label">
+                                    {p.label} <span className="dim">{currency ? `${currency}/1M` : 'per 1M'}</span>
+                                  </span>
+                                  <EditableNumber
+                                    display={microToPerM(m[p.key])}
+                                    ariaLabel={`${p.label} price of ${m.name}`}
+                                    onCommit={(n) => patch(m.id, { [p.key]: Math.round(n * 1e6) } as ModelPatch)}
+                                  />
+                                </span>
+                              ))}
+                              <span className="metric">
+                                <span className="metric-label">Context</span>
+                                <EditableNumber
+                                  display={String(m.context_length)}
+                                  ariaLabel={`Context length of ${m.name}`}
+                                  onCommit={(n) => patch(m.id, { context_length: Math.round(n) })}
+                                />
+                              </span>
+                              <span
+                                className="metric"
+                                title={m.bench_at ? `Benchmarked ${fmtDateTime(m.bench_at)}` : 'Manual value'}
+                              >
+                                <span className="metric-label">TG tok/s</span>
+                                <EditableNumber
+                                  display={m.bench_tok_per_s ? m.bench_tok_per_s.toFixed(1) : '0'}
+                                  ariaLabel={`Generation speed (tok/s) of ${m.name}`}
+                                  onCommit={(n) => patch(m.id, { bench_tok_per_s: n })}
+                                />
+                              </span>
+                              <span
+                                className="metric"
+                                title={m.bench_at ? `Benchmarked ${fmtDateTime(m.bench_at)}` : 'Manual value'}
+                              >
+                                <span className="metric-label">PP tok/s</span>
+                                <EditableNumber
+                                  display={m.bench_pp_tok_per_s ? m.bench_pp_tok_per_s.toFixed(0) : '0'}
+                                  ariaLabel={`Prompt-processing speed (tok/s) of ${m.name}`}
+                                  onCommit={(n) => patch(m.id, { bench_pp_tok_per_s: n })}
+                                />
+                              </span>
+                            </>
+                          )}
                           {/* Share controls: hidden on synthetic rows (the
                               server ignores fed_visibility there — the
                               materialization scheme decides sharing) and
@@ -464,7 +489,7 @@ export default function AdminModelsPage() {
                               </select>
                             </span>
                           )}
-                          {!isSynthetic(m) && m.fed_visibility === 'allowlist' && (
+                          {openRows.has(m.id) && !isSynthetic(m) && m.fed_visibility === 'allowlist' && (
                             <span className="metric" title="Ctrl/⌘-click to select the users whose relays may use this model">
                               <span className="metric-label">Users</span>
                               {users.error ? (

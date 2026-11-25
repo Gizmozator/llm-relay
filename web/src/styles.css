@@ -591,6 +591,19 @@ tr.sub-row > td {
   white-space: nowrap;
 }
 
+/* Collapsed metrics line: one compact read-only summary per model row;
+   the editable inputs live behind the row's details toggle. */
+.model-summary {
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.metrics-toggle {
+  padding: 1px 8px;
+  font-size: 11px;
+}
+
 .model-metrics .metric-label {
   font-size: 11px;
   text-transform: uppercase;
