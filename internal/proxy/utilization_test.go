@@ -163,6 +163,57 @@ func TestUtilizationGroupPoolRows(t *testing.T) {
 	}
 }
 
+// A group pool whose ONLY accepting member is saturated must report "busy",
+// not "free". An enabled-but-offline member (dead backend) receives no
+// traffic, so its busy pct is ~0; if it is folded into the verdict it flips
+// allBusy=false and masks the saturated accepting member — the wrong answer
+// for an agent choosing where to delegate. The offline member must be excluded
+// from the verdict inputs.
+func TestUtilizationGroupIgnoresOfflineMember(t *testing.T) {
+	h := newHarness(t, agentUpstream())
+	yes := true
+	g, err := store.CreateGroup(h.db, "pool-mix")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m1, err := store.CreateModel(h.db, 1, "up-m1", "mix-one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// m2 lives on an ENABLED backend whose URL is dead → health probe fails →
+	// offline (but still "servable": enabled model on enabled backend).
+	dead, err := store.CreateBackend(h.db, "dead", "http://127.0.0.1:1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m2, err := store.CreateModel(h.db, dead.ID, "up-m2", "mix-two")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateGroup(h.db, g.ID, nil, &yes, []store.GroupMemberInput{
+		{ModelID: m1.ID, Position: 0}, {ModelID: m2.ID, Position: 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Saturate the accepting member: low threshold + a 2-minute stream.
+	thirty := int64(30)
+	if err := store.UpdateModelMeta(h.db, m1.ID, nil, nil, &thirty, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	flight := h.ph.Flight.EnterAt(proxy.Stream{UserID: 1, Model: "mix-one", ModelID: m1.ID},
+		time.Now().Add(-2*time.Minute))
+	defer h.ph.Flight.Leave(flight)
+
+	rows := utilNames(t, h, h.key)["pool-mix"]
+	if len(rows) != 1 {
+		t.Fatalf("pool-mix rows = %v, want one", rows)
+	}
+	if rows[0].Status != "busy" {
+		t.Errorf("pool-mix status = %q (pct %.1f), want busy — an offline member must not mask a saturated accepting member",
+			rows[0].Status, rows[0].UtilizationPct)
+	}
+}
+
 func TestUtilizationAdvertisedCatalogEdges(t *testing.T) {
 	h := newHarness(t, agentUpstream())
 	yes := true

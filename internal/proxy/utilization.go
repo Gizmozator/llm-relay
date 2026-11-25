@@ -214,16 +214,33 @@ func (h *Handler) Utilization(ctx context.Context, adminView bool) (map[string]a
 					continue // cannot take work: not part of the verdict
 				}
 				servable = true
+				// Reachability of THIS member: online and not draining. The
+				// busy verdict and the slot math must count only members that
+				// can actually take work. An enabled-but-offline (or draining)
+				// member receives no traffic, so its pct is ~share (≈0): left
+				// in memPct it flips allBusy=false, so a pool whose ONLY
+				// accepting member is saturated is reported "free" — the wrong
+				// answer for an agent deciding where to delegate. Its
+				// ConcurrencyLimit would also inflate `limit`, under-firing the
+				// poolActive>=limit busy signal. online/accepting still reflect
+				// every servable member (they drive the offline/draining
+				// status); only the verdict inputs and slot math are restricted
+				// to accepting members.
+				memOnline := status[mem.Backend.ID].Online
+				memAccepting := memOnline && !draining[mem.Backend.ID]
+				if memOnline {
+					online = true
+					if memAccepting {
+						accepting = true
+					}
+				}
+				if !memAccepting {
+					continue // cannot take work: not in the verdict or slot math
+				}
 				poolActive += active[mem.Model.ID]
 				limit += mem.Model.ConcurrencyLimit
 				if mem.Model.ConcurrencyLimit == 0 {
 					unknown = true
-				}
-				if status[mem.Backend.ID].Online {
-					online = true
-					if !draining[mem.Backend.ID] {
-						accepting = true
-					}
 				}
 				pct := 0.0
 				if mem.Model.Name != g.Name && !seenName[mem.Model.Name] {
@@ -240,12 +257,17 @@ func (h *Handler) Utilization(ctx context.Context, adminView bool) (map[string]a
 			if !servable {
 				continue // nothing servable: the catalog does not advertise it either
 			}
-			// The servable count is final now: every member carries its
-			// equal slice of the group-name busy (HRW spreads group
-			// sessions across them).
-			share := groupShare / float64(len(memPct))
-			for i := range memPct {
-				memPct[i] += share
+			// The accepting count is final now: every accepting member carries
+			// its equal slice of the group-name busy (HRW spreads group
+			// sessions across them). Guard the empty case: a group whose
+			// servable members are all offline/draining has no accepting
+			// member, so memPct is empty — the switch below reports it
+			// offline/draining, and dividing groupShare by 0 must be skipped.
+			if len(memPct) > 0 {
+				share := groupShare / float64(len(memPct))
+				for i := range memPct {
+					memPct[i] += share
+				}
 			}
 			if unknown {
 				limit = 0 // any-unset ⇒ unknown, same rule as the live view
