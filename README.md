@@ -103,7 +103,7 @@ flowchart LR
     subgraph SP2["Spoke 2 — Beth"]
         direction TB
         U2["👤 beth<br/>👤 jon"]
-        C2["📋 available models<br/>• Qwen3.8-flash-next<br/>• Qwen3.8-27b · pool<br/>• llama-70b"]
+        C2["📋 available models<br/>• Qwen3.8-flash-next<br/>• Qwen3.8-27b · pool<br/>• llama-70b<br/>• gemma-3-12b · local<br/>• phi-4 · local<br/>• deepseek-r1<br/>• mistral-large"]
         LC(["llama.cpp"])
         M2[("Qwen3.8-27b-Q4")]
         VLLM(["vllm"])
@@ -115,10 +115,20 @@ flowchart LR
         C2 ~~~ VLLM
     end
 
+    subgraph SP2G["laptop-gpu · remote server"]
+        direction TB
+        RLAP(["llama.cpp"])
+        M5[("gemma-3-12b<br/>not shared")]
+        M6[("phi-4<br/>not shared")]
+        RLAP --- M5
+        RLAP --- M6
+    end
+    SP2 <-->|"rb- token · WebSocket"| SP2G
+
     subgraph SP1["Spoke 1 — Alex"]
         direction TB
         U1["👤 alex<br/>👤 gina<br/>👤 hugo"]
-        C1["📋 available models<br/>• Qwen3.8-flash-next<br/>• Qwen3.8-27b · pool<br/>• llama-70b<br/>• cloud-model · local"]
+        C1["📋 available models<br/>• Qwen3.8-flash-next<br/>• Qwen3.8-27b · pool<br/>• llama-70b<br/>• cloud-model · local<br/>• deepseek-r1<br/>• mistral-large"]
         OLLA(["ollama"])
         M1[("Qwen3.8-27b-Q4")]
         CLOUD(["Cloud"])
@@ -133,7 +143,7 @@ flowchart LR
     subgraph HUB["Hub relay"]
         direction TB
         HU["👤 alex<br/>👤 beth<br/>👤 carl<br/>👤 dana<br/>👤 eli"]
-        CH["📋 available models<br/>• Qwen3.8-flash-next<br/>• Qwen3.8-27b · pool<br/>• llama-70b"]
+        CH["📋 available models<br/>• Qwen3.8-flash-next<br/>• Qwen3.8-27b · pool<br/>• llama-70b<br/>• deepseek-r1<br/>• mistral-large"]
         POOL{{"Qwen3.8-27b<br/>pool · group"}}
         HALO(["halogen-flash"])
         HMOD[("Qwen3.8-flash-next")]
@@ -142,6 +152,16 @@ flowchart LR
         POOL ~~~ HALO
         HU -.-> CH
     end
+
+    subgraph HUBG["cloud-gpu · remote server"]
+        direction TB
+        RCLO(["vllm"])
+        HREM1[("deepseek-r1")]
+        HREM2[("mistral-large")]
+        RCLO --- HREM1
+        RCLO --- HREM2
+    end
+    HUBG ==>|"rb- token · WebSocket"| HUB
 
     SP1 ==>|"fed- token · WebSocket"| HUB
     SP2 ==>|"fed- token · WebSocket"| HUB
@@ -152,15 +172,17 @@ flowchart LR
     style HUB fill:#eff6ff,stroke:#2563eb,stroke-width:2px
     style SP1 fill:#f0fdf4,stroke:#16a34a,stroke-width:2px
     style SP2 fill:#f0fdf4,stroke:#16a34a,stroke-width:2px
+    style SP2G fill:#fef2f2,stroke:#dc2626,stroke-width:2px
+    style HUBG fill:#fef2f2,stroke:#dc2626,stroke-width:2px
     classDef backend fill:#e2e8f0,stroke:#475569,color:#0f172a
     classDef model fill:#ffffff,stroke:#64748b,color:#0f172a
     classDef local fill:#f1f5f9,stroke:#94a3b8,stroke-dasharray:5 4,color:#64748b
     classDef pool fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#0f172a
     classDef cat fill:#faf5ff,stroke:#9333ea,stroke-width:2px,color:#0f172a,text-align:left
     classDef users fill:none,stroke:none,color:#0f172a,text-align:left
-    class HALO,OLLA,LC,VLLM,CLOUD backend
-    class HMOD,M1,M2,M3 model
-    class M4 local
+    class HALO,OLLA,LC,VLLM,CLOUD,RLAP,RCLO backend
+    class HMOD,M1,M2,M3,HREM1,HREM2 model
+    class M4,M5,M6 local
     class POOL pool
     class C1,C2,CH cat
     class HU,U1,U2 users
