@@ -393,6 +393,7 @@ func (s *Server) UpdateMe(w http.ResponseWriter, r *http.Request, c *auth.Claims
 		writeErr(w, http.StatusInternalServerError, "update failed")
 		return
 	}
+	s.audit(c, "user.self.update", user.Username, "display_name")
 	writeJSON(w, http.StatusOK, userView(user))
 }
 
@@ -432,6 +433,7 @@ func (s *Server) ChangePassword(w http.ResponseWriter, r *http.Request, c *auth.
 		writeErr(w, http.StatusInternalServerError, "password change failed")
 		return
 	}
+	s.audit(c, "user.self.password", s.actorName(c), "password changed")
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -278,6 +278,22 @@ immediately for the first batch; a larger backlog drains over the following
 daily passes. The database file keeps freed pages for reuse — the file does
 not shrink, it stops growing.
 
+## Audit log
+
+The admin **Audit log** page is an append-only trail of every state change:
+user account changes (create, update, self-edit, delete), settings and
+federation config changes, backend and model changes (including benchmarks
+and groups), peer server enrollment, and machine-channel events — spoke
+connects/disconnects and remote-backend connects/disconnects, logged with
+actor `system`. Each entry carries the time and the acting user's
+**username as a snapshot**: renaming or deleting an account cannot rewrite
+history (this is also why user deletion is safe for attribution). The API
+exposes read only (`GET /api/admin/audit`, filterable by category, actor
+and free text) — there is no modify or delete path anywhere, by design.
+User deletion (`DELETE /api/admin/users/{id}`, the Users page **Delete**
+button) removes the account and its API keys for good; usage history
+survives, and owners of federation servers must hand those off first.
+
 ## Abuse protection
 
 Rate limiting and concurrency caps are a **server-wide property**: every

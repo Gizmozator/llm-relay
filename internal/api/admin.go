@@ -76,6 +76,7 @@ func (s *Server) AdminCreateUser(w http.ResponseWriter, r *http.Request, c *auth
 		writeErr(w, http.StatusInternalServerError, "user create failed")
 		return
 	}
+	s.audit(c, "user.create", user.Username, "role="+user.Role)
 	writeJSON(w, http.StatusCreated, user)
 }
 
@@ -141,7 +142,60 @@ func (s *Server) AdminUpdateUser(w http.ResponseWriter, r *http.Request, c *auth
 		writeErr(w, http.StatusInternalServerError, "user update failed")
 		return
 	}
+	// Audit detail: which fields actually moved (never the password itself).
+	var changed []string
+	if in.Password != nil {
+		changed = append(changed, "password")
+	}
+	if in.Disabled != nil {
+		changed = append(changed, fmt.Sprintf("disabled=%v", *in.Disabled))
+	}
+	if in.Role != nil {
+		changed = append(changed, "role="+*in.Role)
+	}
+	if in.DisplayName != nil {
+		changed = append(changed, "display_name")
+	}
+	if in.PriceMultiplier != nil {
+		changed = append(changed, fmt.Sprintf("price_multiplier=%g", *in.PriceMultiplier))
+	}
+	s.audit(c, "user.update", user.Username, strings.Join(changed, " "))
 	writeJSON(w, http.StatusOK, user)
+}
+
+// AdminDeleteUser serves DELETE /api/admin/users/{id}: permanent removal
+// (the disable toggle stays the soft lever). Guards: nobody deletes their
+// own account (same lockout logic as self-demote), and the store refuses
+// deleting the last enabled admin or one who still owns federation
+// servers. Keys die with the account; usage history survives.
+func (s *Server) AdminDeleteUser(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	if id == c.UserID {
+		writeErr(w, http.StatusBadRequest, "you cannot delete your own account")
+		return
+	}
+	name := fmt.Sprintf("#%d", id)
+	if u, err := store.UserByID(s.DB, id); err == nil {
+		name = u.Username
+	}
+	err = store.DeleteUser(s.DB, id)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		writeErr(w, http.StatusNotFound, "user not found")
+	case errors.Is(err, store.ErrLastAdmin):
+		writeErr(w, http.StatusBadRequest, "this is the last enabled admin account")
+	case errors.Is(err, store.ErrUserHasPeers):
+		writeErr(w, http.StatusConflict, "user still owns federation servers - delete or reassign them first")
+	case err != nil:
+		writeErr(w, http.StatusInternalServerError, "user delete failed")
+	default:
+		s.audit(c, "user.delete", name, "account deleted")
+		w.WriteHeader(http.StatusNoContent)
+	}
 }
 
 // ---------------------------------------------------------------- backends
@@ -208,6 +262,7 @@ func (s *Server) AdminCreateBackend(w http.ResponseWriter, r *http.Request, c *a
 		writeErr(w, http.StatusInternalServerError, "backend create failed")
 		return
 	}
+	s.audit(c, "backend.create", b.Name, b.BaseURL)
 	writeJSON(w, http.StatusCreated, b)
 }
 
@@ -319,6 +374,26 @@ func (s *Server) AdminUpdateBackend(w http.ResponseWriter, r *http.Request, c *a
 	}
 	// Enabled state gates what the catalog shares (both roles push).
 	s.catalogChanged()
+	var changed []string
+	if in.Name != nil {
+		changed = append(changed, "name="+*in.Name)
+	}
+	if in.BaseURL != nil {
+		changed = append(changed, "base_url="+*in.BaseURL)
+	}
+	if in.APIKey != nil {
+		changed = append(changed, "api_key") // the fact only, never the key
+	}
+	if in.Enabled != nil {
+		changed = append(changed, fmt.Sprintf("enabled=%v", *in.Enabled))
+	}
+	if in.Draining != nil {
+		changed = append(changed, fmt.Sprintf("draining=%v", *in.Draining))
+	}
+	if in.OwnerUserID != nil {
+		changed = append(changed, fmt.Sprintf("owner=%d", *in.OwnerUserID))
+	}
+	s.audit(c, "backend.update", b.Name, strings.Join(changed, " "))
 	// Disabling a remote backend drops its live channel now: the token is
 	// dead the moment the row says so, and a connector generating on a
 	// disabled backend would only be refused downstream.
@@ -336,6 +411,10 @@ func (s *Server) AdminDeleteBackend(w http.ResponseWriter, r *http.Request, c *a
 		writeErr(w, http.StatusBadRequest, "bad id")
 		return
 	}
+	name := fmt.Sprintf("#%d", id)
+	if b, err := store.BackendByID(s.DB, id); err == nil {
+		name = b.Name
+	}
 	err = store.DeleteBackend(s.DB, id)
 	switch {
 	case err == store.ErrNotFound:
@@ -345,6 +424,7 @@ func (s *Server) AdminDeleteBackend(w http.ResponseWriter, r *http.Request, c *a
 	case err != nil:
 		writeErr(w, http.StatusInternalServerError, "backend delete failed")
 	default:
+		s.audit(c, "backend.delete", name, "")
 		if s.Remote != nil {
 			s.Remote.Kick(id, "backend deleted")
 		}
@@ -458,6 +538,8 @@ func (s *Server) AdminAddBackendModels(w http.ResponseWriter, r *http.Request, c
 		writeErr(w, http.StatusInternalServerError, "model create failed")
 		return
 	}
+	s.audit(c, "backend.models.add", fmt.Sprintf("#%d", id),
+		fmt.Sprintf("created=%d skipped=%d", len(created), len(skipped)))
 	s.catalogChanged()
 	writeJSON(w, http.StatusCreated, map[string]any{"created": created, "skipped": skipped})
 }
@@ -628,6 +710,38 @@ func (s *Server) AdminUpdateModel(w http.ResponseWriter, r *http.Request, c *aut
 	case err != nil:
 		writeErr(w, http.StatusInternalServerError, "model update failed")
 	default:
+		var changed []string
+		if in.Name != nil {
+			changed = append(changed, "name="+*in.Name)
+		}
+		if in.Enabled != nil {
+			changed = append(changed, fmt.Sprintf("enabled=%v", *in.Enabled))
+		}
+		if in.Visibility != nil {
+			changed = append(changed, "visibility="+*in.Visibility)
+		}
+		if in.FedVisibility != nil {
+			changed = append(changed, "fed_visibility="+*in.FedVisibility)
+		}
+		if in.FedUserIDs != nil {
+			changed = append(changed, fmt.Sprintf("fed_user_ids=%d", len(*in.FedUserIDs)))
+		}
+		if in.PriceIn != nil || in.PriceOut != nil || in.PriceCacheRead != nil || in.PriceCacheWrite != nil {
+			changed = append(changed, "prices")
+		}
+		if in.ContextLength != nil {
+			changed = append(changed, fmt.Sprintf("context_length=%d", *in.ContextLength))
+		}
+		if in.ConcurrencyLimit != nil {
+			changed = append(changed, fmt.Sprintf("concurrency_limit=%d", *in.ConcurrencyLimit))
+		}
+		if in.BusyThresholdPct != nil {
+			changed = append(changed, fmt.Sprintf("busy_threshold_pct=%d", *in.BusyThresholdPct))
+		}
+		if in.BenchTokPerS != nil || in.BenchPPTokPerS != nil {
+			changed = append(changed, "bench speeds")
+		}
+		s.audit(c, "model.update", m.Name, strings.Join(changed, " "))
 		s.catalogChanged()
 		writeJSON(w, http.StatusOK, m)
 	}
@@ -894,6 +1008,13 @@ func (s *Server) AdminBenchmarkModel(w http.ResponseWriter, r *http.Request, c *
 	// Bench numbers ride the federation catalog: peers advertising this
 	// model must see the fresh score, not the one from before the run.
 	s.catalogChanged()
+	s.audit(c, "model.benchmark", m.Name,
+		fmt.Sprintf("tg=%.1f tok/s pp=%s", tokPerS, func() string {
+			if ppTokPerS != nil {
+				return fmt.Sprintf("%.0f tok/s", *ppTokPerS)
+			}
+			return "failed"
+		}()))
 	res := map[string]any{
 		"bench_tok_per_s":   tokPerS,
 		"completion_tokens": tg.completion,
@@ -929,6 +1050,10 @@ func (s *Server) AdminDeleteModel(w http.ResponseWriter, r *http.Request, c *aut
 		writeErr(w, http.StatusBadRequest, "cannot delete a federated model - remove the peer that shares it")
 		return
 	}
+	name := fmt.Sprintf("#%d", id)
+	if m, err := store.ModelByID(s.DB, id); err == nil {
+		name = m.Name
+	}
 	if err := store.DeleteModel(s.DB, id); err == store.ErrNotFound {
 		writeErr(w, http.StatusNotFound, "model not found")
 		return
@@ -936,6 +1061,7 @@ func (s *Server) AdminDeleteModel(w http.ResponseWriter, r *http.Request, c *aut
 		writeErr(w, http.StatusInternalServerError, "model delete failed")
 		return
 	}
+	s.audit(c, "model.delete", name, "")
 	s.catalogChanged()
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -1046,6 +1172,7 @@ func (s *Server) AdminCreateGroup(w http.ResponseWriter, r *http.Request, c *aut
 	// CreateGroup already re-reads the row; a born-empty group provably has
 	// no members, so no second fetch (GetGroup would add a query + join
 	// that can only return empty).
+	s.audit(c, "group.create", g.Name, "")
 	s.catalogChanged()
 	writeJSON(w, http.StatusCreated, groupViewOf(g, nil))
 }
@@ -1170,6 +1297,17 @@ func (s *Server) AdminUpdateGroup(w http.ResponseWriter, r *http.Request, c *aut
 		writeGroupErr(w, err, "group update failed")
 		return
 	}
+	var changed []string
+	if in.Name != nil {
+		changed = append(changed, "name="+*in.Name)
+	}
+	if in.Enabled != nil {
+		changed = append(changed, fmt.Sprintf("enabled=%v", *in.Enabled))
+	}
+	if in.Members != nil {
+		changed = append(changed, fmt.Sprintf("members=%d", len(members)))
+	}
+	s.audit(c, "group.update", fmt.Sprintf("#%d", id), strings.Join(changed, " "))
 	// The write is durable from here on: announce it before the read-back,
 	// so a read-back failure cannot swallow the catalog change (peers must
 	// learn the new group state even when the echo fails).
@@ -1196,6 +1334,7 @@ func (s *Server) AdminDeleteGroup(w http.ResponseWriter, r *http.Request, c *aut
 		writeGroupErr(w, err, "group delete failed")
 		return
 	}
+	s.audit(c, "group.delete", fmt.Sprintf("#%d", id), "")
 	s.catalogChanged()
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -1295,5 +1434,7 @@ func (s *Server) AdminPutSettings(w http.ResponseWriter, r *http.Request, c *aut
 		}
 		warn = *in.VersionWarn
 	}
+	s.audit(c, "settings.update", "instance",
+		fmt.Sprintf("currency=%s retention_days=%d version_warn=%v", cur, days, warn))
 	writeJSON(w, http.StatusOK, settingsView{Currency: cur, RetentionDays: days, VersionWarn: warn})
 }

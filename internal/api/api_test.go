@@ -53,6 +53,8 @@ func newTestEnv(t *testing.T, upstream http.Handler) *testEnv {
 	mux := http.NewServeMux()
 	mux.Handle("POST /api/auth/login", s.RateLimitLogin(s.Login))
 	mux.Handle("GET /api/version", s.Auth(s.ServeVersion))
+	mux.Handle("GET /api/admin/audit", s.Admin(s.AdminGetAudit))
+	mux.Handle("DELETE /api/admin/users/{id}", s.Admin(s.AdminDeleteUser))
 	mux.Handle("GET /api/me", s.Auth(s.Me))
 	mux.Handle("PATCH /api/me", s.Auth(s.UpdateMe))
 	mux.Handle("POST /api/auth/change_password", s.Auth(s.ChangePassword))

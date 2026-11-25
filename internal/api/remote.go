@@ -8,6 +8,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -118,6 +119,7 @@ func (s *Server) AdminCreateRemoteBackend(w http.ResponseWriter, r *http.Request
 	case err != nil:
 		writeErr(w, http.StatusInternalServerError, "backend create failed")
 	default:
+		s.audit(c, "backend.remote.create", b.Name, "")
 		writeJSON(w, http.StatusCreated, map[string]any{"backend": b, "token": token})
 	}
 }
@@ -140,6 +142,7 @@ func (s *Server) AdminRotateRemoteToken(w http.ResponseWriter, r *http.Request, 
 	case err != nil:
 		writeErr(w, http.StatusInternalServerError, "token rotate failed")
 	default:
+		s.audit(c, "backend.remote.rotate", fmt.Sprintf("#%d", id), "")
 		if s.Remote != nil {
 			s.Remote.Kick(id, "token rotated")
 		}

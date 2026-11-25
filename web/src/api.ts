@@ -290,6 +290,24 @@ export interface VersionWarn {
   state: 'older' | 'newer' | 'same' | 'unknown';
 }
 
+/** GET /api/admin/audit — one append-only trail row
+ *  (plan 2026-11-25-audit-log-v1). actor is a username snapshot. */
+export interface AuditEntry {
+  id: number;
+  ts: string;
+  actor: string;
+  action: string;
+  target: string;
+  detail: string;
+}
+
+export interface AuditPage {
+  entries: AuditEntry[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
 /** GET /api/version (session auth, any user): this build's stamp plus the
  *  outdated verdict driving the red banner for all users. */
 export interface VersionInfo {
@@ -729,6 +747,7 @@ export const api = {
       price_multiplier?: number;
     },
   ) => request<AdminUser>('PATCH', `/api/admin/users/${id}`, { body: patch }),
+  deleteUser: (id: number) => request<void>('DELETE', `/api/admin/users/${id}`),
 
   // admin — backends
   backends: () => request<{ backends: Backend[] }>('GET', '/api/admin/backends'),
@@ -791,6 +810,10 @@ export const api = {
 
   // build version (session auth, any user) — topbar chip + red banner
   version: () => request<VersionInfo>('GET', '/api/version'),
+
+  // admin — audit log (read-only: there is no write/modify/delete API)
+  audit: (q: { category?: string; actor?: string; q?: string; page?: number; page_size?: number }) =>
+    request<AuditPage>('GET', '/api/admin/audit', { query: q }),
 
   // admin — instance TLS certificate (plan 2026-11-24-remote-tls-v1). The
   // private key never comes back to the client; generate returns the cert

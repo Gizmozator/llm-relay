@@ -6,6 +6,7 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -190,6 +191,7 @@ func (s *Server) CreatePeer(w http.ResponseWriter, r *http.Request, c *auth.Clai
 		writeErr(w, http.StatusInternalServerError, "peer create failed")
 		return
 	}
+	s.audit(c, "peer.create", p.Name, "owner="+s.actorName(c))
 	writeJSON(w, http.StatusCreated, map[string]any{"peer": p, "token": plain})
 }
 
@@ -229,6 +231,7 @@ func (s *Server) RotateMyPeer(w http.ResponseWriter, r *http.Request, c *auth.Cl
 		writeErr(w, http.StatusInternalServerError, "peer rotate failed")
 		return
 	}
+	s.audit(c, "peer.rotate", fmt.Sprintf("#%d", id), "own server")
 	// The old token is dead: the live channel rides it, so it dies too.
 	// A spoke reconnects with the new token once its config is updated.
 	s.kickPeer(id, "rotated")
@@ -254,6 +257,7 @@ func (s *Server) DeleteMyPeer(w http.ResponseWriter, r *http.Request, c *auth.Cl
 		writeErr(w, http.StatusInternalServerError, "peer delete failed")
 		return
 	}
+	s.audit(c, "peer.delete", fmt.Sprintf("#%d", id), "own server")
 	s.kickPeer(id, "deleted")
 	s.peerRemoved(id)
 	w.WriteHeader(http.StatusNoContent)
@@ -295,6 +299,7 @@ func (s *Server) AdminRotatePeer(w http.ResponseWriter, r *http.Request, c *auth
 		writeErr(w, http.StatusInternalServerError, "peer rotate failed")
 		return
 	}
+	s.audit(c, "peer.rotate", fmt.Sprintf("#%d", id), "admin")
 	s.kickPeer(id, "rotated")
 	writeJSON(w, http.StatusOK, map[string]any{"token": plain})
 }
@@ -332,6 +337,7 @@ func (s *Server) AdminUpdatePeer(w http.ResponseWriter, r *http.Request, c *auth
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	s.audit(c, "peer.update", p.Name, fmt.Sprintf("enabled=%v", *in.Enabled))
 	writeJSON(w, http.StatusOK, p)
 }
 
@@ -351,6 +357,7 @@ func (s *Server) AdminDeletePeer(w http.ResponseWriter, r *http.Request, c *auth
 		writeErr(w, http.StatusInternalServerError, "peer delete failed")
 		return
 	}
+	s.audit(c, "peer.delete", fmt.Sprintf("#%d", id), "admin")
 	s.kickPeer(id, "deleted")
 	s.peerRemoved(id)
 	w.WriteHeader(http.StatusNoContent)
@@ -436,6 +443,9 @@ func (s *Server) AdminPutFederation(w http.ResponseWriter, r *http.Request, c *a
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	// The token never enters the audit trail — role and hub address only.
+	s.audit(c, "federation.update", "instance",
+		fmt.Sprintf("role=%s hub_url=%s", f.Role, f.HubURL))
 	writeJSON(w, http.StatusOK, f)
 }
 

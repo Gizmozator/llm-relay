@@ -234,6 +234,9 @@ func (r *Registry) ServeConn(w http.ResponseWriter, req *http.Request, b *store.
 	e := &entry{conn: conn, backendID: b.ID, name: b.Name, version: ver, connectedAt: time.Now()}
 	r.register(e)
 	log.Printf("remote: backend %q (#%d) connected (client %s)", b.Name, b.ID, orUnknown(ver))
+	if err := store.InsertAudit(r.db, store.AuditSystem, "remote.backend.connect", b.Name, "version="+orUnknown(ver)); err != nil {
+		log.Printf("AUDIT: remote.backend.connect: %v", err)
+	}
 	// Version awareness (plan 2026-11-25-version-awareness): a backend
 	// newer than this relay means THIS server is the old one (error line;
 	// the dashboard shows the red banner). An older backend is a note for
@@ -251,6 +254,9 @@ func (r *Registry) ServeConn(w http.ResponseWriter, req *http.Request, b *store.
 		conn.Serve(context.Background())
 		if r.unregister(b.ID, conn) {
 			log.Printf("remote: backend %q (#%d) disconnected", b.Name, b.ID)
+			if err := store.InsertAudit(r.db, store.AuditSystem, "remote.backend.disconnect", b.Name, ""); err != nil {
+				log.Printf("AUDIT: remote.backend.disconnect: %v", err)
+			}
 		}
 	}()
 }

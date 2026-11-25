@@ -5,7 +5,7 @@ import type { Role, User } from '../api';
 import { fmtDateTime } from '../format';
 import { useLoad } from '../useLoad';
 import { useToast } from '../components/Toast';
-import { Banner, EditableNumber, EditableText, Empty, Field, Loading, Modal } from '../components/ui';
+import { Banner, ConfirmButton, EditableNumber, EditableText, Empty, Field, Loading, Modal } from '../components/ui';
 import { useAuth } from '../auth';
 
 export default function UsersPage() {
@@ -56,6 +56,22 @@ export default function UsersPage() {
     } catch (e: unknown) {
       toast.push('error', errMsg(e));
       return false;
+    }
+  };
+
+  // Permanent removal (the Disable toggle stays the soft lever). The
+  // server refuses self-deletion, the last enabled admin, and owners of
+  // federation servers — those surface as toasts, not silent failures.
+  const remove = async (u: User) => {
+    setPending((p) => ({ ...p, [`del-${u.id}`]: true }));
+    try {
+      await api.deleteUser(u.id);
+      toast.push('success', `User “${u.username}” deleted.`);
+      users.reload();
+    } catch (e: unknown) {
+      toast.push('error', errMsg(e));
+    } finally {
+      setPending((p) => ({ ...p, [`del-${u.id}`]: false }));
     }
   };
 
@@ -214,6 +230,13 @@ export default function UsersPage() {
                                 ? u.disabled ? 'Enabling…' : 'Disabling…'
                                 : u.disabled ? 'Enable' : 'Disable'}
                             </button>
+                          )}
+                          {!isSelf && (
+                            <ConfirmButton
+                              label={pending[`del-${u.id}`] ? 'Deleting…' : 'Delete'}
+                              disabled={Boolean(pending[`del-${u.id}`])}
+                              onConfirm={() => remove(u)}
+                            />
                           )}
                         </td>
                       </tr>

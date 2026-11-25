@@ -71,6 +71,11 @@ export default function Layout() {
           <NavLink to="/" end className={navClass}>
             Dashboard
           </NavLink>
+          {/* Models sits right after Dashboard: it is the page users visit
+              most (what can I run, what does it cost). */}
+          <NavLink to="/models" className={navClass}>
+            Models
+          </NavLink>
           <NavLink to="/usage" className={navClass}>
             My usage
           </NavLink>
@@ -90,9 +95,6 @@ export default function Layout() {
               Connect server
             </NavLink>
           )}
-          <NavLink to="/models" className={navClass}>
-            Models
-          </NavLink>
           {isAdmin && <div className="nav-group">Admin</div>}
           {isAdmin && (
             <>
@@ -113,6 +115,9 @@ export default function Layout() {
               </NavLink>
               <NavLink to="/admin/settings" className={navClass}>
                 Settings
+              </NavLink>
+              <NavLink to="/admin/audit" className={navClass}>
+                Audit log
               </NavLink>
             </>
           )}

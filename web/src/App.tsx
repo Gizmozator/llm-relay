@@ -13,6 +13,7 @@ import SetupGuidePage from './pages/SetupGuide';
 import BackendsPage from './pages/Backends';
 import ModelsPage from './pages/Models';
 import AdminModelsPage from './pages/AdminModels';
+import AdminAuditPage from './pages/AdminAudit';
 import AdminFederationPage from './pages/AdminFederation';
 import UsersPage from './pages/Users';
 import SettingsPage from './pages/Settings';
@@ -88,6 +89,14 @@ export default function App() {
                 element={
                   <RequireAdmin>
                     <SettingsPage />
+                  </RequireAdmin>
+                }
+              />
+              <Route
+                path="admin/audit"
+                element={
+                  <RequireAdmin>
+                    <AdminAuditPage />
                   </RequireAdmin>
                 }
               />

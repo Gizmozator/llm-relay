@@ -84,6 +84,7 @@ func (s *Server) AdminGenerateTLS(w http.ResponseWriter, r *http.Request, c *aut
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	s.audit(c, "tls.generate", strings.Join(cert.SANs, ","), "expires="+cert.NotAfter)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"tls":      viewFromRow(row),
 		"cert_pem": cert.CertPEM, // shown once: for optional external-proxy install
@@ -97,6 +98,7 @@ func (s *Server) AdminDeleteTLS(w http.ResponseWriter, r *http.Request, c *auth.
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	s.audit(c, "tls.delete", "instance", "machine-channel certificate removed")
 	writeJSON(w, http.StatusOK, tlsView{})
 }
 

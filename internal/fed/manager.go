@@ -321,6 +321,9 @@ func (m *Manager) setSpokeConn(c *Conn, hubName, hubVersion string) {
 	case version.Older:
 		m.opts.Log.Printf("fed: hub %q runs %s, older than this server (%s)", hubName, hubVersion, m.opts.Version)
 	}
+	if err := store.InsertAudit(m.db, store.AuditSystem, "fed.hub.connect", hubName, "version="+hubVersion); err != nil {
+		m.opts.Log.Printf("AUDIT: fed.hub.connect: %v", err)
+	}
 }
 
 // VersionWarnings reports the version mismatches on this instance's live
@@ -355,6 +358,10 @@ func (m *Manager) clearSpokeConn(c *Conn) {
 		}
 		if m.spoke.CompareAndSwap(cur, nil) {
 			m.spokeID.Store(nil)
+			// Audit: the channel died (the dialer reconnects with backoff).
+			if err := store.InsertAudit(m.db, store.AuditSystem, "fed.hub.disconnect", "hub", ""); err != nil {
+				m.opts.Log.Printf("AUDIT: fed.hub.disconnect: %v", err)
+			}
 			return
 		}
 	}
@@ -409,6 +416,22 @@ func (m *Manager) runPeerEvents() {
 	for ev := range m.events {
 		if m.currentRole() != store.FedRoleHub {
 			continue // role moved while the event was queued
+		}
+		// Audit trail (plan 2026-11-25-audit-log-v1): machine-channel
+		// events carry actor=system; the version rides the connect line.
+		action, ver := "fed.peer.disconnect", ""
+		if ev.online {
+			action = "fed.peer.connect"
+			for _, p := range m.hub.Peers() {
+				if p.PeerID == ev.peerID {
+					ver = p.Version
+				}
+			}
+		}
+		if name, err := store.PeerByID(m.db, ev.peerID); err == nil {
+			if err := store.InsertAudit(m.db, store.AuditSystem, action, name.Name, "version="+ver); err != nil {
+				m.opts.Log.Printf("AUDIT: %s: %v", action, err)
+			}
 		}
 		m.mat.setPeerOnline(ev.peerID, ev.online)
 		if !ev.online {

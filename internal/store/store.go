@@ -216,6 +216,71 @@ func UserCount(db *sql.DB) (int, error) {
 	return n, err
 }
 
+// ErrUserHasPeers blocks deleting an account that still owns federation
+// servers: the peer rows carry no other owner, and silently orphaning
+// hardware ownership would break the fairness ledger. The admin must
+// delete (or reassign) the servers first.
+var ErrUserHasPeers = errors.New("user still owns federation servers")
+
+// DeleteUser removes an account for good. Guarded like UpdateUser's
+// demote path: the last enabled admin cannot be deleted (checked inside
+// the write transaction, no TOCTOU). What happens to the rows that point
+// at the user:
+//
+//   - api_keys: deleted with the account (the keys die with their owner);
+//   - fed_allowlist: FK ON DELETE CASCADE drops the share entries;
+//   - backends.owner_user_id: cleared — the backend stays, fairness
+//     ownership becomes unowned;
+//   - usage_log: user_id has no FK by design — the history rows survive
+//     with a dangling id (the Usage page shows them as an unknown user);
+//   - peers: NOT NULL owner with no cascade — deletion is refused with
+//     ErrUserHasPeers instead.
+//
+// The audit trail keeps the username snapshot of every past act, so a
+// deleted account's history stays attributed (plan 2026-11-25-audit-log-v1).
+func DeleteUser(db *sql.DB, id int64) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var role string
+	var disabled int
+	err = tx.QueryRow(`SELECT role, disabled FROM users WHERE id=?`, id).Scan(&role, &disabled)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if role == "admin" && disabled == 0 {
+		var others int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM users WHERE role='admin' AND disabled=0 AND id<>?`, id).Scan(&others); err != nil {
+			return err
+		}
+		if others == 0 {
+			return ErrLastAdmin
+		}
+	}
+	var peers int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM peers WHERE owner_user_id=?`, id).Scan(&peers); err != nil {
+		return err
+	}
+	if peers > 0 {
+		return ErrUserHasPeers
+	}
+	if _, err := tx.Exec(`DELETE FROM api_keys WHERE user_id=?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE backends SET owner_user_id=NULL WHERE owner_user_id=?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM users WHERE id=?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // ---------------------------------------------------------------- api keys
 
 type APIKey struct {
