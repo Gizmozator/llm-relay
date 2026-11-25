@@ -61,6 +61,8 @@ func newTestEnv(t *testing.T, upstream http.Handler) *testEnv {
 	mux.Handle("GET /api/usage/summary", s.Auth(s.UsageSummary))
 	mux.Handle("GET /api/usage/detail", s.Auth(s.UsageDetail))
 	mux.Handle("GET /api/admin/usage/summary", s.Admin(s.UsageSummary))
+	mux.Handle("GET /api/admin/settings", s.Admin(s.AdminGetSettings))
+	mux.Handle("PUT /api/admin/settings", s.Admin(s.AdminPutSettings))
 	mux.Handle("GET /api/admin/users", s.Admin(s.AdminListUsers))
 	mux.Handle("PATCH /api/admin/users/{id}", s.Admin(s.AdminUpdateUser))
 	mux.Handle("PATCH /api/admin/models/{id}", s.Admin(s.AdminUpdateModel))

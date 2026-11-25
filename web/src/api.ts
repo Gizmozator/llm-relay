@@ -272,6 +272,9 @@ export interface PublicModel {
 
 export interface Settings {
   currency: string;
+  /** usage_log retention window in days; 0 = keep forever (plan
+   *  2026-11-25-usage-retention-v1). */
+  retention_days: number;
 }
 
 // ---------- federation ----------
@@ -748,8 +751,10 @@ export const api = {
 
   // admin — settings
   settings: () => request<Settings>('GET', '/api/admin/settings'),
-  putSettings: (currency: string) =>
-    request<Settings>('PUT', '/api/admin/settings', { body: { currency } }),
+  putSettings: (currency: string, retentionDays?: number) =>
+    request<Settings>('PUT', '/api/admin/settings', {
+      body: { currency, retention_days: retentionDays },
+    }),
 
   // admin — instance TLS certificate (plan 2026-11-24-remote-tls-v1). The
   // private key never comes back to the client; generate returns the cert

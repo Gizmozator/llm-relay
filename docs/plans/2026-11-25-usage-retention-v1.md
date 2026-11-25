@@ -1,6 +1,6 @@
 # Plan: Usage data retention — bounded usage_log with an admin setting
 
-- **Status:** draft
+- **Status:** complete
 - **Owner:** maintainer
 - **Started:** 2026-11-25
 - **Issue:** — (operator request; companion to the "keep SQLite" decision)
@@ -43,27 +43,30 @@ background jobs exist in the relay process today; startup is
   own short transaction: a single big DELETE would hold the write lock for
   seconds and starve the 4-slot pool (the 504 lesson). Returns the deleted
   row count (logged).
-- **Schedule**: a goroutine started at boot — purge once shortly after
-  startup, then every 24 h; reads the setting fresh each run, so a setting
-  change takes effect at the next daily pass. A settings PUT that lowers
-  retention also fires one async purge pass (immediate feedback).
+- **Schedule**: `retentionLoop` (cmd) started at boot — purge once shortly
+  after startup, then every 24 h; reads the setting fresh each run, so a
+  setting change takes effect at the next daily pass. A settings PUT that
+  carries `retention_days` also runs a **bounded synchronous purge**
+  (20 batches): lowering the window shows its effect immediately, while a
+  huge backlog is left to the daily loop instead of hanging the request.
 - **UI**: Settings page gains a "Usage data retention" select: Keep
   forever (default) / 30 / 90 / 180 / 365 / 730 days, saved with the
   existing save flow.
 
 ## Tasks
 
-- [ ] `store`: `PurgeOldUsage` (batched), setting constant + validation
-  helper.
-- [ ] `api`: settings pair carries `retention_days`; async purge on
-  lowering PUT.
-- [ ] `cmd`: daily purge goroutine (startup + 24 h ticker), context-
-  cancellable with shutdown.
-- [ ] Tests: store (cutoff math, batching >1000 rows, forever = no-op,
-  boundary ts == cutoff kept), api (settings round-trip, validation,
-  purge-on-put).
-- [ ] Docs: README settings paragraph, `docs/api-contract.md` settings
-  pair, this plan.
+- [x] `store`: `PurgeOldUsage` (batched, capped), `RetentionDays`/
+  `SetRetentionDays` + validation, `RetentionCutoff`, `PurgeByRetention`.
+- [x] `api`: settings pair carries `retention_days`; bounded synchronous
+  purge on a PUT that sets it.
+- [x] `cmd`: `retentionLoop` (startup pass + 24 h ticker), cancelled with
+  the signal context.
+- [x] Tests: store (setting round-trip, junk reads as forever, cutoff
+  math, strict `<` boundary, batching >1000 rows + cap + backlog flag,
+  forever no-op), api (settings round-trip, currency-only PUT keeps the
+  window, validation bounds, purge-on-put).
+- [x] Docs: README "Data retention" section, `docs/api-contract.md`
+  settings pair, this plan.
 
 ## Verification
 
@@ -93,3 +96,8 @@ background jobs exist in the relay process today; startup is
 ## Changelog
 
 - 2026-11-25: plan written (queued behind the fairness-ledger ship).
+- 2026-11-25: implemented (store purge + setting, settings pair, daily
+  loop, Settings-page select, tests, docs). The PUT purge is a bounded
+  synchronous pass (20 batches) rather than the async pass first sketched
+  — deterministic for tests and gives the operator immediate feedback.
+  Reviewer gate: see commit. Deployed with the next `:latest` image.

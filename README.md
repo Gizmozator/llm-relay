@@ -248,6 +248,19 @@ whatever it always did; only the two connect endpoints are gated. The cert
 lives in the database (single row), its private key plaintext-at-rest like every
 other secret there — the file's permissions are the boundary.
 
+## Data retention
+
+`usage_log` is the only table that grows without bound. The admin **Settings**
+page has a **Usage data retention** control: keep forever (the default —
+upgrading never deletes history silently) or a window of 30 to 730 days.
+Rows older than the window are deleted by a background pass at startup and
+once a day, in small batches so each delete stays a short transaction (a
+single big `DELETE` would stall the write path on the small deployment
+this relay targets). Lowering the window on the Settings page applies
+immediately for the first batch; a larger backlog drains over the following
+daily passes. The database file keeps freed pages for reuse — the file does
+not shrink, it stops growing.
+
 ## Abuse protection
 
 Rate limiting and concurrency caps are a **server-wide property**: every

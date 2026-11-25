@@ -362,6 +362,13 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Usage retention (plan 2026-11-25-usage-retention-v1): one purge pass
+	// at startup, then daily. The setting is re-read every pass, so changes
+	// take effect without a restart (a lowering is also applied immediately
+	// by the settings PUT itself).
+	go retentionLoop(ctx, d)
+
 	var fatal error
 	select {
 	case <-ctx.Done():
@@ -382,6 +389,29 @@ func main() {
 	log.Println("bye")
 	if fatal != nil {
 		os.Exit(1)
+	}
+}
+
+// retentionLoop enforces the usage retention setting (plan
+// 2026-11-25-usage-retention-v1): one purge pass at startup, then one
+// every 24 h until shutdown. The drain is uncapped here — each batch is
+// its own short transaction, so even a big backlog never starves the
+// write path for long.
+func retentionLoop(ctx context.Context, d *sql.DB) {
+	for {
+		n, _, err := store.PurgeByRetention(d, 0)
+		if err != nil {
+			log.Printf("retention: purge failed: %v", err)
+		} else if n > 0 {
+			log.Printf("retention: purged %d usage rows", n)
+		}
+		timer := time.NewTimer(24 * time.Hour)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
 	}
 }
 

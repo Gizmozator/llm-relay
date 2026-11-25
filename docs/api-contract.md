@@ -78,8 +78,15 @@ A group pools several catalog model rows (typically the same model on different 
 - `DELETE /api/admin/groups/{id}` → `204` (members are released, not deleted)
 
 ### Admin — settings
-- `GET /api/admin/settings` → `{"currency":"EUR"}`
-- `PUT /api/admin/settings` — `{"currency":"USD"}` → same shape
+- `GET /api/admin/settings` → `{"currency":"EUR","retention_days":0}` —
+  `retention_days` is the `usage_log` retention window in days, `0` = keep
+  forever (plan 2026-11-25-usage-retention-v1; the default).
+- `PUT /api/admin/settings` — `{"currency":"USD"}` → same shape.
+  `retention_days` is optional (absent = unchanged; `0` or `30..3650`,
+  anything else → `400`). When present it is stored and a bounded purge runs
+  in the request: rows older than the new cutoff go immediately, a larger
+  backlog is left to the daily pass (a startup + 24 h loop enforces the
+  setting with batched short-transaction deletes).
 
 ### Federation (plan 2026-11-22-relay-federation, task 1)
 Instance role + spoke config, and the peer registry (server tokens a spoke

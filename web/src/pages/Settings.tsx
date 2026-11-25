@@ -11,10 +11,14 @@ export default function SettingsPage() {
   const settings = useLoad(() => api.settings(), []);
   const info = useLoad(() => api.info(), []);
   const [currency, setCurrency] = useState<string | null>(null);
+  const [retention, setRetention] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
 
   const current = currency ?? settings.data?.currency ?? '';
-  const dirty = currency !== null && currency !== (settings.data?.currency ?? '');
+  const currentRetention = retention ?? settings.data?.retention_days ?? 0;
+  const dirty =
+    (currency !== null && currency !== (settings.data?.currency ?? '')) ||
+    (retention !== null && retention !== (settings.data?.retention_days ?? 0));
 
   const save = async (e: FormEvent) => {
     e.preventDefault();
@@ -25,9 +29,10 @@ export default function SettingsPage() {
     }
     setBusy(true);
     try {
-      await api.putSettings(code);
-      toast.push('success', `Currency set to ${code}.`);
+      await api.putSettings(code, currentRetention);
+      toast.push('success', 'Settings saved.');
       setCurrency(null);
+      setRetention(null);
       settings.reload();
     } catch (err: unknown) {
       toast.push('error', errMsg(err));
@@ -57,6 +62,25 @@ export default function SettingsPage() {
                 onChange={(e) => setCurrency(e.target.value.toUpperCase())}
               />
             </Field>
+            <Field label="Usage data retention">
+              <select
+                className="input"
+                value={currentRetention}
+                onChange={(e) => setRetention(Number(e.target.value))}
+              >
+                <option value={0}>Keep forever (default)</option>
+                <option value={30}>30 days</option>
+                <option value={90}>90 days</option>
+                <option value={180}>180 days</option>
+                <option value={365}>365 days</option>
+                <option value={730}>730 days</option>
+              </select>
+            </Field>
+            <p className="dim">
+              Usage rows older than the retention window are deleted once a day (and
+              right after you lower it here). Keep forever never deletes anything; the
+              database file keeps the space freed by purged rows for reuse.
+            </p>
             <div>
               <button className="btn primary" type="submit" disabled={busy || !dirty}>
                 {busy ? 'Saving…' : 'Save'}

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math/rand"
 	"net/http"
 	"regexp"
@@ -1201,6 +1202,14 @@ func (s *Server) AdminDeleteGroup(w http.ResponseWriter, r *http.Request, c *aut
 
 var currencyRe = regexp.MustCompile(`^[A-Za-z]{2,5}$`)
 
+// settingsView is the GET/PUT payload of the settings pair.
+// RetentionDays is the usage_log retention window in days
+// (plan 2026-11-25-usage-retention-v1); 0 keeps rows forever.
+type settingsView struct {
+	Currency      string `json:"currency"`
+	RetentionDays int    `json:"retention_days"`
+}
+
 func (s *Server) AdminGetSettings(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
 	cur, err := store.GetSetting(s.DB, "currency")
 	if errors.Is(err, store.ErrNotFound) {
@@ -1209,20 +1218,60 @@ func (s *Server) AdminGetSettings(w http.ResponseWriter, r *http.Request, c *aut
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"currency": cur})
+	days, err := store.RetentionDays(s.DB)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, settingsView{Currency: cur, RetentionDays: days})
 }
+
+// settingsPurgeCap bounds the synchronous purge a settings PUT may run
+// (batched deletes of 1000 rows each): lowering retention gives immediate
+// feedback, but a huge backlog is left to the daily loop instead of
+// hanging the request.
+const settingsPurgeCap = 20
 
 func (s *Server) AdminPutSettings(w http.ResponseWriter, r *http.Request, c *auth.Claims) {
 	var in struct {
 		Currency string `json:"currency"`
+		// RetentionDays is optional: absent leaves the setting alone.
+		RetentionDays *int `json:"retention_days"`
 	}
 	if err := decode(r, &in); err != nil || !currencyRe.MatchString(in.Currency) {
 		writeErr(w, http.StatusBadRequest, "currency must be a 2-5 letter code")
 		return
 	}
-	if err := store.SetSetting(s.DB, "currency", strings.ToUpper(in.Currency)); err != nil {
+	if in.RetentionDays != nil && !store.ValidRetentionDays(*in.RetentionDays) {
+		writeErr(w, http.StatusBadRequest, "retention_days must be 0 (forever) or 30..3650")
+		return
+	}
+	cur := strings.ToUpper(in.Currency)
+	if err := store.SetSetting(s.DB, "currency", cur); err != nil {
 		writeErr(w, http.StatusInternalServerError, "settings update failed")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"currency": strings.ToUpper(in.Currency)})
+	days, err := store.RetentionDays(s.DB)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "settings update failed")
+		return
+	}
+	if in.RetentionDays != nil {
+		if err := store.SetRetentionDays(s.DB, *in.RetentionDays); err != nil {
+			writeErr(w, http.StatusInternalServerError, "settings update failed")
+			return
+		}
+		days = *in.RetentionDays
+		// Apply immediately (bounded): the operator lowered the window and
+		// expects old rows to go now, not at the next daily pass.
+		if n, more, perr := store.PurgeByRetention(s.DB, settingsPurgeCap); perr != nil {
+			log.Printf("retention: purge after settings change failed: %v", perr)
+		} else if n > 0 {
+			log.Printf("retention: purged %d usage rows after settings change", n)
+			if more {
+				log.Printf("retention: backlog remains, the daily pass will continue")
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, settingsView{Currency: cur, RetentionDays: days})
 }
